@@ -373,7 +373,7 @@ describe("long-running Pi Magic Context session", () => {
                         .get(sessionId) as { n: number } | null;
                     return (row?.n ?? 0) > 0;
                 },
-                { timeoutMs: 30_000, label: "Pi historian compartment published" },
+                { timeoutMs: 300_000, label: "Pi historian compartment published" },
             );
             const compartment = h
                 .contextDb()
@@ -385,7 +385,7 @@ describe("long-running Pi Magic Context session", () => {
             const compactions = await h.waitFor(() => {
                 const entries = readCompactionEntries(h);
                 return entries.length > 0 ? entries : null;
-            }, { timeoutMs: 30_000, label: "Pi native compaction entry written" });
+            }, { timeoutMs: 300_000, label: "Pi native compaction entry written" });
             expect(compactions.at(-1)?.fromHook).toBe(true);
             expect(readMeta<{ pending_compaction_marker_state: string | null }>(h, sessionId, "pending_compaction_marker_state")?.pending_compaction_marker_state ?? null).toBeNull();
 

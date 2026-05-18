@@ -145,7 +145,7 @@ describe("pi historian success path", () => {
                 // Bumped from 30s → 90s for CI: Pi historian publishes via
                 // pi --print subprocess + HTTP mock provider; slower on shared
                 // runners.
-                { timeoutMs: 90_000, label: "pi compartment row appears" },
+                { timeoutMs: 300_000, label: "pi compartment row appears" },
             );
 
             const compartmentCount = (
@@ -172,7 +172,7 @@ describe("pi historian success path", () => {
             );
             expect(meta?.compartment_in_progress ?? 1).toBe(0);
         },
-        // Bumped from 120s → 300s for CI.
-        300_000,
+        // Bumped from 120s → 600s for CI to give the bumped waitFor headroom.
+        600_000,
     );
 });

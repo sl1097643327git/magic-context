@@ -162,11 +162,13 @@ function writeConfigs(
  * Wait until the opencode server responds to GET /doc (an endpoint that exists in
  * OpenCode's server). Polls for up to `timeoutMs`.
  */
-// Default bumped from 30s → 120s. GitHub-hosted runners can take much longer
-// than 30s for `opencode serve` to bind its port + finish plugin init under
-// cold-start + CPU contention. Local hardware finishes in <2s, so this only
-// affects CI scenarios where the spawn would otherwise spuriously fail.
-async function waitForReady(url: string, timeoutMs = 120_000): Promise<void> {
+// Default bumped from 30s → 300s. GitHub-hosted runners can take much longer
+// than 30s for `opencode serve` to bind its port + finish plugin init + complete
+// opencode's own one-time SQLite migration (which opencode itself warns "may
+// take a few minutes" on first boot per fresh CI XDG_DATA_HOME). Local hardware
+// finishes in <2s. The bump to 300s covers CI cold-start without papering over
+// genuine readiness failures — 5 minutes is still far above any realistic boot.
+async function waitForReady(url: string, timeoutMs = 300_000): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     let lastErr: unknown = null;
     while (Date.now() < deadline) {

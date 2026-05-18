@@ -179,7 +179,7 @@ describe("pi compaction marker", () => {
                 // Bumped from 30s → 90s for CI: Pi historian publishes via
                 // pi --print subprocess + HTTP mock provider; slower on shared
                 // runners.
-                { timeoutMs: 90_000, label: "Pi native compaction entry written to JSONL" },
+                { timeoutMs: 300_000, label: "Pi native compaction entry written to JSONL" },
             );
 
             expect(compactions.length).toBeGreaterThan(0);

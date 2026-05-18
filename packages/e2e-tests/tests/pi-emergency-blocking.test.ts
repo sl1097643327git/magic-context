@@ -129,14 +129,17 @@ describe("pi emergency >=95%", () => {
                 // Bumped from 15s → 45s for CI: Pi historian spawns a `pi --print`
                 // subprocess that calls the mock provider over HTTP, which is
                 // ~3-5x slower on GitHub-hosted runners than on local hardware.
-                { timeoutMs: 45_000, label: "at least one pi historian request" },
+                { timeoutMs: 300_000, label: "at least one pi historian request" },
             );
 
             const historianRequests = h.mock.requests().filter((r) => isHistorianRequest(r.body));
             console.log(`[TEST] pi historian requests captured: ${historianRequests.length}`);
             expect(historianRequests.length).toBeGreaterThanOrEqual(1);
         },
-        // Bumped from 120s → 300s for CI to give the bumped waitFor headroom.
-        300_000,
+        // Bumped from 120s → 600s for CI: the inner waitFor budget grew to
+        // 300s after round-3 CI tuning showed Pi historian publish-via-pi-print
+        // routinely needs >90s on GitHub-hosted runners; the it() budget needs
+        // headroom over that plus warmup turns.
+        600_000,
     );
 });
