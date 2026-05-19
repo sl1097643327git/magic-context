@@ -8,12 +8,22 @@
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const REPO_ROOT = resolve(import.meta.dir, "../../../..");
-const PLUGIN_ENTRY = join(REPO_ROOT, "packages/plugin/src/index.ts");
+// Prefer the bundled `dist/index.js` (what published users actually run)
+// over raw `src/index.ts`. The bundled file is one ~5MB file with all imports
+// inlined; loading it is fast even on cold runners. The TS-source path
+// triggers Bun's runtime TS transpile + dynamic resolution across hundreds
+// of submodule imports — on slow Linux CI runners this can take long enough
+// to make `opencode serve` appear hung when it's just blocked in plugin
+// load. Production never loads from src/, so testing src/ doesn't reflect
+// reality and exposes us to a slowness path users never see.
+const PLUGIN_DIST_ENTRY = join(REPO_ROOT, "packages/plugin/dist/index.js");
+const PLUGIN_SRC_ENTRY = join(REPO_ROOT, "packages/plugin/src/index.ts");
+const PLUGIN_ENTRY = existsSync(PLUGIN_DIST_ENTRY) ? PLUGIN_DIST_ENTRY : PLUGIN_SRC_ENTRY;
 
 export interface IsolatedEnv {
     configDir: string;
