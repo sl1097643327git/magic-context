@@ -199,16 +199,6 @@ jobs:
     # the simpler install+smoke path is broken.
     needs: [e2e-opencode]
     timeout-minutes: 40
-    # TODO(ci-flake): see ci.yml — opencode 1.15.x has a Linux-only
-    # bring-up bug that times out every test file's
-    # `beforeAll(TestHarness.create)`. The 1.15.4 pin below was
-    # supposed to dodge it but didn't help. Until upstream OpenCode
-    # ships a verified-good Linux build, this job runs informationally
-    # but does not block the release gate. Pi host e2e (which also
-    # spawns the OpenCode harness for cross-harness) catches the same
-    # regression class through Pi's RPC mode, and the Docker e2e job
-    # exercises the install/smoke path independently.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v5
 

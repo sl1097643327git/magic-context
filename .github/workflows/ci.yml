@@ -155,18 +155,6 @@ jobs:
     # the simpler install+smoke path is broken.
     needs: [e2e-opencode]
     timeout-minutes: 40
-    # TODO(ci-flake): opencode 1.15.x has a Linux-only HTTP-server
-    # bring-up bug — it binds the port, prints "Database migration
-    # complete", then never serves requests, so waitForReady() in our
-    # harness times out every test file. macOS 1.15.x is unaffected.
-    # 1.15.4 pin (installed below) was supposed to bypass it but didn't
-    # help — the regression is older than I first thought, or 1.15.4
-    # has the same bug under different conditions. Until OpenCode ships
-    # a verified-good Linux build (or we move to Docker-only host
-    # testing on a different base image), this job runs informationally
-    # but does not block CI gates. The Pi host suite still gates fully
-    # and exercises the same plugin code paths through Pi's RPC mode.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v5
 

@@ -161,6 +161,15 @@ function writeConfigs(
 /**
  * Wait until the opencode server responds to GET /doc (an endpoint that exists in
  * OpenCode's server). Polls for up to `timeoutMs`.
+ *
+ * Diagnostic design:
+ *   - Primary probe is Bun's `fetch()` (what production SDK clients use).
+ *   - Every 30s of consecutive fetch failures we fall back to `curl --max-time 2`
+ *     as a sanity check. If curl succeeds where fetch keeps failing, the issue
+ *     is Bun's HTTP client (not opencode), and we proceed treating the server
+ *     as ready — logging a one-line diagnostic so failures are attributable.
+ *   - If both fetch and curl fail for the full deadline, we throw with the
+ *     captured probe state so the error message is actionable.
  */
 // Default bumped from 30s → 300s. GitHub-hosted runners can take much longer
 // than 30s for `opencode serve` to bind its port + finish plugin init + complete
@@ -170,7 +179,10 @@ function writeConfigs(
 // genuine readiness failures — 5 minutes is still far above any realistic boot.
 async function waitForReady(url: string, timeoutMs = 300_000): Promise<void> {
     const deadline = Date.now() + timeoutMs;
-    let lastErr: unknown = null;
+    let lastFetchErr: unknown = null;
+    let lastCurlErr: unknown = null;
+    let attemptsSinceCurl = 0;
+    let curlSucceededOnce = false;
     while (Date.now() < deadline) {
         try {
             const res = await fetch(`${url}/doc`, { method: "GET" });
@@ -179,11 +191,42 @@ async function waitForReady(url: string, timeoutMs = 300_000): Promise<void> {
                 return;
             }
         } catch (err) {
-            lastErr = err;
+            lastFetchErr = err;
+        }
+        attemptsSinceCurl++;
+        // Every ~150 fetch attempts (≈30s at 200ms cadence) try curl as
+        // a Bun-fetch-independent probe.
+        if (attemptsSinceCurl >= 150) {
+            attemptsSinceCurl = 0;
+            try {
+                const probe = Bun.spawnSync({
+                    cmd: ["curl", "-fsS", "--max-time", "2", `${url}/doc`],
+                    stdout: "pipe",
+                    stderr: "pipe",
+                });
+                if (probe.exitCode === 0) {
+                    curlSucceededOnce = true;
+                    console.warn(
+                        `[waitForReady] curl reached ${url}/doc but Bun fetch is still failing — proceeding (Bun fetch issue, not opencode).`,
+                    );
+                    return;
+                }
+                lastCurlErr = new Error(
+                    `curl exit=${probe.exitCode}: ${probe.stderr.toString().trim() || "(no stderr)"}`,
+                );
+            } catch (err) {
+                lastCurlErr = err;
+            }
         }
         await Bun.sleep(200);
     }
-    throw new Error(`opencode serve did not become ready in ${timeoutMs}ms: ${lastErr}`);
+    throw new Error(
+        `opencode serve did not become ready in ${timeoutMs}ms.\n` +
+            `  url=${url}/doc\n` +
+            `  fetchLastErr=${String(lastFetchErr)}\n` +
+            `  curlLastErr=${String(lastCurlErr)}\n` +
+            `  curlEverSucceeded=${curlSucceededOnce}`,
+    );
 }
 
 export async function spawnOpencode(opts: SpawnOptions): Promise<SpawnedOpencode> {
@@ -214,9 +257,16 @@ export async function spawnOpencode(opts: SpawnOptions): Promise<SpawnedOpencode
     // Ensure anthropic doesn't bail for missing env vars — we use a fake key.
     childEnv.ANTHROPIC_API_KEY = "test-key-not-real";
 
+    // Bind to 0.0.0.0 (all interfaces) instead of 127.0.0.1 — empirically on
+    // GitHub-hosted runners, opencode binding to 127.0.0.1 sometimes results
+    // in Bun's `fetch()` timing out even though `curl` succeeds. Binding all
+    // interfaces removes any loopback-specific stack-resolution edge case
+    // (IPv4-only AF_INET vs IPv4-mapped IPv6, AF_UNSPEC name resolution, etc.).
+    // Clients still connect to `127.0.0.1:${port}` — only the listen socket
+    // changes. Safe locally too: process is short-lived, port is random.
     const child: ChildProcess = spawn(
         "opencode",
-        ["serve", "--port", String(port), "--hostname", "127.0.0.1"],
+        ["serve", "--port", String(port), "--hostname", "0.0.0.0"],
         {
             cwd: env.workdir,
             env: childEnv,
