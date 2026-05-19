@@ -168,8 +168,14 @@ jobs:
       # Install opencode the same way the Docker image does — the host
       # suite spawns `opencode serve` from PATH.
       - name: Install opencode
+        # NOTE: pinned to 1.15.4 because opencode 1.15.5 on linux-amd64
+        # never responds to HTTP /doc after stdout reports "server listening",
+        # despite "Database migration complete." printing. waitForReady() in
+        # our test harness then times out at 5 min, killing every test in
+        # the suite. The same 1.15.5 binary works on macOS. Once a working
+        # newer release ships, drop the --version pin or move it up.
         run: |
-          curl -fsSL https://opencode.ai/install | bash
+          curl -fsSL https://opencode.ai/install | bash -s -- --version 1.15.4
           echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
 
       - name: Verify opencode on PATH
