@@ -1042,6 +1042,13 @@ async function evaluateSmartNotes(args: {
 For each note below, determine whether its surface condition has been met.
 You have access to tools like GitHub CLI (gh), web search, and the local codebase to verify conditions.
 
+You DO NOT have access to:
+- Any conversation between the user and the original agent that wrote the note
+- The state of any active session, including whether messages have been sent
+- The current task, mood, or intent of the human user
+
+If a condition references conversation context the user is having ("When the user mentions X", "When they ask to do Y", "When we revisit Z", "When relevant to current discussion", etc.), it is UNEVALUATABLE — skip it (do not include in results) so the note stays pending. These are misuse cases that should never have been written as smart notes; leaving them pending is the correct outcome, the dreamer's archive-stale task will eventually retire them.
+
 ## Pending Smart Notes
 
 ${noteDescriptions}
@@ -1050,7 +1057,8 @@ ${noteDescriptions}
 
 1. Check each condition using the tools available to you.
 2. Be conservative — only mark a condition as met when you have clear evidence.
-3. Respond with a JSON array of results:
+3. Skip conditions that depend on session/conversation context you cannot observe — do not invent a "false" verdict for them, just omit them from your response.
+4. Respond with a JSON array of results:
 
 \`\`\`json
 [
@@ -1058,7 +1066,7 @@ ${noteDescriptions}
 ]
 \`\`\`
 
-Only include notes whose conditions you could definitively evaluate. Skip notes where you cannot determine the status (they will be re-evaluated next run).`;
+Only include notes whose conditions you could definitively evaluate against external signals. Skip notes where you cannot determine the status (they will be re-evaluated next run, or eventually archived as stale).`;
 
     const taskStartedAt = Date.now();
     let agentSessionId: string | null = null;

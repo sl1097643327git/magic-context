@@ -136,7 +136,7 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                 .string()
                 .optional()
                 .describe(
-                    "Open-ended condition for smart notes. When provided, creates a project-scoped smart note that the dreamer evaluates nightly. The note surfaces when the condition is met.",
+                    "Externally verifiable condition for smart notes. A separate background agent (dreamer) checks this using gh CLI, web fetches, file reads, git, etc. — NOT your conversation history. Use only for things like GitHub PR/issue state, release tags, file contents, or workflow runs. DO NOT use for 'when the user mentions X' / 'when we revisit Y' / 'when relevant to current task' — dreamer has no access to session context. For session-relative reminders, omit this and write a regular note.",
                 ),
             filter: tool.schema
                 .enum(["all", "active", "pending", "ready", "dismissed"])
