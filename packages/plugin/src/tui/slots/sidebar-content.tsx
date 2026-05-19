@@ -95,15 +95,23 @@ const TokenBreakdown = (props: {
         }
 
         // Conversation = real user/assistant text/reasoning/images
-        // (excludes injected session-history and excludes tool call I/O)
-        if (s.conversationTokens > 0) {
-            result.push({
-                key: "conv",
-                tokens: s.conversationTokens,
-                color: COLORS.conversation,
-                label: "Conversation",
-            })
-        }
+        // (excludes injected session-history and excludes tool call I/O).
+        //
+        // Always show this row even when conversationTokens === 0. The
+        // calibrator's residual-distribution math (tokenizer-calibration.ts)
+        // can round it down to zero when toolCallsLocal massively dominates
+        // conversationLocal — that's a calibration artifact, not a real
+        // "zero conversation". Suppressing the row leaves the legend looking
+        // truncated, which is more confusing than showing a 0% line. The
+        // segment is also skipped in the bar at 0 width because the segment
+        // builder uses `Math.max(1, ...)` only when tokens > 0 (see
+        // segmentWidths), so the visual bar stays correct either way.
+        result.push({
+            key: "conv",
+            tokens: s.conversationTokens,
+            color: COLORS.conversation,
+            label: "Conversation",
+        })
 
         // Tool Calls = tool_use/tool_result/tool/tool-invocation parts in messages
         // (actionable — users can reduce via ctx_reduce)
@@ -143,8 +151,14 @@ const TokenBreakdown = (props: {
         // Calculate raw proportions
         const proportions = segs.map((seg) => seg.tokens / total)
 
-        // Convert to character widths (minimum 1 char if tokens > 0)
-        let widths = proportions.map((p) => Math.max(1, Math.round(p * barWidth)))
+        // Convert to character widths. Minimum 1 char ONLY when the segment
+        // has tokens > 0 — zero-token segments (e.g. Conversation when the
+        // calibrator rounded it to zero) must get width 0 so the bar stays
+        // proportional. The legend row still renders for zero-token segments
+        // to keep the row stable.
+        let widths = segs.map((seg, i) =>
+            seg.tokens > 0 ? Math.max(1, Math.round(proportions[i] * barWidth)) : 0,
+        )
 
         // Adjust to exactly barWidth
         const sum = widths.reduce((a, b) => a + b, 0)
