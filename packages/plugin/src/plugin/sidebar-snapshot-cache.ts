@@ -71,10 +71,28 @@ export function applyStickySnapshotCache(
         cache.delete(sessionId);
         return fresh;
     }
-    if (!hasInFlightEvidence(fresh)) {
-        // A fresh zero-token snapshot with no active-work signal means the
-        // session was reset/deleted/reverted, not a mid-turn flicker. Drop the
-        // cache so old sidebar values cannot survive the reset window.
+    // Decide whether this zero-token reading is a real reset or a transient
+    // flicker. Two distinct flicker windows we must preserve:
+    //
+    //   (a) Mid-turn after compartment work: historian/compressor flagged
+    //       work in `compartmentInProgress`/`pendingOpsCount`. The original
+    //       guard caught this fine.
+    //   (b) FIRST user prompt before the first assistant response. No
+    //       historian, no queued ops, no compartment work — but
+    //       `last_input_tokens` is 0 until the model responds. The original
+    //       guard treated this as "reset" and wiped the breakdown, leaving
+    //       the sidebar blank while the user waited for the first reply.
+    //
+    // Real resets (revert, manual flush, session delete) drop authoritative
+    // SQLite-backed counts to zero alongside `inputTokens`. If compartments
+    // or memories survived from the cached reading into the fresh zero
+    // snapshot, this is not a reset.
+    const stateSurvived =
+        fresh.compartmentCount >= cached.snapshot.compartmentCount &&
+        fresh.memoryCount >= cached.snapshot.memoryCount;
+    if (!hasInFlightEvidence(fresh) && !stateSurvived) {
+        // Zero tokens, no in-flight signal, AND authoritative state lost
+        // ground — real reset/delete/revert. Drop the cache.
         cache.delete(sessionId);
         return fresh;
     }

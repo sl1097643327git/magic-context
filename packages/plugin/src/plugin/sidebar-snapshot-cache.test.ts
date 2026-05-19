@@ -111,20 +111,78 @@ describe("applyStickySnapshotCache", () => {
         expect(result.pendingOpsCount).toBe(12);
     });
 
-    test("clears cached tokens when zero snapshot has no in-flight evidence", () => {
-        applyStickySnapshotCache("ses_test", makeSnapshot({ inputTokens: 100_000 }));
+    test("clears cached tokens when zero snapshot drops counts too (real reset)", () => {
+        // Cache a non-zero snapshot WITH counts.
+        applyStickySnapshotCache(
+            "ses_test",
+            makeSnapshot({
+                inputTokens: 100_000,
+                compartmentCount: 5,
+                memoryCount: 10,
+            }),
+        );
 
+        // Real reset: tokens AND counts both dropped to zero, no in-flight signal.
         const reset = applyStickySnapshotCache(
             "ses_test",
-            makeSnapshot({ inputTokens: 0, compartmentInProgress: false, historianRunning: false }),
+            makeSnapshot({
+                inputTokens: 0,
+                compartmentCount: 0,
+                memoryCount: 0,
+                compartmentInProgress: false,
+                historianRunning: false,
+            }),
         );
         expect(reset.inputTokens).toBe(0);
 
+        // After reset, even with in-flight signal returning later, there's
+        // no prior cached entry to restore.
         const later = applyStickySnapshotCache(
             "ses_test",
             makeSnapshot({ inputTokens: 0, compartmentInProgress: true }),
         );
         expect(later.inputTokens).toBe(0);
+    });
+
+    test("sticks during first-user-prompt flicker when counts survive", () => {
+        // Regression: when a session is opened in TUI, sidebar shows the full
+        // breakdown. Then the user types their first prompt. The transform
+        // runs before the model responds, so last_input_tokens transiently
+        // reads 0 — no historian, no queued ops, no compartment work in
+        // progress. Authoritative counts (compartments, memories) are
+        // unchanged. Previously this wiped the cache and the sidebar went
+        // blank until the assistant's first message arrived.
+        applyStickySnapshotCache(
+            "ses_test",
+            makeSnapshot({
+                inputTokens: 350_000,
+                usagePercentage: 35,
+                systemPromptTokens: 25_000,
+                compartmentTokens: 128_000,
+                memoryTokens: 8_000,
+                conversationTokens: 100_000,
+                compartmentCount: 392,
+                memoryCount: 486,
+            }),
+        );
+
+        const firstPromptFlicker = makeSnapshot({
+            inputTokens: 0,
+            // No in-flight signals — user just typed, model hasn't responded.
+            compartmentInProgress: false,
+            historianRunning: false,
+            pendingOpsCount: 0,
+            // Counts unchanged from the cached good reading.
+            compartmentCount: 392,
+            memoryCount: 486,
+        });
+        const result = applyStickySnapshotCache("ses_test", firstPromptFlicker);
+
+        // Breakdown survives the flicker.
+        expect(result.inputTokens).toBe(350_000);
+        expect(result.compartmentTokens).toBe(128_000);
+        expect(result.memoryTokens).toBe(8_000);
+        expect(result.conversationTokens).toBe(100_000);
     });
 
     test("sticks when compartment work is explicitly in progress", () => {
