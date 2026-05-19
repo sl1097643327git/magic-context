@@ -165,30 +165,43 @@ function stripNestedSystemReminders(text: string): string {
 }
 
 function extractUserPromptText(message: MessageLike): string {
-    // Strip all plugin-owned injections so the embedded prompt is just what
-    // the user actually typed. Without this, every embedded query carries
-    // "§NNN§ " tag prefixes, temporal markers, and prior nudges — noise that
-    // distorts semantic similarity and leaks plugin noise into LMStudio logs.
+    // Strip all plugin-owned injections AND any other XML/HTML markup so the
+    // embedded prompt is just what the user actually typed. Without this:
     //
-    // System-reminders go through a depth-aware parser (above) because they
-    // can legitimately nest. The other tags here are plugin-owned and don't
-    // nest in production, so a non-greedy regex is sufficient for them.
+    //  - Every embedded query would carry "§NNN§ " tag prefixes, temporal
+    //    markers, plugin nudges, and any other XML the user (or an upstream
+    //    extension) included in their message. That noise distorts semantic
+    //    similarity scores and leaks plugin-internal markup into local
+    //    embedding endpoint logs (LMStudio, openai-compatible, etc).
+    //
+    //  - Specific allowlists missed real cases: pasted code with `<Component>`,
+    //    quoted XML from another tool's output, ALFONSO/OMO markers we hadn't
+    //    enumerated yet, and so on. A generic strip catches all of them.
+    //
+    // Order matters:
+    //  1. system-reminders use a depth-aware parser (above) because they
+    //     legitimately nest. Strip them first so nested reminders don't leave
+    //     orphan close tags for the generic stripper to deal with.
+    //  2. HTML comments next — they can wrap arbitrary content including angle
+    //     brackets, so they must go before generic tag stripping.
+    //  3. Generic tag strip — `<...>` for both single tags and the open/close
+    //     of pair tags. Content between paired tags is preserved as text;
+    //     that's intentional: a user pasting `<thing>important data</thing>`
+    //     still wants "important data" in their embedding.
+    //  4. Tag-prefix cleanup last — `§NNN§ ` is plain text, not markup.
     return (
         stripNestedSystemReminders(collectUserPromptParts(message))
-            // Magic Context tag prefix: "§123§ " at any position.
+            // (2) HTML comments — covers temporal markers (<!-- +5m -->), OMO
+            // and ALFONSO internal initiators, and any other commented-out
+            // content. `[\s\S]*?` matches across newlines.
+            .replace(/<!--[\s\S]*?-->/g, "")
+            // (3) Generic XML/HTML tags — opening, closing, and self-closing.
+            // Matches `<...>` where `...` does not start with `!` (already
+            // handled comments) and contains no embedded `<` (which would
+            // mean a malformed/unmatched tag we should leave for visibility).
+            .replace(/<\/?[a-zA-Z][^<>]*>/g, "")
+            // (4) Magic Context tag prefix: "§123§ " at any position.
             .replace(/§\d+§\s*/g, "")
-            // Temporal awareness gap markers: <!-- +5m -->, <!-- +1w 2d -->, etc.
-            // Must include 'w' for week units produced by temporal-awareness.ts.
-            .replace(/<!--\s*\+[\d\s.hmdw]+\s*-->/g, "")
-            // OMO internal initiator markers and similar HTML-comment markers.
-            .replace(/<!--\s*OMO_INTERNAL_INITIATOR[\s\S]*?-->/g, "")
-            // ALFONSO internal initiator markers used by the Alfonso harness.
-            .replace(/<!--\s*ALFONSO_INTERNAL_INITIATOR[\s\S]*?-->/g, "")
-            // Previously-appended plugin tags on this same user turn.
-            .replace(/<ctx-search-hint>[\s\S]*?<\/ctx-search-hint>/g, "")
-            .replace(/<ctx-search-auto>[\s\S]*?<\/ctx-search-auto>/g, "")
-            .replace(/<instruction[^>]*>[\s\S]*?<\/instruction>/g, "")
-            .replace(/<sidekick-augmentation>[\s\S]*?<\/sidekick-augmentation>/g, "")
             // Collapse whitespace runs that the strippings may leave behind.
             .replace(/[ \t]+\n/g, "\n")
             .replace(/\n{3,}/g, "\n\n")

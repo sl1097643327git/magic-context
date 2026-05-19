@@ -155,7 +155,7 @@ describe("auto-search-runner", () => {
         }
     }, 10_000);
 
-    test("strips magic-context tag prefix, temporal markers, and system-reminder before search", async () => {
+    test("strips magic-context tag prefix, temporal markers, and system-reminder content before search", async () => {
         let capturedPrompt = "";
         const spy = spyOn(searchModule, "unifiedSearch").mockImplementation(
             async (_db, _s, _p, prompt) => {
@@ -164,10 +164,14 @@ describe("auto-search-runner", () => {
             },
         );
         try {
+            // Note: <system-reminder> content is DROPPED entirely (depth-aware
+            // parser — content is plugin/host noise, never user data).
+            // Generic paired tags like <instruction> have their MARKUP stripped
+            // but their TEXT CONTENT preserved (see the generic-XML test below)
+            // because pasted user content in arbitrary tags can carry signal.
             const rawText = [
                 "§12345§ <!-- +5m -->",
                 "<system-reminder>CONTEXT REMINDER — 42%</system-reminder>",
-                '<instruction name="ctx_reduce_turn_cleanup">drop stuff</instruction>',
                 "this is the actual user prompt text that should be embedded",
             ].join("\n");
             const messages: MessageLike[] = [makeUserMsg("u1", rawText)];
@@ -182,10 +186,12 @@ describe("auto-search-runner", () => {
             expect(capturedPrompt).toBe(
                 "this is the actual user prompt text that should be embedded",
             );
+            // Plugin-internal markers are gone.
             expect(capturedPrompt).not.toContain("§");
             expect(capturedPrompt).not.toContain("<!--");
+            // system-reminder block and its content are gone.
             expect(capturedPrompt).not.toContain("<system-reminder>");
-            expect(capturedPrompt).not.toContain("<instruction");
+            expect(capturedPrompt).not.toContain("CONTEXT REMINDER");
         } finally {
             spy.mockRestore();
         }
@@ -278,6 +284,59 @@ describe("auto-search-runner", () => {
             expect(capturedPrompt).not.toContain("</system-reminder>");
             expect(capturedPrompt).toContain("real user prompt");
             expect(capturedPrompt).toContain("leftover close tag from a truncated parent");
+        } finally {
+            spy.mockRestore();
+        }
+    });
+
+    test("strips arbitrary XML/HTML tags and HTML comments (generic, not allowlisted) before embedding", async () => {
+        let capturedPrompt = "";
+        const spy = spyOn(searchModule, "unifiedSearch").mockImplementation(
+            async (_db, _s, _p, prompt) => {
+                capturedPrompt = prompt;
+                return [];
+            },
+        );
+        try {
+            // Mix of plugin-known tags (instruction, ctx-search-hint),
+            // plugin-unknown tags (custom-tag, deferred_notes), pasted code
+            // markup (Component, props), comments with non-temporal content,
+            // and self-closing tags. The generic stripper must remove all
+            // tags while preserving any text between paired tags as data the
+            // user typed.
+            const rawText = [
+                "<!-- arbitrary comment with note -->",
+                '<instruction name="deferred_notes">You have 7 deferred notes.</instruction>',
+                "<custom-tag>data the user wants embedded</custom-tag>",
+                "real user question about <Component props={x} /> usage",
+                "<some-future-marker/>",
+                "after the markup",
+            ].join("\n");
+            const messages: MessageLike[] = [makeUserMsg("u-generic", rawText)];
+
+            await runAutoSearchHint({
+                sessionId: "s1",
+                db,
+                messages,
+                options: baseOptions,
+            });
+
+            // All markup is gone…
+            expect(capturedPrompt).not.toContain("<");
+            expect(capturedPrompt).not.toContain(">");
+            expect(capturedPrompt).not.toContain("<!--");
+            expect(capturedPrompt).not.toContain("arbitrary comment");
+            expect(capturedPrompt).not.toContain("deferred_notes");
+
+            // …but text content between paired tags survives. We preserve
+            // text between paired tags because real user paste (e.g. quoted
+            // log output, code with type parameters) often contains useful
+            // semantic content that the embedding should see.
+            expect(capturedPrompt).toContain("You have 7 deferred notes");
+            expect(capturedPrompt).toContain("data the user wants embedded");
+            expect(capturedPrompt).toContain("real user question about");
+            expect(capturedPrompt).toContain("usage");
+            expect(capturedPrompt).toContain("after the markup");
         } finally {
             spy.mockRestore();
         }
