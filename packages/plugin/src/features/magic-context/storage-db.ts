@@ -324,6 +324,11 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       -- Excluded from healNullTextColumns. Readers filter IS NOT NULL AND
       -- != empty-string defensively. Plan v6 section 3.
       pending_compaction_marker_state TEXT,
+      -- pending_pi_compaction_marker_state: intentionally NULLABLE without a
+      -- default. Absence of a deferred Pi-native marker is SQL NULL; presence
+      -- is a valid JSON blob written via setPendingPiCompactionMarkerState.
+      -- Excluded from healNullTextColumns.
+      pending_pi_compaction_marker_state TEXT,
       -- deferred_execute_state: intentionally NULLABLE without a default.
       -- Absence is SQL NULL; presence is a JSON blob written via
       -- setDeferredExecutePendingIfAbsent. Excluded from healNullTextColumns.
@@ -465,6 +470,10 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     // filter `IS NOT NULL AND != ''`. This column MUST NOT be added to
     // `healNullTextColumns` (NULL is the load-bearing absence sentinel).
     ensureColumn(db, "session_meta", "pending_compaction_marker_state", "TEXT");
+    // Pi-native deferred compaction marker queue. Intentionally NO DEFAULT;
+    // NULL is the load-bearing absence sentinel and this column MUST NOT be
+    // added to healNullTextColumns.
+    ensureColumn(db, "session_meta", "pending_pi_compaction_marker_state", "TEXT");
     // Boundary-execution deferred intent (plan v8). Intentionally NO DEFAULT
     // clause — absence is SQL NULL, presence is a JSON blob. This column MUST
     // NOT be added to `healNullTextColumns`.

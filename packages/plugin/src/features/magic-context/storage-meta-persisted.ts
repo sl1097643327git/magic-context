@@ -1133,6 +1133,96 @@ export function clearPendingCompactionMarkerStateIf(
     return result.changes > 0;
 }
 
+// ── Pending Pi compaction marker state (Pi deferred native compaction drain) ──
+
+/**
+ * Payload stored in `session_meta.pending_pi_compaction_marker_state` between
+ * a Pi historian/recomp publication and the next materializing Pi context pass.
+ * Stored with `stableStringify` so CAS clear can compare byte-for-byte.
+ */
+export interface PendingPiCompactionMarker {
+    firstKeptEntryId: string;
+    endMessageId: string;
+    ordinal: number;
+    tokensBefore: number;
+    summary: string;
+    publishedAt: number;
+}
+
+function isPendingPiCompactionMarker(value: unknown): value is PendingPiCompactionMarker {
+    return (
+        typeof value === "object" &&
+        value !== null &&
+        typeof (value as { firstKeptEntryId?: unknown }).firstKeptEntryId === "string" &&
+        typeof (value as { endMessageId?: unknown }).endMessageId === "string" &&
+        typeof (value as { ordinal?: unknown }).ordinal === "number" &&
+        typeof (value as { tokensBefore?: unknown }).tokensBefore === "number" &&
+        typeof (value as { summary?: unknown }).summary === "string" &&
+        typeof (value as { publishedAt?: unknown }).publishedAt === "number"
+    );
+}
+
+export function getPendingPiCompactionMarkerState(
+    db: Database,
+    sessionId: string,
+): PendingPiCompactionMarker | null {
+    const row = db
+        .prepare("SELECT pending_pi_compaction_marker_state FROM session_meta WHERE session_id = ?")
+        .get(sessionId) as { pending_pi_compaction_marker_state?: string | null } | null;
+    const raw = row?.pending_pi_compaction_marker_state;
+    // Defensive: NULL is the canonical absence, but legacy / cross-version
+    // writes might still put `""` here. Both treated as absent.
+    if (raw === null || raw === undefined || raw === "") return null;
+    try {
+        const parsed = JSON.parse(raw);
+        if (isPendingPiCompactionMarker(parsed)) {
+            return parsed;
+        }
+    } catch {
+        // Intentional: corrupt JSON → treat as absent. Next publish will
+        // overwrite cleanly; next consuming pass will read the new value.
+    }
+    return null;
+}
+
+export function setPendingPiCompactionMarkerState(
+    db: Database,
+    sessionId: string,
+    state: PendingPiCompactionMarker | null,
+): void {
+    ensureSessionMetaRow(db, sessionId);
+    const blob = state ? stableStringify(state) : null;
+    db.prepare(
+        "UPDATE session_meta SET pending_pi_compaction_marker_state = ? WHERE session_id = ?",
+    ).run(blob, sessionId);
+}
+
+export function clearPendingPiCompactionMarkerStateIf(
+    db: Database,
+    sessionId: string,
+    expected: PendingPiCompactionMarker,
+): boolean {
+    const expectedBlob = stableStringify(expected);
+    const result = db
+        .prepare(
+            `UPDATE session_meta SET pending_pi_compaction_marker_state = NULL
+             WHERE session_id = ? AND pending_pi_compaction_marker_state = ?`,
+        )
+        .run(sessionId, expectedBlob);
+    return result.changes > 0;
+}
+
+export function getSessionsWithPendingPiMarker(db: Database): string[] {
+    const rows = db
+        .prepare(
+            `SELECT session_id FROM session_meta
+             WHERE pending_pi_compaction_marker_state IS NOT NULL
+               AND pending_pi_compaction_marker_state != ''`,
+        )
+        .all() as Array<{ session_id: string }>;
+    return rows.map((r) => r.session_id);
+}
+
 export function peekDeferredExecutePending(
     db: Database,
     sessionId: string,

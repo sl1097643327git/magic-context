@@ -7,6 +7,7 @@ import { resolveProjectIdentity } from "@magic-context/core/features/magic-conte
 import { getMemoriesByProject } from "@magic-context/core/features/magic-context/memory/storage-memory";
 import {
 	getHistorianFailureState,
+	getPendingPiCompactionMarkerState,
 	getPersistedNoteNudge,
 } from "@magic-context/core/features/magic-context/storage";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
@@ -147,7 +148,7 @@ describe("runPiHistorian", () => {
 		}
 	});
 
-	it("appends a Pi-native compaction marker after publication", async () => {
+	it("queues a Pi-native compaction marker after publication", async () => {
 		const appendCompaction = mock(() => "compact-1");
 		const entries = Array.from({ length: 6 }, (_, index) => ({
 			type: "message",
@@ -160,16 +161,15 @@ describe("runPiHistorian", () => {
 			readBranchEntries: () => entries,
 		});
 		try {
-			expect(appendCompaction).toHaveBeenCalledTimes(1);
-			expect(appendCompaction).toHaveBeenCalledWith(
-				expect.stringContaining("Initial Pi slice"),
-				"entry-3",
-				expect.any(Number),
+			expect(appendCompaction).not.toHaveBeenCalled();
+			expect(getPendingPiCompactionMarkerState(db, "ses-historian")).toEqual(
 				expect.objectContaining({
-					source: "magic-context",
-					lastCompactedOrdinal: 2,
+					firstKeptEntryId: "entry-3",
+					endMessageId: "m2",
+					ordinal: 2,
+					tokensBefore: expect.any(Number),
+					summary: expect.stringContaining("Initial Pi slice"),
 				}),
-				true,
 			);
 		} finally {
 			closeQuietly(db);

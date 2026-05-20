@@ -49,6 +49,7 @@ import { getMemoriesByProject } from "@magic-context/core/features/magic-context
 import {
 	clearHistorianFailureState,
 	incrementHistorianFailure,
+	setPendingPiCompactionMarkerState,
 } from "@magic-context/core/features/magic-context/storage";
 import { updateSessionMeta } from "@magic-context/core/features/magic-context/storage-meta";
 import {
@@ -170,7 +171,6 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 		memoryEnabled,
 		autoPromote,
 		onPublished,
-		appendCompaction,
 		readBranchEntries,
 		notifyIssue,
 	} = deps;
@@ -538,21 +538,49 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				return;
 			}
 
+			const markerSummary = buildPiCompactionSummary(newCompartments);
+			const lastNewEndMessageId =
+				newCompartments[newCompartments.length - 1]?.endMessageId;
+			let firstKeptEntryId: string | null = null;
+			if (readBranchEntries) {
+				try {
+					firstKeptEntryId = findFirstKeptEntryId(
+						readBranchEntries(),
+						lastNewEnd,
+					);
+					if (!firstKeptEntryId) {
+						sessionLog(
+							sessionId,
+							`historian: native compaction queue skipped; no firstKeptEntryId after ordinal ${lastNewEnd}`,
+						);
+					}
+				} catch (error) {
+					sessionLog(
+						sessionId,
+						`historian: native compaction queue lookup failed: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+			}
+
 			// Atomic publication: append + replace facts + clear failure state.
+			// The Pi-native compaction marker payload is staged in the same
+			// transaction so a crash cannot leave compartments without a queued
+			// marker for the deferred materializing drain.
 			db.transaction(() => {
 				appendCompartments(db, sessionId, newCompartments);
 				replaceSessionFacts(db, sessionId, validatedPass.facts ?? []);
 				clearHistorianFailureState(db, sessionId);
+				if (firstKeptEntryId && lastNewEndMessageId) {
+					setPendingPiCompactionMarkerState(db, sessionId, {
+						firstKeptEntryId,
+						endMessageId: lastNewEndMessageId,
+						ordinal: lastNewEnd,
+						tokensBefore: chunk.tokenEstimate,
+						summary: markerSummary,
+						publishedAt: Date.now(),
+					});
+				}
 			})();
-
-			appendPiNativeCompaction({
-				sessionId,
-				appendCompaction,
-				readBranchEntries,
-				lastCompactedOrdinal: lastNewEnd,
-				tokensBefore: chunk.tokenEstimate,
-				summary: buildPiCompactionSummary(newCompartments),
-			});
 
 			// Note-nudge trigger #1 (of 3): historian publication is a natural
 			// work boundary, so signal that deferred notes should surface on
@@ -661,7 +689,7 @@ async function validateHistorianResult(
 	};
 }
 
-function buildPiCompactionSummary(
+export function buildPiCompactionSummary(
 	compartments: Array<{
 		title: string;
 		startMessage: number;
@@ -679,52 +707,6 @@ function buildPiCompactionSummary(
 		return `Magic Context compacted messages ${first?.startMessage ?? "?"}-${last?.endMessage ?? "?"}.`;
 	}
 	return `Magic Context compacted: ${titles.join("; ")}`;
-}
-
-function appendPiNativeCompaction(args: {
-	sessionId: string;
-	appendCompaction?: PiHistorianDeps["appendCompaction"];
-	readBranchEntries?: () => unknown[];
-	lastCompactedOrdinal: number;
-	tokensBefore: number;
-	summary: string;
-}): void {
-	const { appendCompaction, readBranchEntries } = args;
-	if (!appendCompaction || !readBranchEntries) return;
-
-	try {
-		const firstKeptEntryId = findFirstKeptEntryId(
-			readBranchEntries(),
-			args.lastCompactedOrdinal,
-		);
-		if (!firstKeptEntryId) {
-			sessionLog(
-				args.sessionId,
-				`historian: native compaction skipped; no firstKeptEntryId after ordinal ${args.lastCompactedOrdinal}`,
-			);
-			return;
-		}
-
-		appendCompaction(
-			args.summary,
-			firstKeptEntryId,
-			args.tokensBefore,
-			{
-				source: "magic-context",
-				lastCompactedOrdinal: args.lastCompactedOrdinal,
-			},
-			true,
-		);
-		sessionLog(
-			args.sessionId,
-			`historian: appended native compaction firstKept=${firstKeptEntryId} tokensBefore=${args.tokensBefore}`,
-		);
-	} catch (error) {
-		sessionLog(
-			args.sessionId,
-			`historian: native compaction append failed: ${error instanceof Error ? error.message : String(error)}`,
-		);
-	}
 }
 
 /**
@@ -760,7 +742,7 @@ function appendPiNativeCompaction(args: {
  * real underlying entry (user|assistant|unknown role) or the first
  * folded toolResult entry (synthetic user) — never empty.
  */
-function findFirstKeptEntryId(
+export function findFirstKeptEntryId(
 	entries: unknown[],
 	lastCompactedOrdinal: number,
 ): string | null {

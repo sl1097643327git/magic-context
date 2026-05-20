@@ -34,6 +34,7 @@ import { detectOverflow } from "@magic-context/core/features/magic-context/overf
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import {
 	getOrCreateSessionMeta,
+	getSessionsWithPendingPiMarker,
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
 import { openDatabase } from "@magic-context/core/features/magic-context/storage-db";
@@ -79,6 +80,7 @@ import {
 	recordPiLiveModel,
 	recordPiToolExecution,
 	registerPiContextHandler,
+	signalPiDeferredHistoryRefresh,
 	signalPiHistoryRefresh,
 	signalPiPendingMaterialization,
 	signalPiSystemPromptRefresh,
@@ -460,6 +462,22 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	const projectDir = process.cwd();
 	const projectIdentity = resolveProjectIdentity(projectDir);
 	const seenDreamerProjectIdentities = new Set<string>([projectIdentity]);
+
+	try {
+		const pendingPiMarkerSessions = getSessionsWithPendingPiMarker(db);
+		for (const sid of pendingPiMarkerSessions) {
+			signalPiDeferredHistoryRefresh(sid);
+		}
+		if (pendingPiMarkerSessions.length > 0) {
+			log(
+				`${PREFIX} rehydrated ${pendingPiMarkerSessions.length} Pi deferred compaction marker session(s)`,
+			);
+		}
+	} catch (err) {
+		warn(
+			`Magic Context (pi) failed to rehydrate deferred Pi compaction markers: ${err instanceof Error ? err.message : String(err)}`,
+		);
+	}
 
 	info(
 		`loaded v${PLUGIN_VERSION} | harness=pi | db=${dbPath} | ` +

@@ -50,9 +50,11 @@ import {
 import { createScheduler } from "@magic-context/core/features/magic-context/scheduler";
 import {
 	type ContextDatabase,
+	clearPendingPiCompactionMarkerStateIf,
 	getActiveTagsBySession,
 	getHistorianFailureState,
 	getPendingOps,
+	getPendingPiCompactionMarkerState,
 	getTagsByNumbers,
 	getTopNBySize,
 	updateSessionMeta,
@@ -114,6 +116,10 @@ import {
 	clearAutoSearchForPiSession,
 	runAutoSearchHintForPi,
 } from "./auto-search-pi";
+import {
+	type ApplyDeferredPiCompactionMarkerDeps,
+	applyDeferredPiCompactionMarker,
+} from "./compaction-marker-manager-pi";
 import { detectRecentCommit } from "./detect-recent-commit";
 import { ensureProjectRegisteredFromPiDirectory } from "./embedding-bootstrap";
 import {
@@ -1617,6 +1623,8 @@ export function registerPiContextHandler(
 						DEFAULT_CLEAR_REASONING_AGE,
 				},
 				temporalAwareness: options.injection?.temporalAwareness === true,
+				appendCompaction: resolvePiAppendCompaction(ctx),
+				readBranchEntries: resolvePiReadBranchEntries(ctx),
 			});
 
 			// After tagging+drops have committed, check whether historian
@@ -2480,6 +2488,8 @@ interface RunPipelineArgs {
 	 * `experimental.temporal_awareness`. Idempotent across passes.
 	 */
 	temporalAwareness?: boolean;
+	appendCompaction?: ApplyDeferredPiCompactionMarkerDeps["appendCompaction"];
+	readBranchEntries?: ApplyDeferredPiCompactionMarkerDeps["readBranchEntries"];
 }
 
 interface RunPipelineResult {
@@ -2500,6 +2510,11 @@ interface RunPipelineResult {
 
 async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	let executedWorkThisPass = false;
+	let historyWasConsumedThisPass = false;
+	let suppressDeferredHistoryDrain = false;
+	let casLost = false;
+	const deferredHistoryWasPendingAtPassStart =
+		deferredHistoryRefreshSessions.has(args.sessionId);
 
 	// 0. Inject temporal `<!-- +Xm -->` markers into user messages
 	// BEFORE tagging so the §N§ tag prefix wraps around our marker on
@@ -2611,9 +2626,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const deferredMaterializationWasPending = deferredMaterializationSessions.has(
 		args.sessionId,
 	);
-	const deferredHistoryRefreshWasPending = deferredHistoryRefreshSessions.has(
-		args.sessionId,
-	);
+	const deferredHistoryRefreshWasPending = deferredHistoryWasPendingAtPassStart;
 	const pendingOps = getPendingOps(args.db, args.sessionId);
 	const baseShouldApplyPendingOps =
 		args.schedulerDecision === "execute" ||
@@ -2963,12 +2976,15 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			// only drain `historyRefreshSessions` if the rebuild
 			// succeeded AND this pass was busting the cache. If
 			// injection throws, the flag survives so the next pass
-			// retries the rebuild.
+			// retries the rebuild. Deferred-history is NOT drained
+			// here; Pi-native compaction marker application happens at
+			// the end of runPipeline after materializing work succeeds.
 			if (args.isCacheBusting) {
 				historyRefreshSessions.delete(args.sessionId);
+				historyWasConsumedThisPass = true;
 			}
 			if (deferredHistoryRefresh) {
-				consumeDeferredHistoryRefresh(args.sessionId);
+				historyWasConsumedThisPass = true;
 			}
 			logTransformTiming(
 				args.sessionId,
@@ -2990,6 +3006,64 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		messages: args.messages,
 		isCacheBusting: args.isCacheBusting,
 	});
+
+	const deferredHistoryDrainEligible =
+		historyWasConsumedThisPass &&
+		deferredHistoryWasPendingAtPassStart &&
+		!suppressDeferredHistoryDrain &&
+		!casLost;
+	if (deferredHistoryDrainEligible) {
+		try {
+			const pending = getPendingPiCompactionMarkerState(
+				args.db,
+				args.sessionId,
+			);
+			if (!pending) {
+				consumeDeferredHistoryRefresh(args.sessionId);
+			} else if (!args.appendCompaction || !args.readBranchEntries) {
+				suppressDeferredHistoryDrain = true;
+				sessionLog(
+					args.sessionId,
+					"Pi compaction-marker drain skipped: sessionManager appendCompaction/getBranch unavailable; preserving deferred-history signal",
+				);
+			} else {
+				const outcome = applyDeferredPiCompactionMarker(
+					{
+						db: args.db,
+						appendCompaction: args.appendCompaction,
+						readBranchEntries: args.readBranchEntries,
+					},
+					args.sessionId,
+					pending,
+				);
+				if (outcome.kind === "retryable-failure") {
+					sessionLog(
+						args.sessionId,
+						`Pi compaction-marker drain retryable failure: ${outcome.error.message}`,
+					);
+				} else if (
+					clearPendingPiCompactionMarkerStateIf(
+						args.db,
+						args.sessionId,
+						pending,
+					)
+				) {
+					consumeDeferredHistoryRefresh(args.sessionId);
+				} else {
+					casLost = true;
+					sessionLog(
+						args.sessionId,
+						"CAS-clear failed (newer blob written or another actor cleared); preserving deferred-history signal",
+					);
+				}
+			}
+		} catch (err) {
+			sessionLog(
+				args.sessionId,
+				`Pi compaction-marker drain failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
+	}
 
 	if (executedWorkThisPass) {
 		try {

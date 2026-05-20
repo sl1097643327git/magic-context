@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { appendCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
 import {
 	__resetMessageIndexAsyncForTests,
 	isSessionReconciled,
@@ -12,11 +13,13 @@ import {
 	getNoteNudgeAnchors,
 	getOrCreateSessionMeta,
 	getPendingOps,
+	getPendingPiCompactionMarkerState,
 	getPersistedStickyTurnReminder,
 	getTagsBySession,
 	incrementHistorianFailure,
 	insertTag,
 	queuePendingOp,
+	setPendingPiCompactionMarkerState,
 	setPersistedStickyTurnReminder,
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
@@ -45,6 +48,9 @@ import {
 	recordPiToolExecution,
 	registerPiContextHandler,
 	resolvePiHistorianTriggerInputs,
+	signalPiDeferredHistoryRefresh,
+	signalPiHistoryRefresh,
+	signalPiPendingMaterialization,
 } from "./context-handler";
 import {
 	assistantMessage,
@@ -1438,6 +1444,154 @@ describe("registerPiContextHandler", () => {
 			clearContextHandlerSession(activeSessionId);
 			closeQuietly(db);
 		}
+	});
+	describe("Pi deferred compaction marker drain", () => {
+		function seedCompartment(
+			db: ReturnType<typeof createTestDb>,
+			sessionId: string,
+		): void {
+			appendCompartments(db, sessionId, [
+				{
+					sequence: 0,
+					startMessage: 1,
+					endMessage: 2,
+					startMessageId: "entry-1",
+					endMessageId: "entry-2",
+					title: "Compacted",
+					content: "Older history.",
+				},
+			]);
+		}
+
+		async function runDrainPass(args: {
+			db: ReturnType<typeof createTestDb>;
+			sessionId: string;
+			appendCompaction?: (...args: unknown[]) => string | undefined;
+		}): Promise<void> {
+			const fake = createFakePi();
+			registerPiContextHandler(fake.pi as never, {
+				db: args.db,
+				ctxReduceEnabled: true,
+				injection: { injectionBudgetTokens: 10_000 },
+			});
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: never[] }>;
+			const messages = [
+				userMessage("first", 1),
+				assistantMessage("second", 2),
+				userMessage("third", 3),
+			] as never[];
+			const ctx = fakeContext(
+				args.sessionId,
+				process.cwd(),
+				["entry-1", "entry-2", "entry-3"],
+				messages as never,
+			) as never as {
+				sessionManager: {
+					appendCompaction?: (...args: unknown[]) => string | undefined;
+				};
+			};
+			if (args.appendCompaction) {
+				ctx.sessionManager.appendCompaction = args.appendCompaction;
+			}
+			await handler({ messages }, ctx as never);
+		}
+
+		it("drains a deferred Pi marker only on a materializing pass", async () => {
+			const db = createTestDb();
+			const sessionId = "ses-pi-marker-drain";
+			try {
+				seedCompartment(db, sessionId);
+				setPendingPiCompactionMarkerState(db, sessionId, {
+					firstKeptEntryId: "entry-3",
+					endMessageId: "entry-2",
+					ordinal: 2,
+					tokensBefore: 10,
+					summary: "summary",
+					publishedAt: 1,
+				});
+				signalPiDeferredHistoryRefresh(sessionId);
+				signalPiPendingMaterialization(sessionId);
+				const appendCompaction = mock(() => "compact-1");
+
+				await runDrainPass({ db, sessionId, appendCompaction });
+
+				expect(appendCompaction).toHaveBeenCalledTimes(1);
+				expect(getPendingPiCompactionMarkerState(db, sessionId)).toBeNull();
+				expect(consumeDeferredHistoryRefresh(sessionId)).toBe(false);
+			} finally {
+				clearContextHandlerSession(sessionId);
+				closeQuietly(db);
+			}
+		});
+
+		it("preserves blob_Y and deferred signal when CAS clear loses to a newer blob", async () => {
+			const db = createTestDb();
+			const sessionId = "ses-pi-marker-cas-loss";
+			const blobY = {
+				firstKeptEntryId: "entry-3",
+				endMessageId: "entry-2",
+				ordinal: 2,
+				tokensBefore: 20,
+				summary: "newer",
+				publishedAt: 2,
+			};
+			try {
+				seedCompartment(db, sessionId);
+				setPendingPiCompactionMarkerState(db, sessionId, {
+					firstKeptEntryId: "entry-3",
+					endMessageId: "entry-2",
+					ordinal: 2,
+					tokensBefore: 10,
+					summary: "older",
+					publishedAt: 1,
+				});
+				signalPiDeferredHistoryRefresh(sessionId);
+				signalPiPendingMaterialization(sessionId);
+				const appendCompaction = mock(() => {
+					setPendingPiCompactionMarkerState(db, sessionId, blobY);
+					return "compact-1";
+				});
+
+				await runDrainPass({ db, sessionId, appendCompaction });
+
+				expect(getPendingPiCompactionMarkerState(db, sessionId)).toEqual(blobY);
+				expect(consumeDeferredHistoryRefresh(sessionId)).toBe(true);
+			} finally {
+				clearContextHandlerSession(sessionId);
+				closeQuietly(db);
+			}
+		});
+
+		it("does not drain a manually seeded blob on a flush/materialization pass without deferred-start snapshot", async () => {
+			const db = createTestDb();
+			const sessionId = "ses-pi-marker-flush-no-drain";
+			const blob = {
+				firstKeptEntryId: "entry-3",
+				endMessageId: "entry-2",
+				ordinal: 2,
+				tokensBefore: 10,
+				summary: "summary",
+				publishedAt: 1,
+			};
+			try {
+				seedCompartment(db, sessionId);
+				setPendingPiCompactionMarkerState(db, sessionId, blob);
+				signalPiHistoryRefresh(sessionId);
+				signalPiPendingMaterialization(sessionId);
+				const appendCompaction = mock(() => "compact-1");
+
+				await runDrainPass({ db, sessionId, appendCompaction });
+
+				expect(appendCompaction).not.toHaveBeenCalled();
+				expect(getPendingPiCompactionMarkerState(db, sessionId)).toEqual(blob);
+			} finally {
+				clearContextHandlerSession(sessionId);
+				closeQuietly(db);
+			}
+		});
 	});
 });
 

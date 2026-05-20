@@ -624,6 +624,24 @@ const MIGRATIONS: Migration[] = [
             `);
         },
     },
+    {
+        version: 18,
+        description: "Add pending_pi_compaction_marker_state column for Pi deferred marker drain",
+        up: (db: Database) => {
+            const cols = db.prepare("PRAGMA table_info(session_meta)").all() as Array<{
+                name?: string;
+            }>;
+            // Pi-native compaction marker queue. Intentionally declared
+            // WITHOUT a DEFAULT so SQL NULL remains the absence sentinel,
+            // matching pending_compaction_marker_state and excluded from
+            // healNullTextColumns.
+            if (!cols.some((c) => c.name === "pending_pi_compaction_marker_state")) {
+                db.exec(
+                    "ALTER TABLE session_meta ADD COLUMN pending_pi_compaction_marker_state TEXT",
+                );
+            }
+        },
+    },
 ];
 
 function ensureMigrationsTable(db: Database): void {
