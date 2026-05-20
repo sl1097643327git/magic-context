@@ -119,20 +119,61 @@ function readCompactionEntries(h: PiTestHarness): Array<Record<string, unknown>>
         .filter((entry) => entry.type === "compaction");
 }
 
+/**
+ * Count published Pi compartments for a session — the stable post-publish
+ * checkpoint. Pi compartments are written by historian's atomic transaction
+ * (`pi-historian-runner.ts:569-582`), so the row count going from 0 → ≥1 is
+ * a reliable indicator that the publish transaction committed.
+ */
+function readCompartmentCount(h: PiTestHarness, sessionId: string): number {
+    const db = new Database(h.contextDbPath(), { readonly: true });
+    try {
+        const row = db
+            .prepare(
+                "SELECT COUNT(*) AS c FROM compartments WHERE session_id = ? AND harness = 'pi'",
+            )
+            .get(sessionId) as { c: number } | undefined;
+        return row?.c ?? 0;
+    } finally {
+        db.close();
+    }
+}
+
 describe("pi compaction marker", () => {
-    // FIXME(v0.21.6): Test scenario stopped triggering historian publication
-    // after the Phase 2 deferred-marker rewrite. The original test was
-    // designed for eager `appendCompaction()` and worked because the
-    // post-trigger turn alone produced both publish + apply. With the
-    // deferred queue we need publish AND a separate drain pass — but in
-    // this scenario historian is not publishing at all under the new
-    // execute-gating, so no pending blob is ever written. Needs harness-
-    // level investigation (mock matcher? historian-spawn args? Pi 0.74
-    // RPC stdin behavior change?). The drain logic itself is covered by
-    // packages/pi-plugin/src/compaction-marker-manager-pi.test.ts and the
-    // production-side helpers under storage-meta-persisted. Skipping in
-    // v0.21.5 to unblock the release pipeline.
-    it.skip("defers native compaction entry through pending blob and drains on next materializing pass", async () => {
+    // FIXME(post-v0.21.5): Despite the Oracle-guided rewrite below (which
+    // waits for the durable compartment row + uses ~90% pressure instead
+    // of the original ~180% over-spike that routed through emergency
+    // recovery), this test still fails in our e2e environment. Two
+    // separate attempts in v0.21.5 release prep:
+    //   1. Waiting for pending_pi_compaction_marker_state (the transient
+    //      internal queue) → 120s timeout at the wait, because the blob
+    //      is cleared by the next drain pass before the polling loop sees
+    //      it (Oracle: bg_e4d4c044).
+    //   2. Waiting for compartment row → ALSO 120s timeout but at a
+    //      different waitFor, meaning even the durable post-publish
+    //      checkpoint isn't reaching this scenario. Possible causes:
+    //      Pi 0.74 RPC-mode subagent behavior, mock-provider historian
+    //      matching, or pressure math interacting with the test's
+    //      warmup sequence.
+    //
+    // The production drain logic is well-covered by unit tests in
+    // packages/pi-plugin/src/compaction-marker-manager-pi.test.ts plus
+    // the integration tests under storage-meta-persisted, and the
+    // architecture is verified live in user dogfooding.
+    //
+    // This skipped test should be revisited as a focused investigation
+    // (live RPC subagent traces, mock-provider request log, e2e harness
+    // hooks for historian-publish completion) rather than another
+    // assertion adjustment.
+    it.skip("defers native compaction entry and drains on next materializing pass", async () => {
+        // Pressure math note (Oracle bg_e4d4c044): Pi pressure counts
+        //   input + cacheRead + cacheWrite (`pi-pressure.ts:80-93`).
+        // The earlier version of this test set BOTH input_tokens AND
+        // cache_creation_input_tokens to 90_000, which produced ~180%
+        // pressure against a 100k limit, routing the next pass through the
+        // ≥95% emergency path. Now we use a single 90_000 input bump with
+        // zero cache_creation to stay at ~90% — well above the 40% execute
+        // threshold but below the emergency cliff.
         const h = await PiTestHarness.create({
             modelContextLimit: 100_000,
             magicContextConfig: {
@@ -173,9 +214,12 @@ describe("pi compaction marker", () => {
             }
             expect(sessionId).toBeTruthy();
 
+            // Single-channel pressure spike: ~90% so the next pass crosses
+            // the 40% execute threshold without entering the ≥95% emergency
+            // recovery path.
             h.mock.setDefault({
                 text: "big",
-                usage: { input_tokens: 90_000, output_tokens: 20, cache_creation_input_tokens: 90_000 },
+                usage: { input_tokens: 90_000, output_tokens: 20, cache_creation_input_tokens: 0 },
             });
             await h.sendPrompt("pi marker trigger turn crosses execute threshold", { timeoutMs: 60_000 });
 
@@ -185,22 +229,25 @@ describe("pi compaction marker", () => {
             });
             await h.sendPrompt("pi marker post-trigger turn lets historian publish", { timeoutMs: 60_000 });
 
-            // Wait for the pending Pi marker blob to appear (this is the
-            // Phase 2 invariant: historian publish writes the blob INSIDE the
-            // publish transaction). The drain itself hasn't fired yet — that
-            // requires another materializing pass.
+            // Wait for the durable post-publish checkpoint: a Pi compartment
+            // row. This is the same signal pi-historian-success.test.ts uses
+            // (`pi-historian-success.test.ts:139,154`), with the same 300s
+            // budget Pi historian e2es allow for the slow background
+            // subagent.
+            //
+            // We deliberately do NOT wait for `pending_pi_compaction_marker_state`
+            // here — that blob is a transient internal queue cleared on the
+            // next drain pass (`context-handler.ts:3015-3052`), so racing
+            // against it is unreliable in e2e.
             await h.waitFor(
-                () => {
-                    const row = readMarkerRow(h, sessionId!);
-                    return row?.pending_pi_compaction_marker_state ? row : null;
-                },
-                { timeoutMs: 120_000, label: "pending_pi_compaction_marker_state blob written" },
+                () => (readCompartmentCount(h, sessionId!) > 0 ? true : null),
+                { timeoutMs: 300_000, label: "Pi historian publishes compartment row" },
             );
 
-            // Now trigger the drain by sending another materializing prompt.
-            // Pi's drain fires at end-of-pipeline when deferred-history is
-            // present and history was consumed this pass. This second
-            // post-trigger turn provides exactly that.
+            // Force one more materializing pass so the deferred drain
+            // definitely runs. Pi's drain fires at end-of-pipeline when
+            // deferred-history is present and history was consumed this
+            // pass; an additional simple prompt guarantees that condition.
             h.mock.setDefault({
                 text: "drain-trigger",
                 usage: { input_tokens: 600, output_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 600 },
@@ -209,9 +256,10 @@ describe("pi compaction marker", () => {
                 timeoutMs: 60_000,
             });
 
-            // The drain should have applied appendCompaction. Wait for the
-            // JSONL compaction entry to appear AND for the pending blob to
-            // be CAS-cleared.
+            // Now wait for the JSONL compaction entry. The drain may have
+            // happened on the post-trigger turn itself (Phase 2's drain
+            // gating allows it whenever history was consumed in the pass),
+            // in which case this resolves immediately.
             const compactions = await h.waitFor(
                 () => {
                     const entries = readCompactionEntries(h);
@@ -228,20 +276,21 @@ describe("pi compaction marker", () => {
             expect(latest.fromHook).toBe(true);
 
             // X1 fix invariant: firstKeptEntryId MUST be a non-empty string.
-            // This is the assertion that fails pre-fix when the ordinal
-            // counter divergence makes findFirstKeptEntryId return null OR
-            // when the synthetic-user fallback yields "".
+            // Pre-X1-fix, Pi's findFirstKeptEntryId ordinal-counter
+            // divergence vs convertEntriesToRawMessages caused this to
+            // silently return null in tool-heavy sessions.
             expect(typeof latest.firstKeptEntryId).toBe("string");
             expect((latest.firstKeptEntryId as string).length).toBeGreaterThan(0);
 
-            // Post-drain assertions: the Pi pending blob is CAS-cleared, and
-            // OpenCode's deferred-marker column stays null (that field is
-            // OpenCode-only).
+            // Drained/clean invariant: both deferred-marker columns are
+            // null at the end. OpenCode's pending_compaction_marker_state
+            // is OpenCode-only (Pi never writes there); Pi's own column
+            // should be CAS-cleared by the drain.
             const row = readMarkerRow(h, sessionId!);
             expect(row?.pending_compaction_marker_state ?? null).toBeNull();
             expect(row?.pending_pi_compaction_marker_state ?? null).toBeNull();
         } finally {
             await h.dispose();
         }
-    }, 300_000);
+    }, 600_000);
 });
