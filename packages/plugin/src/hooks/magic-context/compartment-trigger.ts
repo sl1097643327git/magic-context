@@ -205,13 +205,27 @@ export function checkCompartmentTrigger(
 
     const tailInfo = getUnsummarizedTailInfo(db, sessionId, triggerBudget);
     if (!tailInfo.hasNewRawHistory) {
-        const lastCompartmentEnd = getLastCompartmentEndMessage(db, sessionId);
-        const rawMessageCount = getRawSessionMessageCount(sessionId);
-        const protectedTailStart = getProtectedTailStartOrdinal(sessionId);
-        sessionLog(
-            sessionId,
-            `compartment trigger: skipped — no new raw history (usage=${usage.percentage.toFixed(1)}% nextStartOrdinal=${tailInfo.nextStartOrdinal} lastCompartmentEnd=${lastCompartmentEnd} rawMessageCount=${rawMessageCount} protectedTailStart=${protectedTailStart})`,
-        );
+        // Diagnostic data collection is best-effort. The helpers can throw if
+        // the OpenCode session DB is unavailable (e.g. in unit-test env or
+        // when the harness has not yet wired a RawMessageProvider). A throw
+        // here would propagate to the caller's try/catch and prevent
+        // downstream state updates (e.g. session-meta writes in event-handler
+        // line 542). Swallow any failure and log without the diagnostic
+        // fields so callers see no behavioral change.
+        try {
+            const lastCompartmentEnd = getLastCompartmentEndMessage(db, sessionId);
+            const rawMessageCount = getRawSessionMessageCount(sessionId);
+            const protectedTailStart = getProtectedTailStartOrdinal(sessionId);
+            sessionLog(
+                sessionId,
+                `compartment trigger: skipped — no new raw history (usage=${usage.percentage.toFixed(1)}% nextStartOrdinal=${tailInfo.nextStartOrdinal} lastCompartmentEnd=${lastCompartmentEnd} rawMessageCount=${rawMessageCount} protectedTailStart=${protectedTailStart})`,
+            );
+        } catch (error) {
+            sessionLog(
+                sessionId,
+                `compartment trigger: skipped — no new raw history (usage=${usage.percentage.toFixed(1)}% nextStartOrdinal=${tailInfo.nextStartOrdinal} diagnostic-collection-failed: ${error instanceof Error ? error.message : String(error)})`,
+            );
+        }
         return { shouldFire: false };
     }
 
