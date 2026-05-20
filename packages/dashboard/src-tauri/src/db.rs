@@ -1534,6 +1534,67 @@ fn resolve_from_opencode_db(
 
 // ── Query implementations ─────────────────────────────────────
 
+/// Resolve a project filter value (an identity like `git:<hash>` / `dir:<sha>`,
+/// or a legacy raw filesystem path) into the set of `memories.project_path`
+/// values that should be matched against.
+///
+/// **Why this exists**: the dashboard frontend sends the resolved project
+/// identity as the filter (matches how History does it), but the `memories`
+/// table stores raw filesystem paths in `project_path` — `git:<hash>` would
+/// never equal `/Users/.../my-repo`. We map the identity to every concrete
+/// path that resolves to it.
+///
+/// **Why this matters for clones/worktrees**: the same git repo cloned to two
+/// directories (or checked out as multiple worktrees) shares one root-commit
+/// identity but contributes memories under different `project_path` values.
+/// Sending just `primary_path` from the frontend would silently miss memories
+/// written from other clones. This helper returns ALL contributing paths so
+/// the union is queried.
+///
+/// **Backward compatibility**: if the filter value is a legacy raw path
+/// (older dashboard build, or external caller), no rows resolve to it as an
+/// identity and we fall back to filtering by that single value — same
+/// behavior as the pre-fix code.
+fn resolve_paths_for_memory_filter(
+    conn: &Connection,
+    project_filter: &str,
+) -> Result<Vec<String>, rusqlite::Error> {
+    // Pull every distinct stored memory project_path. The set is small (one
+    // per project that ever wrote memories), so the cost is bounded by the
+    // number of distinct projects, not memories.
+    let mut stmt = conn.prepare("SELECT DISTINCT project_path FROM memories")?;
+    let all_paths: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Resolve each stored path to an identity and keep the ones that match
+    // the requested filter. `resolve_project_identity` caches results so
+    // repeated calls are cheap.
+    let mut matched: Vec<String> = all_paths
+        .into_iter()
+        .filter(|path| resolve_project_identity(path) == project_filter)
+        .collect();
+
+    if matched.is_empty() {
+        // No stored path resolves to this identity. Treat the incoming value
+        // as a legacy raw path filter for backward compatibility — same as
+        // pre-fix behavior, which only worked when frontend sent raw paths.
+        matched.push(project_filter.to_string());
+    }
+    Ok(matched)
+}
+
+/// Build a SQL `IN (?, ?, ...)` placeholder string starting at parameter
+/// index `start_idx` (1-based). Returns the placeholder string. Caller is
+/// responsible for pushing the actual values onto the params vec in the same
+/// order.
+fn build_in_placeholders(count: usize, start_idx: usize) -> String {
+    (0..count)
+        .map(|i| format!("?{}", start_idx + i))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 pub fn get_memories(
     conn: &Connection,
     project_filter: Option<&str>,
@@ -1581,9 +1642,21 @@ pub fn get_memories(
         // LIKE uses the first param
     }
 
-    if let Some(p) = project_filter {
-        params.push(Box::new(p.to_string()));
-        conditions.push(format!("m.project_path = ?{}", params.len()));
+    // Resolve project filter (identity-or-path) into the set of concrete
+    // memory project_path values. Empty Vec is impossible because the helper
+    // falls back to `[filter]` when no rows resolve.
+    let resolved_paths: Vec<String> = if let Some(p) = project_filter {
+        resolve_paths_for_memory_filter(conn, p)?
+    } else {
+        Vec::new()
+    };
+    if !resolved_paths.is_empty() {
+        let start_idx = params.len() + 1;
+        for path in &resolved_paths {
+            params.push(Box::new(path.clone()));
+        }
+        let placeholders = build_in_placeholders(resolved_paths.len(), start_idx);
+        conditions.push(format!("m.project_path IN ({})", placeholders));
     }
     if let Some(s) = status_filter {
         params.push(Box::new(s.to_string()));
@@ -1687,12 +1760,15 @@ pub fn get_memories(
                  LIMIT ?{} OFFSET ?{}",
                 where_extra, limit_idx, offset_idx,
             );
-            // Rebuild params with LIKE pattern instead of FTS query
+            // Rebuild params with LIKE pattern instead of FTS query.
+            // Project filter uses the same resolved_paths set computed at the
+            // top of this function — the path-set is identity-stable for the
+            // duration of this call.
             let mut like_params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
             like_params.push(Box::new(like_pattern));
-            // Re-add filter params
-            if let Some(p) = project_filter {
-                like_params.push(Box::new(p.to_string()));
+            // Re-add filter params (matches the order used to build where_extra above)
+            for path in &resolved_paths {
+                like_params.push(Box::new(path.clone()));
             }
             if let Some(s) = status_filter {
                 like_params.push(Box::new(s.to_string()));
@@ -1729,8 +1805,8 @@ pub fn get_memories(
             );
             let mut like_params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
             like_params.push(Box::new(like_pattern));
-            if let Some(p) = project_filter {
-                like_params.push(Box::new(p.to_string()));
+            for path in &resolved_paths {
+                like_params.push(Box::new(path.clone()));
             }
             if let Some(s) = status_filter {
                 like_params.push(Box::new(s.to_string()));
@@ -1782,106 +1858,110 @@ pub fn get_memory_stats(
     conn: &Connection,
     project_filter: Option<&str>,
 ) -> Result<MemoryStats, rusqlite::Error> {
-    let project_clause = if project_filter.is_some() {
-        "WHERE project_path = ?1"
-    } else {
-        ""
-    };
-    let project_and = if project_filter.is_some() {
-        "AND project_path = ?1"
-    } else {
-        ""
+    // Resolve project filter identity → concrete `project_path` set (see
+    // `resolve_paths_for_memory_filter` doc comment for why this is needed).
+    // Empty when no filter is provided; non-empty when filtering.
+    let resolved_paths: Vec<String> = match project_filter {
+        Some(p) => resolve_paths_for_memory_filter(conn, p)?,
+        None => Vec::new(),
     };
 
-    let total: i64 = if let Some(p) = project_filter {
-        conn.query_row(
-            &format!("SELECT COUNT(*) FROM memories {}", project_clause),
-            [p],
-            |r| r.get(0),
-        )?
-    } else {
-        conn.query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))?
+    // Build a `project_path IN (?, ?, ...)` fragment and the param refs that
+    // back it. Both are empty when no project filter is active.
+    let (path_in_clause, path_params): (String, Vec<&dyn rusqlite::types::ToSql>) =
+        if resolved_paths.is_empty() {
+            (String::new(), Vec::new())
+        } else {
+            let placeholders = build_in_placeholders(resolved_paths.len(), 1);
+            (
+                format!("project_path IN ({})", placeholders),
+                resolved_paths
+                    .iter()
+                    .map(|p| p as &dyn rusqlite::types::ToSql)
+                    .collect(),
+            )
+        };
+
+    // Helper: assemble the full WHERE clause for a query that may already
+    // have other conditions. Returns `WHERE <conds>` or empty.
+    let where_with_extra = |existing: &str, has_filter: bool| -> String {
+        match (existing.is_empty(), has_filter) {
+            (true, true) => format!("WHERE {}", path_in_clause),
+            (false, true) => format!("WHERE {} AND {}", existing, path_in_clause),
+            (true, false) => String::new(),
+            (false, false) => format!("WHERE {}", existing),
+        }
     };
-    let active: i64 = if let Some(p) = project_filter {
+
+    let has_filter = !resolved_paths.is_empty();
+
+    let total: i64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM memories {}",
+            where_with_extra("", has_filter)
+        ),
+        path_params.as_slice(),
+        |r| r.get(0),
+    )?;
+    let active: i64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM memories {}",
+            where_with_extra("status = 'active'", has_filter)
+        ),
+        path_params.as_slice(),
+        |r| r.get(0),
+    )?;
+    let permanent: i64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM memories {}",
+            where_with_extra("status = 'permanent'", has_filter)
+        ),
+        path_params.as_slice(),
+        |r| r.get(0),
+    )?;
+    let archived: i64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM memories {}",
+            where_with_extra("status = 'archived'", has_filter)
+        ),
+        path_params.as_slice(),
+        |r| r.get(0),
+    )?;
+
+    // Embeddings count joins through memories to honor the project filter.
+    // Without a filter, count rows in the embeddings table directly (fastest).
+    let with_embeddings: i64 = if has_filter {
+        // Rewrite the IN clause to be qualified to `m.project_path` for the
+        // JOIN — placeholders stay at indices 1..=N so we can reuse path_params.
+        let qualified_in = format!(
+            "m.project_path IN ({})",
+            build_in_placeholders(resolved_paths.len(), 1)
+        );
         conn.query_row(
             &format!(
-                "SELECT COUNT(*) FROM memories WHERE status = 'active' {}",
-                project_and
+                "SELECT COUNT(*) FROM memory_embeddings me JOIN memories m ON me.memory_id = m.id WHERE {}",
+                qualified_in
             ),
-            [p],
+            path_params.as_slice(),
             |r| r.get(0),
-        )?
-    } else {
-        conn.query_row(
-            "SELECT COUNT(*) FROM memories WHERE status = 'active'",
-            [],
-            |r| r.get(0),
-        )?
-    };
-    let permanent: i64 = if let Some(p) = project_filter {
-        conn.query_row(
-            &format!(
-                "SELECT COUNT(*) FROM memories WHERE status = 'permanent' {}",
-                project_and
-            ),
-            [p],
-            |r| r.get(0),
-        )?
-    } else {
-        conn.query_row(
-            "SELECT COUNT(*) FROM memories WHERE status = 'permanent'",
-            [],
-            |r| r.get(0),
-        )?
-    };
-    let archived: i64 = if let Some(p) = project_filter {
-        conn.query_row(
-            &format!(
-                "SELECT COUNT(*) FROM memories WHERE status = 'archived' {}",
-                project_and
-            ),
-            [p],
-            |r| r.get(0),
-        )?
-    } else {
-        conn.query_row(
-            "SELECT COUNT(*) FROM memories WHERE status = 'archived'",
-            [],
-            |r| r.get(0),
-        )?
-    };
-    let with_embeddings: i64 = if let Some(p) = project_filter {
-        conn.query_row(
-            "SELECT COUNT(*) FROM memory_embeddings me JOIN memories m ON me.memory_id = m.id WHERE m.project_path = ?1",
-            [p], |r| r.get(0),
         )?
     } else {
         conn.query_row("SELECT COUNT(*) FROM memory_embeddings", [], |r| r.get(0))?
     };
 
-    let cat_sql = if project_filter.is_some() {
-        "SELECT category, COUNT(*) as cnt FROM memories WHERE status != 'archived' AND project_path = ?1 GROUP BY category ORDER BY cnt DESC"
-    } else {
-        "SELECT category, COUNT(*) as cnt FROM memories WHERE status != 'archived' GROUP BY category ORDER BY cnt DESC"
-    };
-    let mut stmt = conn.prepare(cat_sql)?;
-    let categories: Vec<CategoryCount> = if let Some(p) = project_filter {
-        stmt.query_map([p], |row| {
+    let cat_sql = format!(
+        "SELECT category, COUNT(*) as cnt FROM memories {} GROUP BY category ORDER BY cnt DESC",
+        where_with_extra("status != 'archived'", has_filter)
+    );
+    let mut stmt = conn.prepare(&cat_sql)?;
+    let categories: Vec<CategoryCount> = stmt
+        .query_map(path_params.as_slice(), |row| {
             Ok(CategoryCount {
                 category: row.get(0)?,
                 count: row.get(1)?,
             })
         })?
-        .collect::<Result<Vec<_>, _>>()?
-    } else {
-        stmt.query_map([], |row| {
-            Ok(CategoryCount {
-                category: row.get(0)?,
-                count: row.get(1)?,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?
-    };
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(MemoryStats {
         total,
@@ -3867,5 +3947,246 @@ mod get_session_cache_events_by_turn_count_tests {
         ];
         let result = trim_events_to_turns(events, 0);
         assert!(result.is_empty());
+    }
+}
+
+
+#[cfg(test)]
+mod memory_project_filter_tests {
+    //! Issue #87: the dashboard Memories tab project filter returned zero
+    //! results when any project was selected because the frontend sent the
+    //! resolved project *identity* (`git:<hash>` / `dir:<sha256>`) while
+    //! `get_memories` / `get_memory_stats` filtered with `project_path = ?`
+    //! against raw filesystem paths stored in the `memories` table.
+    //!
+    //! These tests cover the helper that maps identities back to the set of
+    //! concrete paths (handling clones + worktrees that share an identity
+    //! but contribute memories under different absolute paths), and the
+    //! end-to-end identity-filter behavior of `get_memories` and
+    //! `get_memory_stats`.
+    use super::*;
+    use crate::project_identity::clear_cache_for_tests;
+    use rusqlite::Connection;
+
+    /// Build a minimal in-memory Magic Context-shaped DB with just enough of
+    /// the `memories` + `memory_embeddings` + `memories_fts` surface that
+    /// `get_memories` and `get_memory_stats` can run end-to-end.
+    fn make_memory_db() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_path TEXT NOT NULL,
+                category TEXT NOT NULL,
+                content TEXT NOT NULL,
+                normalized_hash TEXT,
+                source_session_id TEXT,
+                source_type TEXT,
+                seen_count INTEGER DEFAULT 1,
+                retrieval_count INTEGER DEFAULT 0,
+                first_seen_at INTEGER,
+                created_at INTEGER,
+                updated_at INTEGER,
+                last_seen_at INTEGER,
+                last_retrieved_at INTEGER,
+                status TEXT NOT NULL DEFAULT 'active',
+                expires_at INTEGER,
+                verification_status TEXT,
+                verified_at INTEGER,
+                superseded_by_memory_id INTEGER,
+                merged_from TEXT,
+                metadata_json TEXT
+            );
+            CREATE TABLE memory_embeddings (
+                memory_id INTEGER PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+                vector BLOB NOT NULL,
+                model_id TEXT
+            );
+            CREATE VIRTUAL TABLE memories_fts USING fts5(
+                content, category, content='memories', content_rowid='id'
+            );",
+        )
+        .expect("create memory schema");
+        conn
+    }
+
+    fn insert_memory(conn: &Connection, project_path: &str, category: &str, status: &str) -> i64 {
+        // `map_memory_row` expects every non-Option Memory field to be
+        // present and well-typed, so the test inserts must populate them:
+        // normalized_hash, source_type, seen_count, retrieval_count,
+        // first_seen_at, last_seen_at, verification_status. Nullable
+        // columns (source_session_id, expires_at, etc.) are intentionally
+        // left default-NULL.
+        let content = format!("memory in {project_path} / {category}");
+        let normalized_hash = format!(
+            "{:x}",
+            md5::compute(format!("{project_path}|{category}|{content}").as_bytes())
+        );
+        conn.execute(
+            "INSERT INTO memories
+                (project_path, category, content, normalized_hash,
+                 source_type, seen_count, retrieval_count,
+                 first_seen_at, last_seen_at, verification_status,
+                 status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4,
+                     'historian', 1, 0,
+                     1000, 1000, 'unverified',
+                     ?5, 1000, 1000)",
+            (project_path, category, content, normalized_hash, status),
+        )
+        .expect("insert memory");
+        conn.last_insert_rowid()
+    }
+
+    /// A non-git temp dir resolves to a `dir:<sha256>` identity that's
+    /// derived purely from the canonicalized path string — no shell-out, no
+    /// git lookup. We use a stable dir so test order doesn't bite us when
+    /// shared filesystem state changes.
+    fn stable_dir_identity(path: &str) -> String {
+        // Force the identity cache into a known state so this test doesn't
+        // see leftovers from a sibling test that resolved the same path.
+        clear_cache_for_tests();
+        resolve_project_identity(path)
+    }
+
+    #[test]
+    fn resolve_paths_returns_all_paths_sharing_identity() {
+        // The CRITICAL invariant for issue #87: two clones of the same repo
+        // (or two paths that resolve to the same identity for any reason)
+        // both contribute memories under their own raw `project_path`, and
+        // a single identity filter must surface BOTH paths' memories.
+        //
+        // We use the SAME path twice to guarantee they share an identity
+        // without needing a real git repo in the test sandbox.
+        let conn = make_memory_db();
+
+        // Two distinct memories under the same project_path (the realistic
+        // case where one path accumulates many memories over time).
+        insert_memory(&conn, "/tmp/test-proj-1", "ARCHITECTURE_DECISIONS", "active");
+        insert_memory(&conn, "/tmp/test-proj-1", "CONSTRAINTS", "active");
+
+        // A memory under a different path that must NOT be returned when we
+        // filter by the first path's identity.
+        insert_memory(&conn, "/tmp/test-proj-2", "ARCHITECTURE_DECISIONS", "active");
+
+        let identity = stable_dir_identity("/tmp/test-proj-1");
+        let paths = resolve_paths_for_memory_filter(&conn, &identity)
+            .expect("resolve paths");
+
+        assert_eq!(
+            paths,
+            vec!["/tmp/test-proj-1".to_string()],
+            "expected exactly the matching project_path, got {paths:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_paths_falls_back_to_raw_value_when_no_match() {
+        // Backward compatibility: older dashboard builds (or external
+        // callers) might send a raw path. If no stored memories resolve to
+        // it as an identity, we fall back to filtering by that single value
+        // — matching pre-fix behavior so legacy clients still work.
+        let conn = make_memory_db();
+        insert_memory(&conn, "/tmp/somewhere", "X", "active");
+
+        let paths = resolve_paths_for_memory_filter(&conn, "/tmp/legacy-raw-path-filter")
+            .expect("resolve paths");
+
+        assert_eq!(paths, vec!["/tmp/legacy-raw-path-filter".to_string()]);
+    }
+
+    #[test]
+    fn resolve_paths_empty_db_returns_filter_as_fallback() {
+        // Empty memories table: no stored rows can resolve. We still return
+        // the filter value so the resulting query produces an empty result
+        // set deterministically instead of erroring.
+        let conn = make_memory_db();
+        let paths = resolve_paths_for_memory_filter(&conn, "git:abc123")
+            .expect("resolve paths");
+        assert_eq!(paths, vec!["git:abc123".to_string()]);
+    }
+
+    #[test]
+    fn build_in_placeholders_renders_correct_indices() {
+        // Sanity check the helper used to inject IN clauses into queries
+        // that mix path params with status/category/limit/offset params.
+        assert_eq!(build_in_placeholders(0, 1), "");
+        assert_eq!(build_in_placeholders(1, 1), "?1");
+        assert_eq!(build_in_placeholders(3, 1), "?1, ?2, ?3");
+        assert_eq!(build_in_placeholders(2, 5), "?5, ?6");
+    }
+
+    #[test]
+    fn get_memories_with_identity_filter_returns_matching_rows() {
+        // End-to-end: send a `git:`/`dir:`-style identity to get_memories
+        // and verify rows are returned. Pre-fix this returned zero.
+        let conn = make_memory_db();
+        insert_memory(&conn, "/tmp/issue87-a", "ARCHITECTURE_DECISIONS", "active");
+        insert_memory(&conn, "/tmp/issue87-a", "CONSTRAINTS", "active");
+        insert_memory(&conn, "/tmp/issue87-b", "ARCHITECTURE_DECISIONS", "active");
+
+        let identity = stable_dir_identity("/tmp/issue87-a");
+        let rows = get_memories(&conn, Some(&identity), None, None, None, 100, 0)
+            .expect("get_memories");
+
+        assert_eq!(rows.len(), 2, "expected both memories under /tmp/issue87-a");
+        for row in &rows {
+            assert_eq!(row.project_path, "/tmp/issue87-a");
+        }
+    }
+
+    #[test]
+    fn get_memory_stats_with_identity_filter_returns_matching_counts() {
+        // End-to-end: stats must also resolve identity → paths. Pre-fix the
+        // total/active/permanent/archived/categories counts were all zero
+        // whenever a project was selected from the frontend dropdown.
+        let conn = make_memory_db();
+        insert_memory(&conn, "/tmp/issue87-stats", "ARCHITECTURE_DECISIONS", "active");
+        insert_memory(&conn, "/tmp/issue87-stats", "CONSTRAINTS", "active");
+        insert_memory(&conn, "/tmp/issue87-stats", "USER_DIRECTIVES", "archived");
+        insert_memory(&conn, "/tmp/issue87-other", "ARCHITECTURE_DECISIONS", "active");
+
+        let identity = stable_dir_identity("/tmp/issue87-stats");
+        let stats = get_memory_stats(&conn, Some(&identity)).expect("get_memory_stats");
+
+        assert_eq!(stats.total, 3);
+        assert_eq!(stats.active, 2);
+        assert_eq!(stats.archived, 1);
+        assert_eq!(stats.permanent, 0);
+        // Categories should list both active categories (archived excluded).
+        let cat_names: Vec<&str> = stats
+            .categories
+            .iter()
+            .map(|c| c.category.as_str())
+            .collect();
+        assert!(cat_names.contains(&"ARCHITECTURE_DECISIONS"));
+        assert!(cat_names.contains(&"CONSTRAINTS"));
+        assert!(!cat_names.contains(&"USER_DIRECTIVES")); // archived
+    }
+
+    #[test]
+    fn get_memories_without_filter_returns_all() {
+        // No regression for the unfiltered path.
+        let conn = make_memory_db();
+        insert_memory(&conn, "/tmp/a", "X", "active");
+        insert_memory(&conn, "/tmp/b", "Y", "active");
+
+        let rows = get_memories(&conn, None, None, None, None, 100, 0)
+            .expect("get_memories");
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn get_memory_stats_without_filter_counts_everything() {
+        let conn = make_memory_db();
+        insert_memory(&conn, "/tmp/a", "X", "active");
+        insert_memory(&conn, "/tmp/b", "Y", "permanent");
+        insert_memory(&conn, "/tmp/c", "Z", "archived");
+
+        let stats = get_memory_stats(&conn, None).expect("get_memory_stats");
+        assert_eq!(stats.total, 3);
+        assert_eq!(stats.active, 1);
+        assert_eq!(stats.permanent, 1);
+        assert_eq!(stats.archived, 1);
     }
 }
