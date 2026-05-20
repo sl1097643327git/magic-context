@@ -2,6 +2,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
 
+import { stripJsonComments } from "../shared/jsonc-parser";
+
 export interface SubstituteInput {
     /** Raw config text before JSONC parsing. */
     text: string;
@@ -75,6 +77,11 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
         }
         return { text, warnings };
     }
+
+    // Strip JSONC comments before substitution so tokens in comments cannot
+    // trigger env/file side effects. The shared parser helper is string-aware,
+    // so URL strings and literal comment markers inside strings are preserved.
+    text = stripJsonComments(text);
 
     text = text.replace(ENV_PATTERN, (_, rawName: string) => {
         const varName = rawName.trim();

@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 
-function stripJsonComments(content: string): string {
+export function stripJsonComments(content: string): string {
     let result = "";
     let inString = false;
     let escaped = false;

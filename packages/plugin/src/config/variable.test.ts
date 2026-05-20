@@ -201,7 +201,7 @@ describe("substituteConfigVariables", () => {
             expect(result.warnings).toHaveLength(0);
         });
 
-        it("preserves {file:} tokens inside // line comments", () => {
+        it("suppresses {file:} expansion inside // line comments", () => {
             const keyFile = join(tmpDir, "key.txt");
             writeFileSync(keyFile, "should-not-appear");
             const input = [
@@ -213,9 +213,41 @@ describe("substituteConfigVariables", () => {
 
             const result = substituteConfigVariables({ text: input });
 
-            // Token inside comment stays literal — only active values substitute.
-            expect(result.text).toContain(`// see docs: {file:${keyFile}}`);
+            expect(result.text).not.toContain(`{file:${keyFile}}`);
             expect(result.text).not.toContain("should-not-appear");
+            expect(result.warnings).toHaveLength(0);
+        });
+
+        it("suppresses {file:} expansion inside block comments", () => {
+            const keyFile = join(tmpDir, "key.txt");
+            writeFileSync(keyFile, "should-not-appear");
+            const input = [
+                `{`,
+                `    /* see docs: {file:${keyFile}} */`,
+                `    "other": "value"`,
+                `}`,
+            ].join("\n");
+
+            const result = substituteConfigVariables({ text: input });
+
+            expect(result.text).not.toContain(`{file:${keyFile}}`);
+            expect(result.text).not.toContain("should-not-appear");
+            expect(result.warnings).toHaveLength(0);
+        });
+
+        it("still expands {file:} tokens inside strings that contain URL comment markers", () => {
+            const keyFile = join(tmpDir, "key.txt");
+            writeFileSync(keyFile, "token-value");
+            const input = `{ "endpoint": "https://example.test/*literal*/{file:${keyFile}}" }`;
+
+            const result = substituteConfigVariables({ text: input });
+
+            expect(result.text).toBe(
+                `{ "endpoint": "https://example.test/*literal*/token-value" }`,
+            );
+            expect(JSON.parse(result.text).endpoint).toBe(
+                "https://example.test/*literal*/token-value",
+            );
             expect(result.warnings).toHaveLength(0);
         });
     });
