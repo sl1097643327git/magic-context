@@ -89,7 +89,11 @@ import {
 } from "@magic-context/core/hooks/magic-context/boundary-execution";
 import { replayCavemanCompression } from "@magic-context/core/hooks/magic-context/caveman-cleanup";
 import { checkCompartmentTrigger } from "@magic-context/core/hooks/magic-context/compartment-trigger";
-import { resolveExecuteThreshold } from "@magic-context/core/hooks/magic-context/event-resolvers";
+import { deriveTriggerBudget } from "@magic-context/core/hooks/magic-context/derive-budgets";
+import {
+	resolveContextLimit,
+	resolveExecuteThreshold,
+} from "@magic-context/core/hooks/magic-context/event-resolvers";
 import { getVisibleMemoryIds } from "@magic-context/core/hooks/magic-context/inject-compartments";
 import {
 	markNoteNudgeDelivered,
@@ -526,12 +530,18 @@ export interface PiHistorianOptions {
 	executeThresholdPercentage?:
 		| number
 		| { default: number; [modelKey: string]: number };
-	/**
-	 * Trigger budget (tokens) used by the commit-cluster and tail-size
-	 * triggers. Mirrors `compartment_token_budget` derived value in
-	 * OpenCode; defaults to 8000 when omitted.
-	 */
-	triggerBudget?: number;
+	/** Token-based execute-threshold overrides. Mirrors OpenCode `execute_threshold_tokens`. */
+	executeThresholdTokens?: {
+		default?: number;
+		[modelKey: string]: number | undefined;
+	};
+	/** Commit-cluster trigger config. Mirrors OpenCode `commit_cluster_trigger`. */
+	commitClusterTrigger?: { enabled: boolean; min_clusters: number };
+	/** Projected-drop math knobs threaded into `checkCompartmentTrigger`. */
+	autoDropToolAge?: number;
+	protectedTags?: number;
+	clearReasoningAge?: number;
+	dropToolStructure?: boolean;
 	/** Fraction of executable context reserved for rendered <session-history>. */
 	historyBudgetPercentage?: number;
 	/** Compressor config loaded from magic-context.jsonc. */
@@ -1746,6 +1756,76 @@ export async function awaitInFlightHistorians(): Promise<void> {
 	await Promise.allSettled(promises);
 }
 
+function splitModelKeyForPi(modelKey: string | undefined): {
+	providerID: string | undefined;
+	modelID: string | undefined;
+} {
+	if (!modelKey) return { providerID: undefined, modelID: undefined };
+	const slash = modelKey.indexOf("/");
+	if (slash <= 0 || slash === modelKey.length - 1) {
+		return { providerID: undefined, modelID: undefined };
+	}
+	return {
+		providerID: modelKey.slice(0, slash),
+		modelID: modelKey.slice(slash + 1),
+	};
+}
+
+export function resolvePiHistorianTriggerInputs(args: {
+	db: ContextDatabase;
+	sessionId: string;
+	historian: PiHistorianOptions;
+	modelKey: string | undefined;
+	usageContextLimit?: number;
+}): {
+	executeThresholdPercentage: number;
+	triggerBudget: number;
+	autoDropToolAge: number;
+	protectedTags: number | undefined;
+	clearReasoningAge: number;
+	dropToolStructure: boolean;
+	commitClusterTrigger: { enabled: boolean; min_clusters: number } | undefined;
+	contextLimit: number;
+} {
+	const { providerID, modelID } = splitModelKeyForPi(args.modelKey);
+	let contextLimit = resolveContextLimit(providerID, modelID, {
+		db: args.db,
+		sessionID: args.sessionId,
+	});
+	if (
+		(providerID === undefined || modelID === undefined) &&
+		typeof args.usageContextLimit === "number" &&
+		Number.isFinite(args.usageContextLimit) &&
+		args.usageContextLimit > 0
+	) {
+		contextLimit = args.usageContextLimit;
+	}
+	const executeThresholdPercentage = resolveExecuteThreshold(
+		args.historian.executeThresholdPercentage ?? 65,
+		args.modelKey,
+		65,
+		{
+			tokensConfig: args.historian.executeThresholdTokens,
+			contextLimit,
+			sessionId: args.sessionId,
+		},
+	);
+	return {
+		executeThresholdPercentage,
+		triggerBudget: deriveTriggerBudget(
+			contextLimit,
+			executeThresholdPercentage,
+		),
+		autoDropToolAge: args.historian.autoDropToolAge ?? 100,
+		protectedTags: args.historian.protectedTags,
+		clearReasoningAge:
+			args.historian.clearReasoningAge ?? DEFAULT_CLEAR_REASONING_AGE,
+		dropToolStructure: args.historian.dropToolStructure ?? true,
+		commitClusterTrigger: args.historian.commitClusterTrigger,
+		contextLimit,
+	};
+}
+
 function resolveHistoryBudgetTokensForPi(args: {
 	historyBudgetPercentage: number | undefined;
 	usagePercentage: number;
@@ -2057,7 +2137,13 @@ function maybeFireHistorian(args: {
 	// computed by `pi-pressure.ts` against the effective context
 	// limit (with detected_context_limit override applied).
 	let usage: { percentage: number; inputTokens: number };
+	let usageContextLimit: number | undefined;
 	try {
+		const piUsage = ctx.getContextUsage?.();
+		usageContextLimit =
+			typeof piUsage?.contextWindow === "number" && piUsage.contextWindow > 0
+				? piUsage.contextWindow
+				: undefined;
 		const sessionMetaForUsage = getOrCreateSessionMeta(db, sessionId);
 		if (
 			sessionMetaForUsage.lastContextPercentage > 0 &&
@@ -2077,7 +2163,6 @@ function maybeFireHistorian(args: {
 			// original implementation used; the +output token drift
 			// of ~0.1% is acceptable on the first turn before
 			// message_end runs.
-			const piUsage = ctx.getContextUsage?.();
 			if (
 				!piUsage ||
 				piUsage.tokens === null ||
@@ -2159,18 +2244,27 @@ function maybeFireHistorian(args: {
 		}
 
 		const sessionMeta = getOrCreateSessionMeta(db, sessionId);
+		const modelKey = liveModelBySession.get(sessionId);
+		const triggerInputs = resolvePiHistorianTriggerInputs({
+			db,
+			sessionId,
+			historian,
+			modelKey,
+			usageContextLimit,
+		});
 		const trigger = checkCompartmentTrigger(
 			db,
 			sessionId,
 			sessionMeta,
 			usage,
 			0, // _previousPercentage — unused by current trigger logic
-			resolveExecuteThreshold(
-				historian.executeThresholdPercentage ?? 65,
-				liveModelBySession.get(sessionId),
-				65,
-			),
-			historian.triggerBudget ?? 8000,
+			triggerInputs.executeThresholdPercentage,
+			triggerInputs.triggerBudget,
+			triggerInputs.autoDropToolAge,
+			triggerInputs.protectedTags,
+			triggerInputs.clearReasoningAge,
+			triggerInputs.dropToolStructure,
+			triggerInputs.commitClusterTrigger,
 		);
 
 		if (!trigger.shouldFire) {

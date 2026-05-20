@@ -13,10 +13,15 @@ import {
 	getPersistedStickyTurnReminder,
 	getTagsBySession,
 	incrementHistorianFailure,
+	insertTag,
 	queuePendingOp,
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
+import { checkCompartmentTrigger } from "@magic-context/core/hooks/magic-context/compartment-trigger";
+import { deriveTriggerBudget } from "@magic-context/core/hooks/magic-context/derive-budgets";
+import { resolveExecuteThreshold } from "@magic-context/core/hooks/magic-context/event-resolvers";
 import { onNoteTrigger } from "@magic-context/core/hooks/magic-context/note-nudger";
+import { withRawMessageProvider } from "@magic-context/core/hooks/magic-context/read-session-chunk";
 import {
 	clearModelsDevCache,
 	refreshModelLimitsFromApi,
@@ -36,6 +41,7 @@ import {
 	recordPiLiveModel,
 	recordPiToolExecution,
 	registerPiContextHandler,
+	resolvePiHistorianTriggerInputs,
 } from "./context-handler";
 import {
 	assistantMessage,
@@ -100,7 +106,6 @@ describe("registerPiContextHandler", () => {
 					model: "test/historian",
 					historianChunkTokens: 8000,
 					executeThresholdPercentage: 65,
-					triggerBudget: 8000,
 				},
 			});
 			const handler = fake.handlers.get("context") as (
@@ -738,6 +743,181 @@ describe("registerPiContextHandler", () => {
 			expect(textOf(result.messages[1] as never)).toBe("[dropped §2§]");
 		} finally {
 			clearContextHandlerSession("ses-context");
+			closeQuietly(db);
+		}
+	});
+
+	it("derives historian triggerBudget from the same live-session inputs as OpenCode", () => {
+		const db = createTestDb();
+		try {
+			const modelKey = "test/model";
+			const contextLimit = 200_000;
+			const executeThresholdPercentage = { default: 90, [modelKey]: 70 };
+			const executeThresholdTokens = { [modelKey]: 80_000 };
+			const opencodeThreshold = resolveExecuteThreshold(
+				executeThresholdPercentage,
+				modelKey,
+				65,
+				{
+					tokensConfig: executeThresholdTokens,
+					contextLimit,
+					sessionId: "ses-parity-budget",
+				},
+			);
+			const opencodeBudget = deriveTriggerBudget(
+				contextLimit,
+				opencodeThreshold,
+			);
+
+			const piInputs = resolvePiHistorianTriggerInputs({
+				db,
+				sessionId: "ses-parity-budget",
+				modelKey: undefined,
+				usageContextLimit: contextLimit,
+				historian: {
+					runner: {} as SubagentRunner,
+					model: "test/historian",
+					historianChunkTokens: 8000,
+					executeThresholdPercentage,
+					executeThresholdTokens: { default: 80_000 },
+				},
+			});
+
+			expect(piInputs.executeThresholdPercentage).toBe(opencodeThreshold);
+			expect(piInputs.triggerBudget).toBe(opencodeBudget);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("resolves the full checkCompartmentTrigger argument set per evaluation", () => {
+		const db = createTestDb();
+		try {
+			const historian = {
+				runner: {} as SubagentRunner,
+				model: "test/historian",
+				historianChunkTokens: 8000,
+				executeThresholdPercentage: 65,
+				executeThresholdTokens: { default: 40_000 },
+				commitClusterTrigger: { enabled: false, min_clusters: 9 },
+				autoDropToolAge: 7,
+				protectedTags: 3,
+				clearReasoningAge: 11,
+				dropToolStructure: false,
+			};
+
+			const small = resolvePiHistorianTriggerInputs({
+				db,
+				sessionId: "ses-full-fields",
+				historian,
+				modelKey: undefined,
+				usageContextLimit: 100_000,
+			});
+			const large = resolvePiHistorianTriggerInputs({
+				db,
+				sessionId: "ses-full-fields",
+				historian: { ...historian, executeThresholdTokens: undefined },
+				modelKey: undefined,
+				usageContextLimit: 1_000_000,
+			});
+
+			expect(small).toMatchObject({
+				executeThresholdPercentage: 40,
+				triggerBudget: 5000,
+				autoDropToolAge: 7,
+				protectedTags: 3,
+				clearReasoningAge: 11,
+				dropToolStructure: false,
+				commitClusterTrigger: { enabled: false, min_clusters: 9 },
+			});
+			expect(large.triggerBudget).toBe(32_500);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("matches OpenCode compartment trigger decisions for identical resolved inputs", () => {
+		const db = createTestDb();
+		const sessionId = "ses-trigger-parity";
+		try {
+			const rawMessages = Array.from({ length: 20 }, (_, index) => ({
+				ordinal: index + 1,
+				id: `msg-${index + 1}`,
+				role: "user",
+				parts: [{ type: "text", text: `meaningful turn ${index + 1}` }],
+			}));
+			for (let i = 1; i <= 20; i++) {
+				insertTag(db, sessionId, `msg-${i}`, "message", 1000, i);
+			}
+			const usage = { percentage: 64, inputTokens: 64_000 };
+			const contextLimit = 200_000;
+			const executeThresholdPercentage = 65;
+			const triggerBudget = deriveTriggerBudget(
+				contextLimit,
+				executeThresholdPercentage,
+			);
+			const historian = {
+				runner: {} as SubagentRunner,
+				model: "test/historian",
+				historianChunkTokens: 8000,
+				executeThresholdPercentage,
+				commitClusterTrigger: { enabled: true, min_clusters: 3 },
+				autoDropToolAge: 100,
+				protectedTags: 20,
+				clearReasoningAge: 50,
+				dropToolStructure: true,
+			};
+			const piInputs = resolvePiHistorianTriggerInputs({
+				db,
+				sessionId,
+				historian,
+				modelKey: undefined,
+				usageContextLimit: contextLimit,
+			});
+
+			withRawMessageProvider(
+				sessionId,
+				{ readMessages: () => rawMessages },
+				() => {
+					const sessionMeta = getOrCreateSessionMeta(db, sessionId);
+					const opencodeDecision = checkCompartmentTrigger(
+						db,
+						sessionId,
+						sessionMeta,
+						usage,
+						0,
+						executeThresholdPercentage,
+						triggerBudget,
+						100,
+						20,
+						50,
+						true,
+						{ enabled: true, min_clusters: 3 },
+					);
+					const piDecision = checkCompartmentTrigger(
+						db,
+						sessionId,
+						sessionMeta,
+						usage,
+						0,
+						piInputs.executeThresholdPercentage,
+						piInputs.triggerBudget,
+						piInputs.autoDropToolAge,
+						piInputs.protectedTags,
+						piInputs.clearReasoningAge,
+						piInputs.dropToolStructure,
+						piInputs.commitClusterTrigger,
+					);
+
+					expect(piInputs.triggerBudget).toBe(triggerBudget);
+					expect(piDecision).toEqual(opencodeDecision);
+					expect(piDecision).toEqual({
+						shouldFire: true,
+						reason: "projected_headroom",
+					});
+				},
+			);
+		} finally {
 			closeQuietly(db);
 		}
 	});

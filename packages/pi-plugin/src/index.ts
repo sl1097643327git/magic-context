@@ -43,7 +43,6 @@ import {
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import {
 	deriveHistorianChunkTokens,
-	deriveTriggerBudget,
 	resolveHistorianContextLimit,
 } from "@magic-context/core/hooks/magic-context/derive-budgets";
 import { resolveCacheTtl } from "@magic-context/core/hooks/magic-context/event-resolvers";
@@ -344,23 +343,11 @@ function resolveHistorianFromConfig(
 	const model = historian?.model?.trim();
 	if (!model || model.length === 0) return undefined;
 
-	// Step 5c: replace the previous hardcoded 8K trigger budget with the
-	// OpenCode-style derivation. The trigger budget anchors size-based
-	// historian triggers (tail_size, commit_clusters); the chunk budget
-	// scales with the HISTORIAN model's own context window so a single
-	// historian call doesn't overflow.
-	//
-	// We don't know the main session's model at boot (Pi reports it via
-	// `ctx.getContextUsage()` per turn), so we approximate `mainContextLimit`
-	// using the historian model's resolved limit. For most users the
-	// session model has equal-or-larger context than the historian model
-	// (Sonnet/Opus session, Haiku historian), so this is safe — the
-	// trigger budget will scale to the smaller of the two contexts and
-	// fire historian sooner rather than later. The OpenCode plugin uses
-	// the live session model here because it has direct access; that's a
-	// minor parity gap, not a correctness issue.
+	// The historian chunk budget is anchored to the HISTORIAN model because
+	// it bounds one summarizer call. The trigger budget is intentionally NOT
+	// derived at startup: Pi resolves it per context pass from the live main
+	// session model + effective execute threshold to match OpenCode.
 	const historianContextLimit = resolveHistorianContextLimit(model);
-	const triggerBudget = deriveTriggerBudget(historianContextLimit, 65);
 	const historianChunkTokens = deriveHistorianChunkTokens(
 		historianContextLimit,
 	);
@@ -393,7 +380,12 @@ function resolveHistorianFromConfig(
 		// Required for providers like GitHub Copilot that apply bad defaults.
 		thinkingLevel: historian?.thinking_level,
 		executeThresholdPercentage: config.execute_threshold_percentage,
-		triggerBudget,
+		executeThresholdTokens: config.execute_threshold_tokens,
+		commitClusterTrigger: config.commit_cluster_trigger,
+		autoDropToolAge: config.auto_drop_tool_age,
+		protectedTags: config.protected_tags,
+		clearReasoningAge: config.clear_reasoning_age,
+		dropToolStructure: config.drop_tool_structure,
 		historyBudgetPercentage: config.history_budget_percentage,
 		compressor: {
 			enabled: config.compressor.enabled,
