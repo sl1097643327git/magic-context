@@ -2179,6 +2179,7 @@ function maybeFireHistorian(args: {
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		sessionLog(sessionId, `historian trigger eval failed: ${message}`);
+	} finally {
 		if (!triggered) unregister();
 	}
 }

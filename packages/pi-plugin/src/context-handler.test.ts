@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
 	__resetMessageIndexAsyncForTests,
 	isSessionReconciled,
@@ -1081,5 +1083,22 @@ describe("collectMessageEntryIdsByRef", () => {
 			"ses-ref",
 		);
 		expect(result).toEqual(["entry-msg"]);
+	});
+});
+
+describe("maybeFireHistorian raw provider cleanup", () => {
+	it("unregisters the raw-message provider in finally when no historian is spawned", () => {
+		const src = readFileSync(
+			join(import.meta.dir, "context-handler.ts"),
+			"utf8",
+		);
+		const start = src.indexOf("function maybeFireHistorian");
+		const end = src.indexOf("interface RunPipelineArgs", start);
+		const body = src.slice(start, end);
+
+		expect(body).toContain("let triggered = false");
+		expect(body).toContain("if (!trigger.shouldFire)");
+		expect(body).toContain("} finally {");
+		expect(body).toContain("if (!triggered) unregister();");
 	});
 });
