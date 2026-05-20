@@ -2,7 +2,12 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { type DiagnosticReport, renderDiagnosticsMarkdown } from "./diagnostics-opencode";
+import { capBodyToGithubLimit, extractRecentErrors, MAX_GITHUB_BODY_BYTES } from "./issue-body";
 import { sanitizeConfigValue, sanitizeDiagnosticText } from "./redaction";
+
+// Re-export the shared body helpers so downstream callers (and tests) can
+// import them from the same module they get `bundleIssueReport` from.
+export { capBodyToGithubLimit, extractRecentErrors, MAX_GITHUB_BODY_BYTES };
 
 /**
  * Replace absolute home paths, usernames, and known secret-token shapes in
@@ -125,6 +130,16 @@ export async function bundleIssueReport(
     const historianScanWindow = sanitizeLogContent(logLines.slice(-4000).join("\n"));
     const historianFailureLines = extractHistorianFailureLines(historianScanWindow, 30);
 
+    // Pull the most recent 20 ERROR-shaped lines into their own dedicated
+    // section. The body-size cap (`capBodyToGithubLimit`) only shrinks the
+    // main `## Log (last N lines)` block, so promoting errors here
+    // guarantees the agent / human reading the issue still sees them even
+    // when the body needs heavy truncation. We scan a wide window for the
+    // same reason as historian: a flood of debug noise after the error
+    // shouldn't push the cause out of view.
+    const errorScanWindow = sanitizeLogContent(logLines.slice(-4000).join("\n"));
+    const recentErrorLines = extractRecentErrors(errorScanWindow, 20);
+
     const configBody = JSON.stringify(
         sanitizeConfigValue(report.magicContextConfig.flags),
         null,
@@ -132,7 +147,7 @@ export async function bundleIssueReport(
     );
     const sanitizedConfigPath = report.configPaths.magicContextConfig.replace(homedir(), "~");
 
-    const bodyMarkdown = [
+    const rawBodyMarkdown = [
         "## Description",
         description,
         "",
@@ -156,11 +171,23 @@ export async function bundleIssueReport(
             ? "_No historian failure log lines found in recent history._"
             : ["```", historianFailureLines.join("\n"), "```"].join("\n"),
         "",
+        "## Recent errors (last 20, sanitized)",
+        recentErrorLines.length === 0
+            ? "_No error-shaped log lines found in recent history._"
+            : ["```", recentErrorLines.join("\n"), "```"].join("\n"),
+        "",
         `## Log (last ${LOG_TAIL_LINES} lines, sanitized)`,
         "```",
         recentLog || "<no log output>",
         "```",
     ].join("\n");
+
+    // Cap the body at GitHub's ~64KB issue limit. If the rendered report
+    // is already short enough this is a pass-through; otherwise the main
+    // log block gets shrunk from the top (older lines first) and a
+    // truncation marker inserted. The error and historian-failure sections
+    // above survive intact — that's the whole point of extracting them.
+    const bodyMarkdown = capBodyToGithubLimit(rawBodyMarkdown);
 
     const path = join(process.cwd(), `magic-context-issue-${formatTimestamp(new Date())}.md`);
     writeFileSync(path, `${bodyMarkdown}\n`);

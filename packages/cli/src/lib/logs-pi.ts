@@ -6,6 +6,7 @@ import {
     renderDiagnosticsMarkdown,
     sanitizeString,
 } from "./diagnostics-pi";
+import { capBodyToGithubLimit, extractRecentErrors } from "./issue-body";
 
 export function sanitizeLogContent(content: string): string {
     return sanitizeString(content);
@@ -58,7 +59,16 @@ export async function bundleIssueReport(
     const logLines = filterLogLinesBySession(allLogLines, options.sessionFilter ?? null);
     const recentLog = sanitizeLogContent(logLines.slice(-LOG_TAIL_LINES).join("\n")).trim();
 
-    const bodyMarkdown = [
+    // Pull the most recent 20 ERROR-shaped lines into their own dedicated
+    // section. See logs-opencode.ts and issue-body.ts for the full
+    // rationale: this section survives even when the main log block is
+    // truncated to fit GitHub's ~64KB issue body limit. We scan a wide
+    // window so that a flood of debug noise after the error doesn't push
+    // the cause out of view.
+    const errorScanWindow = sanitizeLogContent(logLines.slice(-4000).join("\n"));
+    const recentErrorLines = extractRecentErrors(errorScanWindow, 20);
+
+    const rawBodyMarkdown = [
         "## Title",
         `[pi] ${sanitizeString(title)}`,
         "",
@@ -74,11 +84,22 @@ export async function bundleIssueReport(
         "## Diagnostics",
         renderDiagnosticsMarkdown(report),
         "",
+        "## Recent errors (last 20, sanitized)",
+        recentErrorLines.length === 0
+            ? "_No error-shaped log lines found in recent history._"
+            : ["```", recentErrorLines.join("\n"), "```"].join("\n"),
+        "",
         `## Log (last ${LOG_TAIL_LINES} lines, sanitized)`,
         "```",
         recentLog || "<no log output>",
         "```",
     ].join("\n");
+
+    // Cap the body at GitHub's ~64KB issue limit. If the rendered report
+    // is already short enough this is a pass-through; otherwise the main
+    // log block gets shrunk from the top (older lines first) and a
+    // truncation marker inserted. The error section above survives intact.
+    const bodyMarkdown = capBodyToGithubLimit(rawBodyMarkdown);
 
     const cwd = options.cwd ?? process.cwd();
     const path = join(
