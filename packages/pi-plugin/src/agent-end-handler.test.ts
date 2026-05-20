@@ -104,19 +104,22 @@ describe("agent_end handler (blocking-historian regression)", () => {
 describe("session_shutdown handler (drain location)", () => {
 	const body = extractSessionShutdownHandlerBody(INDEX_SRC);
 
-	test("drains in-flight historians (Promise.race with timeout)", () => {
+	test("drains in-flight historians through withTimeout", () => {
 		expect(body).toContain("awaitInFlightHistorians");
-		expect(body).toContain("Promise.race");
+		expect(body).toContain(
+			"withTimeout(awaitInFlightHistorians(), SHUTDOWN_DRAIN_MS)",
+		);
+		expect(body).not.toContain("Promise.race");
 	});
 
 	test("drains in-flight dreamers (Promise.race with timeout)", () => {
 		expect(body).toContain("awaitInFlightDreamers");
 	});
 
-	test("drain timeout uses a setTimeout-bounded race", () => {
-		// Confirms the bounded shape: `Promise.race([drain, setTimeout])`.
-		// The exact ms value is intentionally NOT asserted so it can be
-		// tuned without breaking this test.
-		expect(body).toMatch(/setTimeout\(.*\)/);
+	test("drain timeout uses unref/clear helper", () => {
+		// The bounded wait goes through withTimeout(), whose implementation
+		// calls unref() and clearTimeout() so an early drain cannot pin exit.
+		expect(body).toContain("withTimeout");
+		expect(body).not.toMatch(/setTimeout\(.*\)/);
 	});
 });

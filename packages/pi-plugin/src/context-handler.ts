@@ -142,10 +142,11 @@ import {
 import { stripPiDroppedPlaceholderMessages } from "./strip-placeholders-pi";
 import { clearPiSystemPromptSession } from "./system-prompt";
 import { injectPiTemporalMarkers } from "./temporal-awareness-pi";
+/** Force-materialization threshold — mirrors OpenCode's FORCE_MATERIALIZE_PERCENTAGE (85%). */
+import { withTimeout } from "./timeout";
 import { tokenizePiMessages } from "./tokenize-pi-messages";
 import { createPiTranscript } from "./transcript-pi";
 
-/** Force-materialization threshold — mirrors OpenCode's FORCE_MATERIALIZE_PERCENTAGE (85%). */
 const FORCE_MATERIALIZATION_PERCENTAGE = 85;
 
 /** Emergency-block threshold — mirrors OpenCode's >=95% emergency path. */
@@ -1419,10 +1420,7 @@ export function registerPiContextHandler(
 				const histPromise = inFlightHistorian.get(sessionId);
 				if (histPromise) {
 					try {
-						await Promise.race([
-							histPromise,
-							new Promise((resolve) => setTimeout(resolve, 30_000)),
-						]);
+						await withTimeout(histPromise, 30_000);
 						sessionLog(
 							sessionId,
 							"EMERGENCY: historian wait completed (or timed out)",

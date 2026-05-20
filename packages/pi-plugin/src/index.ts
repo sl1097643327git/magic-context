@@ -102,6 +102,7 @@ import {
 	clearPiSystemPromptSession,
 	processSystemPromptForCache,
 } from "./system-prompt";
+import { withTimeout } from "./timeout";
 import { registerMagicContextTools } from "./tools";
 
 const PREFIX = "[magic-context][pi]";
@@ -1279,18 +1280,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		// the comment block on the agent_end handler above).
 		const SHUTDOWN_DRAIN_MS = 5_000;
 		try {
-			await Promise.race([
-				awaitInFlightHistorians(),
-				new Promise((resolve) => setTimeout(resolve, SHUTDOWN_DRAIN_MS)),
-			]);
+			await withTimeout(awaitInFlightHistorians(), SHUTDOWN_DRAIN_MS);
 		} catch (err) {
 			warn("shutdown: historian drain threw:", err);
 		}
 		try {
-			await Promise.race([
-				awaitInFlightDreamers(),
-				new Promise((resolve) => setTimeout(resolve, SHUTDOWN_DRAIN_MS)),
-			]);
+			await withTimeout(awaitInFlightDreamers(), SHUTDOWN_DRAIN_MS);
 		} catch (err) {
 			warn("shutdown: dreamer drain threw:", err);
 		}
