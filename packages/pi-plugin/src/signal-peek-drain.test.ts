@@ -308,6 +308,16 @@ describe("source contract: peek-then-drain in before_agent_start (system prompt)
 		expect(code).toContain("resolveProject: resolveCurrentProject");
 	});
 
+	test("todowrite capture only accepts the built-in tool name", () => {
+		expect(code).toContain('b.name !== "todowrite"');
+		expect(code).not.toContain("^todo.*write");
+	});
+
+	test("project-docs injection is gated on dreamer.enabled", () => {
+		expect(code).toContain("(config.dreamer?.enabled ?? false) &&");
+		expect(code).toContain("(config.dreamer?.inject_docs ?? true)");
+	});
+
 	test("hash-change path remains eager for all three refresh sets", () => {
 		const idx = code.indexOf("if (result.hashChanged)");
 		expect(idx).toBeGreaterThan(0);

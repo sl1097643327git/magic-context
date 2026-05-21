@@ -121,6 +121,25 @@ describe("buildMagicContextBlock", () => {
 		}
 	});
 
+	it("does not render project-docs when injection is gated off", () => {
+		const db = createTestDb();
+		const cwd = tempDir("pi-docs-disabled-");
+		writeFileSync(join(cwd, "ARCHITECTURE.md"), "# Architecture", "utf-8");
+		try {
+			const block = buildMagicContextBlock({
+				db,
+				cwd,
+				memoryEnabled: false,
+				injectDocs: false,
+				includeGuidance: false,
+			});
+
+			expect(block).toBeNull();
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	it("escapes project-docs content without escaping wrapper tags", () => {
 		const db = createTestDb();
 		const cwd = tempDir("pi-docs-escape-");

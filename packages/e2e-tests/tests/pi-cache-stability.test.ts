@@ -361,7 +361,7 @@ describe("pi cache stability", () => {
     it("keeps Pi system prompt bytes stable across unchanged defer turns", async () => {
         await withPiHarness(
             {
-                magicContextConfig: { execute_threshold_percentage: 90 },
+                magicContextConfig: { execute_threshold_percentage: 90, dreamer: { enabled: true } },
             },
             async (h) => {
                 writeFileSync(

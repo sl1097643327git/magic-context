@@ -207,6 +207,12 @@ export async function runPiCompressionPassIfNeeded(
 		return false;
 	}
 
+	const overage = totalTokens - historyBudgetTokens;
+	sessionLog(
+		sessionId,
+		`compressor: history block ~${totalTokens} tokens exceeds budget ${historyBudgetTokens} by ~${overage} tokens`,
+	);
+
 	const lastEndMessage = compartments[compartments.length - 1]?.endMessage ?? 0;
 	const floor = Math.max(1, Math.ceil(lastEndMessage / minCompartmentRatio));
 	const floorHeadroom = compartments.length - floor;
@@ -219,6 +225,24 @@ export async function runPiCompressionPassIfNeeded(
 	}
 
 	const scored = scoreCompartments(db, sessionId, compartments);
+	const depthHistogram = new Map<number, number>();
+	for (const scoredCompartment of scored) {
+		const bucket = Math.round(scoredCompartment.averageDepth);
+		depthHistogram.set(bucket, (depthHistogram.get(bucket) ?? 0) + 1);
+	}
+	const histText = [...depthHistogram.entries()]
+		.sort((a, b) => a[0] - b[0])
+		.map(([depth, count]) => `d${depth}=${count}`)
+		.join(" ");
+	const histKey = `${scored.length}|${histText}`;
+	if (lastDepthHistogramBySession.get(sessionId) !== histKey) {
+		lastDepthHistogramBySession.set(sessionId, histKey);
+		sessionLog(
+			sessionId,
+			`compressor: depth histogram (${scored.length} total) ${histText}`,
+		);
+	}
+
 	const band = selectPiCompressionBand(scored, {
 		maxPickable: maxCompartmentsPerPass,
 		maxMergeDepth,
@@ -246,7 +270,7 @@ export async function runPiCompressionPassIfNeeded(
 
 	sessionLog(
 		sessionId,
-		`compressor: picked ${band.length} compartments (${selectedCompartments[0]?.startMessage}-${selectedCompartments[selectedCompartments.length - 1]?.endMessage}, ~${selectedTokens} tokens), avg_depth=${avgDepth.toFixed(1)} → output_depth=${outputDepth}`,
+		`compressor: scored ${compartments.length}, picked ${band.length} contiguous (${selectedCompartments[0]?.startMessage}-${selectedCompartments[selectedCompartments.length - 1]?.endMessage}, ~${selectedTokens} tokens), avg_depth=${avgDepth.toFixed(1)} → output_depth=${outputDepth} (ratio=${mergeRatio}, target=${outputCount} compartments)`,
 	);
 
 	if (outputDepth === 5) {
@@ -496,6 +520,7 @@ function finalizeCompression(args: {
 }
 
 const lastCompressorRunBySession = new Map<string, number>();
+const lastDepthHistogramBySession = new Map<string, string>();
 
 export function isPiCompressorOnCooldown(
 	sessionId: string,
@@ -511,4 +536,5 @@ export function markPiCompressorRun(sessionId: string): void {
 
 export function clearPiCompressorState(sessionId: string): void {
 	lastCompressorRunBySession.delete(sessionId);
+	lastDepthHistogramBySession.delete(sessionId);
 }

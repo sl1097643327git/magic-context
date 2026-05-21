@@ -22,6 +22,10 @@
  *   in the command-handler signature because the slash command itself is
  *   already on the input pipeline; we want the augmented prompt to be queued
  *   as the next turn rather than steering an in-flight one.
+ * - OpenCode bubbles sidekick failures back through the command handler. Pi
+ *   deliberately degrades gracefully: if the sidekick subprocess fails, the
+ *   original prompt is still sent unaugmented. This keeps slash-command UX
+ *   usable when background model/provider configuration is flaky.
  * - OpenCode displays the "preparing" message as an ignored notification.
  *   Pi has `ctx.ui.notify()` which only renders in interactive mode. In RPC
  *   or print mode `ctx.hasUI === false` and `ctx.ui.notify()` is a no-op,
@@ -60,6 +64,8 @@ export interface PiSidekickConfig {
 	timeoutMs?: number;
 	/** Pi only: explicit thinking level (--thinking <level>) for sidekick subagent. */
 	thinking_level?: string;
+	/** Ordered fallback chain after the primary sidekick model. */
+	fallbackModels?: readonly string[];
 }
 
 /**
@@ -133,6 +139,7 @@ export function registerCtxAugCommand(
 				systemPrompt: config.systemPrompt ?? SIDEKICK_SYSTEM_PROMPT,
 				userMessage: prompt,
 				model: config.model,
+				fallbackModels: config.fallbackModels,
 				timeoutMs: config.timeoutMs ?? 30_000,
 				cwd: ctx.cwd,
 				signal: ctx.signal,

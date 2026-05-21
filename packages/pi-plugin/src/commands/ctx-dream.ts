@@ -102,6 +102,9 @@ export function registerCtxDreamCommand(
 				if (!result) {
 					summary =
 						"Dream queued, but another worker is already processing the queue.";
+				} else if (result.tasks.length === 0) {
+					summary =
+						"Dreamer is configured, but no dream tasks are enabled for this project.";
 				} else {
 					const taskLines = result.tasks
 						.map((task) => {

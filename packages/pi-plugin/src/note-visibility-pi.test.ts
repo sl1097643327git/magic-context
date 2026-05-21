@@ -79,6 +79,16 @@ describe("hasVisibleNoteReadCallPi", () => {
 		expect(hasVisibleNoteReadCallPi(messages)).toBe(true);
 	});
 
+	it("returns false for a sentinel-stripped ctx_note read", () => {
+		const messages = [
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "[dropped]" }],
+			},
+		];
+		expect(hasVisibleNoteReadCallPi(messages)).toBe(false);
+	});
+
 	it("returns false on empty array", () => {
 		expect(hasVisibleNoteReadCallPi([])).toBe(false);
 	});

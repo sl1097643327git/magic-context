@@ -181,19 +181,19 @@ function stripNestedSystemReminders(text: string): string {
 function extractUserPromptText(message: UserMessage): string {
 	return (
 		stripNestedSystemReminders(collectUserPromptParts(message))
-			// Magic Context tag prefix: "§123§ " at any position.
-			.replace(/§\d+§\s*/g, "")
-			// Temporal awareness gap markers: <!-- +5m -->, <!-- +1w 2d -->, etc.
-			.replace(/<!--\s*\+[\d\s.hmdw]+\s*-->/g, "")
-			// OMO internal initiator markers and similar HTML-comment markers.
-			.replace(/<!--\s*OMO_INTERNAL_INITIATOR[\s\S]*?-->/g, "")
-			// ALFONSO internal initiator markers used by the Alfonso harness.
-			.replace(/<!--\s*ALFONSO_INTERNAL_INITIATOR[\s\S]*?-->/g, "")
-			// Previously-appended plugin tags on this same user turn.
+			// HTML comments — covers temporal markers, OMO/ALFONSO internal
+			// initiators, and any other commented-out extension markup.
+			.replace(/<!--[\s\S]*?-->/g, "")
+			// Plugin-owned injected blocks should be removed with their content.
 			.replace(/<ctx-search-hint>[\s\S]*?<\/ctx-search-hint>/g, "")
 			.replace(/<ctx-search-auto>[\s\S]*?<\/ctx-search-auto>/g, "")
 			.replace(/<instruction[^>]*>[\s\S]*?<\/instruction>/g, "")
 			.replace(/<sidekick-augmentation>[\s\S]*?<\/sidekick-augmentation>/g, "")
+			// Generic XML/HTML tags — opening, closing, and self-closing.
+			// Preserve text between paired tags so pasted content still embeds.
+			.replace(/<\/?[a-zA-Z][^<>]*>/g, "")
+			// Magic Context tag prefix: "§123§ " at any position.
+			.replace(/§\d+§\s*/g, "")
 			// Collapse whitespace runs that the strippings may leave behind.
 			.replace(/[ \t]+\n/g, "\n")
 			.replace(/\n{3,}/g, "\n\n")

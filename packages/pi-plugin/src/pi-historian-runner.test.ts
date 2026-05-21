@@ -1,5 +1,6 @@
 import { describe, expect, it, mock } from "bun:test";
 import {
+	appendCompartments,
 	getCompartments,
 	getSessionFacts,
 } from "@magic-context/core/features/magic-context/compartment-storage";
@@ -7,9 +8,12 @@ import { resolveProjectIdentity } from "@magic-context/core/features/magic-conte
 import { getMemoriesByProject } from "@magic-context/core/features/magic-context/memory/storage-memory";
 import {
 	getHistorianFailureState,
+	getOverflowState,
 	getPendingPiCompactionMarkerState,
+	recordOverflowDetected,
 	getPersistedNoteNudge,
 } from "@magic-context/core/features/magic-context/storage";
+import { getUserMemoryCandidates } from "@magic-context/core/features/magic-context/user-memory/storage-user-memory";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner";
 import { runPiHistorian } from "./pi-historian-runner";
@@ -37,6 +41,10 @@ function rawMessages(count = 12) {
 
 function successXml(fact = "Pi historian facts can promote to memory.") {
 	return `<compartment start="1" end="2" title="Initial Pi slice">Summarized the first Pi turn.</compartment>\n<WORKFLOW_RULES>\n* ${fact}\n</WORKFLOW_RULES>`;
+}
+
+function successXmlWithUserObservation(observation: string) {
+	return `${successXml()}\n<user_observations>\n* ${observation}\n</user_observations>`;
 }
 
 function runnerReturning(outputs: string[]): SubagentRunner {
@@ -77,6 +85,92 @@ async function runHistorianWith(args: {
 }
 
 describe("runPiHistorian", () => {
+	it("clears emergency recovery on protected-tail-only no-op", async () => {
+		const db = createTestDb();
+		const runner = runnerReturning([successXml()]);
+		recordOverflowDetected(db, "ses-historian", 100_000);
+		appendCompartments(db, "ses-historian", [
+			{
+				sequence: 0,
+				startMessage: 1,
+				endMessage: 12,
+				startMessageId: "m1",
+				endMessageId: "m12",
+				title: "prior",
+				content: "already compacted",
+			},
+		]);
+		try {
+			await runPiHistorian({
+				db,
+				sessionId: "ses-historian",
+				directory: process.cwd(),
+				provider: { readMessages: () => rawMessages() },
+				runner,
+				historianModel: "test/model",
+				historianChunkTokens: 20_000,
+			});
+
+			expect(runner.run).not.toHaveBeenCalled();
+			expect(getOverflowState(db, "ses-historian").needsEmergencyRecovery).toBe(
+				false,
+			);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("records failure when existing stored compartments fail validation", async () => {
+		const db = createTestDb();
+		const runner = runnerReturning([successXml()]);
+		appendCompartments(db, "ses-historian", [
+			{
+				sequence: 0,
+				startMessage: 2,
+				endMessage: 3,
+				startMessageId: "m2",
+				endMessageId: "m3",
+				title: "gap",
+				content: "invalid because message 1 is missing",
+			},
+		]);
+		try {
+			await runPiHistorian({
+				db,
+				sessionId: "ses-historian",
+				directory: process.cwd(),
+				provider: { readMessages: () => rawMessages() },
+				runner,
+				historianModel: "test/model",
+				historianChunkTokens: 20_000,
+			});
+
+			expect(runner.run).not.toHaveBeenCalled();
+			expect(getHistorianFailureState(db, "ses-historian").failureCount).toBe(
+				1,
+			);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("stores userObservations as user memory candidates in the publish transaction", async () => {
+		const { db } = await runHistorianWith({
+			outputs: [successXmlWithUserObservation("User prefers concise answers.")],
+		});
+		try {
+			expect(getUserMemoryCandidates(db)).toEqual([
+				expect.objectContaining({
+					content: "User prefers concise answers.",
+					sessionId: "ses-historian",
+					sourceCompartmentStart: 1,
+					sourceCompartmentEnd: 2,
+				}),
+			]);
+		} finally {
+			closeQuietly(db);
+		}
+	});
 	it("runs the Pi subagent, parses output, and publishes compartments and facts", async () => {
 		const { db, runner } = await runHistorianWith({ outputs: [successXml()] });
 		try {
@@ -229,6 +323,10 @@ describe("runPiHistorian", () => {
 			try {
 				// Two subagent runs = first pass + editor pass.
 				expect(runner.run).toHaveBeenCalledTimes(2);
+				expect(runner.run).toHaveBeenNthCalledWith(
+					2,
+					expect.not.objectContaining({ fallbackModels: expect.anything() }),
+				);
 				// Editor output won — the persisted fact is from the editor.
 				expect(getSessionFacts(db, "ses-historian")).toEqual([
 					expect.objectContaining({

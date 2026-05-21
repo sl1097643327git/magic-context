@@ -45,8 +45,10 @@ import {
 } from "@magic-context/core/features/magic-context/compartment-storage";
 import { promoteSessionFactsToMemory } from "@magic-context/core/features/magic-context/memory";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
+import { insertUserMemoryCandidates } from "@magic-context/core/features/magic-context/user-memory/storage-user-memory";
 import { getMemoriesByProject } from "@magic-context/core/features/magic-context/memory/storage-memory";
 import {
+	clearEmergencyRecovery,
 	clearHistorianFailureState,
 	incrementHistorianFailure,
 	setPendingPiCompactionMarkerState,
@@ -209,6 +211,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					sessionId,
 					`historian failure: source=existing-validation reason="${existingValidationError}"`,
 				);
+				incrementHistorianFailure(db, sessionId, existingValidationError);
 				await notify(
 					`Historian skipped: existing stored compartments are invalid: ${existingValidationError}`,
 				);
@@ -225,8 +228,9 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			if (protectedTailStart <= offset) {
 				sessionLog(
 					sessionId,
-					`historian skip: protected tail covers all eligible history (offset=${offset}, protectedStart=${protectedTailStart})`,
+					`historian no-op: protectedTailStart=${protectedTailStart} <= offset=${offset} — nothing to compact`,
 				);
+				clearEmergencyRecovery(db, sessionId);
 				return;
 			}
 
@@ -239,8 +243,9 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			if (!chunk.text || chunk.messageCount === 0) {
 				sessionLog(
 					sessionId,
-					`historian skip: empty chunk (offset=${offset}, protectedStart=${protectedTailStart})`,
+					`historian no-op: chunk empty after filtering (messageCount=${chunk.messageCount}, textLen=${chunk.text?.length ?? 0}) range=${offset}-${protectedTailStart - 1}`,
 				);
+				clearEmergencyRecovery(db, sessionId);
 				return;
 			}
 
@@ -250,6 +255,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					sessionId,
 					`historian failure: source=chunk-coverage reason="${chunkCoverageError}" chunkRange=${chunk.startIndex}-${chunk.endIndex}`,
 				);
+				incrementHistorianFailure(db, sessionId, chunkCoverageError);
 				await notify(
 					`Historian skipped: raw chunk could not be safely chunked: ${chunkCoverageError}`,
 				);
@@ -489,7 +495,6 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 						systemPrompt: HISTORIAN_EDITOR_SYSTEM_PROMPT,
 						userMessage: buildHistorianEditorPrompt(draftAssistantText),
 						model: historianModel,
-						fallbackModels,
 						timeoutMs: historianTimeoutMs,
 						cwd: directory,
 						thinkingLevel,
@@ -570,6 +575,18 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				appendCompartments(db, sessionId, newCompartments);
 				replaceSessionFacts(db, sessionId, validatedPass.facts ?? []);
 				clearHistorianFailureState(db, sessionId);
+				clearEmergencyRecovery(db, sessionId);
+				if (validatedPass.userObservations?.length) {
+					insertUserMemoryCandidates(
+						db,
+						validatedPass.userObservations.map((obs) => ({
+							content: obs,
+							sessionId,
+							sourceCompartmentStart: newCompartments[0]?.startMessage,
+							sourceCompartmentEnd: lastNewEnd,
+						})),
+					);
+				}
 				if (firstKeptEntryId && lastNewEndMessageId) {
 					setPendingPiCompactionMarkerState(db, sessionId, {
 						firstKeptEntryId,
@@ -602,6 +619,13 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			}
 
 			queueDropsForCompartmentalizedMessages(db, sessionId, lastNewEnd);
+
+			if (validatedPass.userObservations?.length) {
+				sessionLog(
+					sessionId,
+					`stored ${validatedPass.userObservations.length} user memory candidate(s)`,
+				);
+			}
 
 			sessionLog(
 				sessionId,

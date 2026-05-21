@@ -55,6 +55,7 @@ import { normalizeTodoStateJson } from "@magic-context/core/hooks/magic-context/
 import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path";
 import { setHarness } from "@magic-context/core/shared/harness";
 import { log } from "@magic-context/core/shared/logger";
+import { resolveFallbackChain } from "@magic-context/core/shared/resolve-fallbacks";
 import {
 	clearModelsDevCache,
 	getModelsDevContextLimit,
@@ -322,16 +323,12 @@ function resolveSidekickFromConfig(
 	if (!sidekick?.enabled) return undefined;
 	const model = sidekick.model?.trim();
 	if (!model || model.length === 0) return undefined;
-	// Pi's PiSidekickConfig is intentionally narrower than OpenCode's
-	// SidekickConfig — no fallback_models because PiSubagentRunner currently
-	// runs a single model (fallback chain handling would need a wrapper
-	// retry loop, see `subagent-runner.ts`). System prompt + timeout are
-	// supported.
 	return {
 		model,
 		systemPrompt: sidekick.system_prompt,
 		timeoutMs: sidekick.timeout_ms,
 		thinking_level: sidekick.thinking_level,
+		fallbackModels: resolveFallbackChain("sidekick", sidekick.fallback_models),
 	};
 }
 
@@ -354,15 +351,10 @@ function resolveHistorianFromConfig(
 		historianContextLimit,
 	);
 
-	// Schema's `fallback_models` is `string | string[] | undefined`; Pi
-	// expects readonly `string[] | undefined`. Normalize a single-string
-	// fallback into a one-element array. (OpenCode does the same in its
-	// agent-override resolver — single-string is shorthand for one fallback.)
-	// `historian` is guaranteed defined here because we returned early on
-	// `!model` above (model is derived from `historian?.model`).
-	const fbRaw = historian?.fallback_models;
-	const fallbackModels: readonly string[] | undefined =
-		typeof fbRaw === "string" ? [fbRaw] : fbRaw;
+	const fallbackModels = resolveFallbackChain(
+		"historian",
+		historian?.fallback_models,
+	);
 
 	return {
 		runner: new PiSubagentRunner(),
@@ -796,7 +788,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				cwd: currentProject.projectDir,
 				sessionId,
 				memoryEnabled: config.memory.enabled,
-				injectDocs: config.dreamer?.inject_docs ?? true,
+				injectDocs:
+					(config.dreamer?.enabled ?? false) &&
+					(config.dreamer?.inject_docs ?? true),
 				includeGuidance: true,
 				protectedTags: config.protected_tags,
 				ctxReduceEnabled: config.ctx_reduce_enabled,
@@ -1189,7 +1183,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 							};
 							if (b.type !== "toolCall") continue;
 							if (typeof b.name !== "string") continue;
-							if (!/^todo.*write$|^write.*todo$|^todowrite$/i.test(b.name)) {
+							if (b.name !== "todowrite") {
 								continue;
 							}
 							const args = b.arguments as
