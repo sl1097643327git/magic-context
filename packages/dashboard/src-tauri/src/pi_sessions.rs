@@ -125,7 +125,7 @@ pub fn scan_pi_session_dir_at(root: &Path) -> Vec<PiSessionMeta> {
         }
     }
 
-    metas.sort_by(|a, b| b.modified.cmp(&a.modified));
+    metas.sort_by_key(|meta| std::cmp::Reverse(meta.modified));
     metas
 }
 
@@ -259,7 +259,9 @@ fn read_pi_session_detail_uncached(
         let parent_path = if parent_path.is_absolute() {
             parent_path
         } else {
-            path.parent().unwrap_or_else(|| Path::new("")).join(parent_path)
+            path.parent()
+                .unwrap_or_else(|| Path::new(""))
+                .join(parent_path)
         };
         if let Some(parent_detail) = read_pi_session_detail_uncached(&parent_path, visited) {
             messages.extend(parent_detail.messages);
@@ -340,7 +342,8 @@ fn pi_message_from_entry(entry: Value) -> Option<PiMessage> {
     Some(PiMessage {
         entry_id: get_string(&entry, "id"),
         parent_id: get_optional_string(&entry, "parentId"),
-        timestamp_ms: message_timestamp_ms(&entry, message).unwrap_or_else(|| entry_timestamp_ms(&entry)),
+        timestamp_ms: message_timestamp_ms(&entry, message)
+            .unwrap_or_else(|| entry_timestamp_ms(&entry)),
         role,
         text_preview: truncate_preview(&extract_text_content(message)),
         usage: extract_usage(message),
@@ -363,8 +366,14 @@ fn pi_compaction_from_entry(entry: &Value) -> PiCompactionEntry {
             .unwrap_or("")
             .to_string(),
         first_kept_entry_id: get_string(entry, "firstKeptEntryId"),
-        tokens_before: entry.get("tokensBefore").and_then(Value::as_u64).unwrap_or(0) as u32,
-        from_hook: entry.get("fromHook").and_then(Value::as_bool).unwrap_or(false),
+        tokens_before: entry
+            .get("tokensBefore")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as u32,
+        from_hook: entry
+            .get("fromHook")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         raw_json: entry.clone(),
     }
 }
@@ -381,8 +390,12 @@ fn extract_usage(message: &Value) -> Option<PiUsage> {
         .get("cache")
         .map(|cache| get_u32_any(cache, &["write", "cacheWrite", "cache_write"]))
         .unwrap_or_else(|| get_u32_any(usage, &["cache_write", "cacheWrite"]));
-    let total = get_u32_any(usage, &["total", "totalTokens"])
-        .max(input.saturating_add(output).saturating_add(cache_read).saturating_add(cache_write));
+    let total = get_u32_any(usage, &["total", "totalTokens"]).max(
+        input
+            .saturating_add(output)
+            .saturating_add(cache_read)
+            .saturating_add(cache_write),
+    );
     Some(PiUsage {
         input,
         output,
@@ -402,7 +415,8 @@ fn extract_entry_text(entry: &Value) -> String {
     if let Some(content) = entry.get("content") {
         return extract_content_value(content);
     }
-    entry.get("data")
+    entry
+        .get("data")
         .map(extract_content_value)
         .unwrap_or_default()
 }
@@ -423,7 +437,9 @@ fn extract_content_value(content: &Value) -> String {
             .iter()
             .filter_map(|part| {
                 if part.get("type").and_then(Value::as_str) == Some("text") {
-                    part.get("text").and_then(Value::as_str).map(ToString::to_string)
+                    part.get("text")
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string)
                 } else {
                     None
                 }
@@ -496,7 +512,10 @@ fn get_string(value: &Value, key: &str) -> String {
 }
 
 fn get_optional_string(value: &Value, key: &str) -> Option<String> {
-    value.get(key).and_then(Value::as_str).map(ToString::to_string)
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
 }
 
 #[cfg(test)]

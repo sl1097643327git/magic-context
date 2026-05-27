@@ -1,10 +1,12 @@
-use rusqlite::Connection;
+use rusqlite::{
+    params, params_from_iter, Connection, OptionalExtension, Transaction, TransactionBehavior,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use crate::pi_sessions;
-use crate::project_identity::{basename, resolve_project_identity};
+use crate::project_identity::{basename, normalize_stored_project_path, resolve_project_identity};
 
 pub fn resolve_db_path() -> Option<PathBuf> {
     // The magic-context plugin uses XDG_DATA_HOME or ~/.local/share on ALL platforms
@@ -64,6 +66,45 @@ pub fn resolve_opencode_db_path() -> Option<PathBuf> {
     }
 }
 
+const DASHBOARD_DIR_IDENTITY_UNSAFE_SCHEMA_VERSION: i64 = 22;
+
+pub fn dashboard_schema_warning_version(conn: &Connection) -> Result<Option<i64>, rusqlite::Error> {
+    let has_migrations_table: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_migrations_table == 0 {
+        return Ok(None);
+    }
+
+    let version: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok((version >= DASHBOARD_DIR_IDENTITY_UNSAFE_SCHEMA_VERSION).then_some(version))
+}
+
+pub fn dashboard_schema_warning_version_for_path(
+    path: &PathBuf,
+) -> Result<Option<i64>, rusqlite::Error> {
+    let conn = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.pragma_update(None, "busy_timeout", 5000)?;
+    dashboard_schema_warning_version(&conn)
+}
+
+fn warn_if_dashboard_schema_requires_upgrade(conn: &Connection) {
+    if let Ok(Some(version)) = dashboard_schema_warning_version(conn) {
+        eprintln!(
+            "[dashboard] Magic Context schema v{version} uses v2 dir:* identity hashing; ensure the v2 dashboard/frontend is running before trusting dir:* project reads."
+        );
+    }
+}
+
 /// Opens a read-only connection to the database in WAL mode.
 pub fn open_readonly(path: &PathBuf) -> Result<Connection, rusqlite::Error> {
     let conn = Connection::open_with_flags(
@@ -73,6 +114,7 @@ pub fn open_readonly(path: &PathBuf) -> Result<Connection, rusqlite::Error> {
     // WAL mode is inherited from the plugin's read-write connection — no need to set it here.
     // busy_timeout is connection-local and safe on read-only connections.
     conn.pragma_update(None, "busy_timeout", 5000)?;
+    warn_if_dashboard_schema_requires_upgrade(&conn);
     Ok(conn)
 }
 
@@ -82,6 +124,7 @@ pub fn open_readwrite(path: &PathBuf) -> Result<Connection, rusqlite::Error> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "busy_timeout", 5000)?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    warn_if_dashboard_schema_requires_upgrade(&conn);
     Ok(conn)
 }
 
@@ -1060,7 +1103,10 @@ fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec
     let mut prev_event_idx_by_session: HashMap<(Harness, String), usize> = HashMap::new();
 
     for i in 0..chronological.len() {
-        let session_key = (chronological[i].harness, chronological[i].session_id.clone());
+        let session_key = (
+            chronological[i].harness,
+            chronological[i].session_id.clone(),
+        );
         let prev_finish = last_finish_by_session.get(&session_key).cloned();
         let is_new_turn = match prev_finish.as_deref() {
             None => true,
@@ -1071,7 +1117,8 @@ fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec
         chronological[i].is_turn_start = is_new_turn;
         if is_new_turn {
             chronological[i].turn_id = chronological[i].message_id.clone();
-            current_turn_id_by_session.insert(session_key.clone(), chronological[i].message_id.clone());
+            current_turn_id_by_session
+                .insert(session_key.clone(), chronological[i].message_id.clone());
         } else {
             chronological[i].turn_id = current_turn_id_by_session
                 .get(&session_key)
@@ -1084,18 +1131,21 @@ fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec
             if let Some(&prev_idx) = prev_event_idx_by_session.get(&session_key) {
                 let prev = &chronological[prev_idx];
                 let expected = prev.cache_read + prev.cache_write;
-                if expected > 0 && chronological[i].cache_read < (expected as f64 * 0.9) as i64 {
-                    if chronological[i].severity == "warning"
-                        || chronological[i].severity == "bust"
-                    {
-                        chronological[i].severity = "warming".to_string();
-                    }
+                if expected > 0
+                    && chronological[i].cache_read < (expected as f64 * 0.9) as i64
+                    && (chronological[i].severity == "warning"
+                        || chronological[i].severity == "bust")
+                {
+                    chronological[i].severity = "warming".to_string();
                 }
             }
         }
 
         prev_event_idx_by_session.insert(session_key.clone(), i);
-        last_finish_by_session.insert(session_key, chronological[i].finish.clone().unwrap_or_default());
+        last_finish_by_session.insert(
+            session_key,
+            chronological[i].finish.clone().unwrap_or_default(),
+        );
     }
 
     chronological
@@ -1111,6 +1161,8 @@ pub fn get_cache_events_from_db(limit: usize, since_timestamp: Option<i64>) -> V
     build_db_cache_events(rows, true)
 }
 
+type SessionCacheStatsAccumulator = (usize, i64, i64, i64, i64, usize);
+
 pub fn get_session_cache_stats_from_db(limit: usize) -> Vec<SessionCacheStats> {
     // Reuse raw rows instead of re-querying + re-parsing logs
     let mut rows = load_raw_db_cache_events(200, None).unwrap_or_default();
@@ -1120,7 +1172,7 @@ pub fn get_session_cache_stats_from_db(limit: usize) -> Vec<SessionCacheStats> {
     let events = build_db_cache_events(rows, false); // skip log enrichment for stats
                                                      // Key by (harness, session_id) so OC and Pi sessions never collide on a
                                                      // shared short-prefix session ID.
-    let mut map: HashMap<(Harness, String), (usize, i64, i64, i64, i64, usize)> = HashMap::new();
+    let mut map: HashMap<(Harness, String), SessionCacheStatsAccumulator> = HashMap::new();
 
     for event in events {
         if event.session_id.is_empty() {
@@ -1179,7 +1231,7 @@ pub fn get_session_cache_stats_from_db(limit: usize) -> Vec<SessionCacheStats> {
         )
         .collect();
 
-    stats.sort_by(|a, b| b.0.cmp(&a.0));
+    stats.sort_by_key(|(timestamp, _)| std::cmp::Reverse(*timestamp));
     stats.truncate(limit);
     stats.into_iter().map(|(_, stat)| stat).collect()
 }
@@ -1235,9 +1287,7 @@ pub fn get_session_cache_events_by_turn_count(
 ) -> Vec<DbCacheEvent> {
     let max_events = (target_turns * 50).max(200); // floor to existing limit
     let raw = match harness {
-        Harness::Opencode => {
-            get_opencode_session_cache_events(session_id, Some(max_events))
-        }
+        Harness::Opencode => get_opencode_session_cache_events(session_id, Some(max_events)),
         Harness::Pi => get_pi_session_cache_events(session_id, Some(max_events)),
     };
     trim_events_to_turns(raw, target_turns)
@@ -1354,9 +1404,17 @@ pub fn get_projects(conn: &Connection) -> Result<Vec<ProjectInfo>, rusqlite::Err
          SELECT project_path FROM dream_runs
          ORDER BY project_path",
     )?;
-    let identities: Vec<String> = stmt
+    let stored_values: Vec<String> = stmt
         .query_map([], |row| row.get(0))?
         .collect::<Result<Vec<_>, _>>()?;
+    let mut identities: Vec<String> = stored_values
+        .into_iter()
+        .map(|value| normalize_stored_project_path(&value))
+        .filter(|identity| !identity.is_empty())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    identities.sort();
 
     // Resolve git:HASH identities via OpenCode's project table
     let hash_to_project = resolve_from_opencode_db(&identities);
@@ -1408,7 +1466,7 @@ pub fn enumerate_memory_projects(conn: &Connection) -> Result<Vec<ProjectRow>, r
         .collect::<Result<HashSet<_>, _>>()?;
 
     // Each memory `project_path` is canonically one of:
-    //   - a resolved project identity (`git:<hash>` or `dir:<sha256>`) for
+    //   - a resolved project identity (`git:<hash>` or `dir:<md5-12>`) for
     //     memories written by the post-#87 plugin where storage stamps the
     //     identity directly, or
     //   - a raw filesystem path for legacy memories written before identity
@@ -1416,19 +1474,13 @@ pub fn enumerate_memory_projects(conn: &Connection) -> Result<Vec<ProjectRow>, r
     //
     // Normalize every value to its identity. For identity-shaped strings the
     // value is itself the identity. For real paths we resolve through git +
-    // SHA256 fallback. This is the SAME normalization the v0.21.5 plugin-side
+    // MD5-12 fallback. This is the SAME normalization the v0.21.5 plugin-side
     // fix to issue #87 performs on the query side — keeping the dashboard
     // aligned with it so the project picker matches the memory pool by
     // identity, not by raw path.
     let memory_identities: HashSet<String> = memory_project_values
         .iter()
-        .map(|value| {
-            if value.starts_with("git:") || value.starts_with("dir:") {
-                value.clone()
-            } else {
-                resolve_project_identity(value)
-            }
-        })
+        .map(|value| normalize_stored_project_path(value))
         .collect();
 
     // Build the full project list from OpenCode + Pi DBs (which gives us the
@@ -1633,9 +1685,10 @@ fn resolve_paths_for_memory_filter(
     // Resolve each stored path to an identity and keep the ones that match
     // the requested filter. `resolve_project_identity` caches results so
     // repeated calls are cheap.
+    let normalized_filter = normalize_stored_project_path(project_filter);
     let mut matched: Vec<String> = all_paths
         .into_iter()
-        .filter(|path| resolve_project_identity(path) == project_filter)
+        .filter(|path| normalize_stored_project_path(path) == normalized_filter)
         .collect();
 
     if matched.is_empty() {
@@ -2036,51 +2089,256 @@ pub fn get_memory_stats(
     })
 }
 
-pub fn update_memory_status(
+fn mutation_race_error() -> rusqlite::Error {
+    rusqlite::Error::InvalidQuery
+}
+
+fn now_millis() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+fn lookup_memory_project_path(
     conn: &Connection,
+    memory_id: i64,
+) -> Result<String, rusqlite::Error> {
+    conn.query_row(
+        "SELECT project_path FROM memories WHERE id = ?1",
+        params![memory_id],
+        |row| row.get(0),
+    )
+}
+
+fn fetch_memory_project_paths(
+    conn: &Connection,
+    memory_ids: &[i64],
+) -> Result<HashMap<i64, String>, rusqlite::Error> {
+    if memory_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let placeholders = memory_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!("SELECT id, project_path FROM memories WHERE id IN ({placeholders})");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(memory_ids.iter()), |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+
+    rows.collect::<Result<HashMap<_, _>, _>>()
+}
+
+fn fetch_memory_project_paths_in_tx(
+    tx: &Transaction<'_>,
+    memory_ids: &[i64],
+) -> Result<HashMap<i64, String>, rusqlite::Error> {
+    if memory_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let placeholders = memory_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!("SELECT id, project_path FROM memories WHERE id IN ({placeholders})");
+    let mut stmt = tx.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(memory_ids.iter()), |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+
+    rows.collect::<Result<HashMap<_, _>, _>>()
+}
+
+fn normalize_memory_project_identities(paths: &HashMap<i64, String>) -> HashSet<String> {
+    paths
+        .values()
+        .map(|stored| normalize_stored_project_path(stored))
+        .filter(|identity| !identity.is_empty())
+        .collect()
+}
+
+fn verify_memory_project_path_unchanged(
+    tx: &Transaction<'_>,
+    memory_id: i64,
+    expected: &str,
+) -> Result<(), rusqlite::Error> {
+    let current: Option<String> = tx
+        .query_row(
+            "SELECT project_path FROM memories WHERE id = ?1",
+            params![memory_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    if current.as_deref() == Some(expected) {
+        Ok(())
+    } else {
+        Err(mutation_race_error())
+    }
+}
+
+fn verify_bulk_memory_project_paths_unchanged(
+    tx: &Transaction<'_>,
+    expected: &HashMap<i64, String>,
+) -> Result<(), rusqlite::Error> {
+    if expected.is_empty() {
+        return Ok(());
+    }
+
+    let mut ids: Vec<i64> = expected.keys().copied().collect();
+    ids.sort_unstable();
+    let current = fetch_memory_project_paths_in_tx(tx, &ids)?;
+    if current == *expected {
+        Ok(())
+    } else {
+        Err(mutation_race_error())
+    }
+}
+
+fn bump_project_memory_epoch_for_identity(
+    tx: &Transaction<'_>,
+    identity: &str,
+) -> Result<(), rusqlite::Error> {
+    if identity.is_empty() {
+        return Ok(());
+    }
+
+    tx.execute(
+        "INSERT INTO project_state (project_path, project_memory_epoch, project_user_profile_version, updated_at)
+         VALUES (?1, 1, 0, ?2)
+         ON CONFLICT(project_path) DO UPDATE SET
+           project_memory_epoch = project_memory_epoch + 1,
+           updated_at = excluded.updated_at",
+        params![identity, now_millis()],
+    )?;
+    Ok(())
+}
+
+fn bump_project_user_profile_version(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    tx.execute(
+        "INSERT INTO project_state (project_path, project_memory_epoch, project_user_profile_version, updated_at)
+         VALUES ('__global__', 0, 1, ?1)
+         ON CONFLICT(project_path) DO UPDATE SET
+           project_user_profile_version = project_user_profile_version + 1,
+           updated_at = excluded.updated_at",
+        params![now_millis()],
+    )?;
+    Ok(())
+}
+
+fn lookup_session_fact_session_id(
+    conn: &Connection,
+    fact_id: i64,
+) -> Result<String, rusqlite::Error> {
+    conn.query_row(
+        "SELECT session_id FROM session_facts WHERE id = ?1",
+        params![fact_id],
+        |row| row.get(0),
+    )
+}
+
+fn verify_session_fact_session_unchanged(
+    tx: &Transaction<'_>,
+    fact_id: i64,
+    expected_session_id: &str,
+) -> Result<(), rusqlite::Error> {
+    let current: Option<String> = tx
+        .query_row(
+            "SELECT session_id FROM session_facts WHERE id = ?1",
+            params![fact_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    if current.as_deref() == Some(expected_session_id) {
+        Ok(())
+    } else {
+        Err(mutation_race_error())
+    }
+}
+
+fn bump_session_facts_version_for_session(
+    tx: &Transaction<'_>,
+    session_id: &str,
+) -> Result<(), rusqlite::Error> {
+    tx.execute(
+        "INSERT INTO session_meta (session_id, session_facts_version)
+         VALUES (?1, 1)
+         ON CONFLICT(session_id) DO UPDATE SET
+           session_facts_version = session_facts_version + 1",
+        params![session_id],
+    )?;
+    Ok(())
+}
+
+/// Exception-only cache invalidation for schema/cache-format upgrades and explicit clear-all UI.
+/// Routine memory, user-memory, and fact mutations must use scoped version counters instead.
+pub fn invalidate_all_memory_block_caches(conn: &Connection) -> Result<usize, rusqlite::Error> {
+    conn.execute(
+        "UPDATE session_meta
+         SET memory_block_cache = '', memory_block_ids = '', cached_m0_bytes = NULL
+         WHERE memory_block_cache != '' OR memory_block_ids != '' OR cached_m0_bytes IS NOT NULL",
+        [],
+    )
+}
+
+pub fn update_memory_status(
+    conn: &mut Connection,
     memory_id: i64,
     new_status: &str,
 ) -> Result<(), rusqlite::Error> {
-    let now = chrono::Utc::now().timestamp_millis();
-    conn.execute(
+    // Phase A: resolve the target identity before opening a write transaction.
+    let stored_path = lookup_memory_project_path(conn, memory_id)?;
+    let project_identity = normalize_stored_project_path(&stored_path);
+
+    // Phase B: re-check the target row, mutate, and bump the scoped epoch in one tx.
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    verify_memory_project_path_unchanged(&tx, memory_id, &stored_path)?;
+    tx.execute(
         "UPDATE memories SET status = ?1, updated_at = ?2 WHERE id = ?3",
-        rusqlite::params![new_status, now, memory_id],
+        params![new_status, now_millis(), memory_id],
     )?;
+    bump_project_memory_epoch_for_identity(&tx, &project_identity)?;
+    tx.commit()?;
     Ok(())
 }
 
 pub fn update_memory_content(
-    conn: &Connection,
+    conn: &mut Connection,
     memory_id: i64,
     new_content: &str,
 ) -> Result<(), rusqlite::Error> {
-    let now = chrono::Utc::now().timestamp_millis();
+    // Phase A: resolve the target identity before opening a write transaction.
+    let stored_path = lookup_memory_project_path(conn, memory_id)?;
+    let project_identity = normalize_stored_project_path(&stored_path);
     let new_hash = normalize_hash(new_content);
-    conn.execute(
+
+    // Phase B: re-check the target row, mutate, clear stale embeddings, and bump once.
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    verify_memory_project_path_unchanged(&tx, memory_id, &stored_path)?;
+    tx.execute(
         "UPDATE memories SET content = ?1, normalized_hash = ?2, updated_at = ?3 WHERE id = ?4",
-        rusqlite::params![new_content, new_hash, now, memory_id],
+        params![new_content, new_hash, now_millis(), memory_id],
     )?;
-    // Delete stale embedding since content changed
-    conn.execute(
+    tx.execute(
         "DELETE FROM memory_embeddings WHERE memory_id = ?1",
-        rusqlite::params![memory_id],
+        params![memory_id],
     )?;
+    bump_project_memory_epoch_for_identity(&tx, &project_identity)?;
+    tx.commit()?;
     Ok(())
 }
 
-pub fn delete_memory(conn: &Connection, memory_id: i64) -> Result<(), rusqlite::Error> {
-    conn.execute(
-        "DELETE FROM memories WHERE id = ?1",
-        rusqlite::params![memory_id],
-    )?;
+pub fn delete_memory(conn: &mut Connection, memory_id: i64) -> Result<(), rusqlite::Error> {
+    // Phase A: resolve the target identity before opening a write transaction.
+    let stored_path = lookup_memory_project_path(conn, memory_id)?;
+    let project_identity = normalize_stored_project_path(&stored_path);
+
+    // Phase B: re-check, bump before delete, then delete.
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    verify_memory_project_path_unchanged(&tx, memory_id, &stored_path)?;
+    bump_project_memory_epoch_for_identity(&tx, &project_identity)?;
+    tx.execute("DELETE FROM memories WHERE id = ?1", params![memory_id])?;
+    tx.commit()?;
     Ok(())
 }
 
 /// Bulk-update status for a set of memory IDs in one transaction.
-///
-/// We assemble an `IN (?,?,...)` clause dynamically because rusqlite has no
-/// first-class array binding. IDs are integers so SQL-injection is not a
-/// concern; each ID is still bound as a parameter.
 ///
 /// Empty input is a no-op and returns 0 (affected rows).
 pub fn bulk_update_memory_status(
@@ -2092,34 +2350,36 @@ pub fn bulk_update_memory_status(
         return Ok(0);
     }
 
-    let now = chrono::Utc::now().timestamp_millis();
-    let placeholders = memory_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-    let sql = format!(
-        "UPDATE memories SET status = ?1, updated_at = ?2 WHERE id IN ({})",
-        placeholders,
-    );
+    // Phase A: one read round-trip for all target rows, then identity normalization lock-free.
+    let phase_a_paths = fetch_memory_project_paths(conn, memory_ids)?;
+    let phase_a_identities = normalize_memory_project_identities(&phase_a_paths);
 
-    let tx = conn.transaction()?;
+    let placeholders = memory_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql =
+        format!("UPDATE memories SET status = ?, updated_at = ? WHERE id IN ({placeholders})");
+    let now = now_millis();
+
+    // Phase B: bulk re-verify, bulk update, then bump each affected identity once.
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    verify_bulk_memory_project_paths_unchanged(&tx, &phase_a_paths)?;
     let affected = {
-        let mut stmt = tx.prepare(&sql)?;
-        let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(2 + memory_ids.len());
-        params.push(&new_status as &dyn rusqlite::ToSql);
-        params.push(&now as &dyn rusqlite::ToSql);
+        let status_value = new_status.to_string();
+        let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(2 + memory_ids.len());
+        params_vec.push(&status_value);
+        params_vec.push(&now);
         for id in memory_ids {
-            params.push(id as &dyn rusqlite::ToSql);
+            params_vec.push(id);
         }
-        stmt.execute(&params[..])?
+        tx.execute(&sql, params_from_iter(params_vec))?
     };
+    for identity in &phase_a_identities {
+        bump_project_memory_epoch_for_identity(&tx, identity)?;
+    }
     tx.commit()?;
     Ok(affected)
 }
 
 /// Bulk-delete memories and their embeddings in one transaction.
-///
-/// Deletes from `memory_embeddings` first, then `memories`. Though
-/// `memory_embeddings.memory_id` has a foreign key, we don't rely on
-/// cascade delete here — explicit delete keeps the intent readable and
-/// matches what single `delete_memory` implicitly gets via the FK.
 pub fn bulk_delete_memory(
     conn: &mut Connection,
     memory_ids: &[i64],
@@ -2128,31 +2388,24 @@ pub fn bulk_delete_memory(
         return Ok(0);
     }
 
+    // Phase A: one read round-trip for all target rows, then identity normalization lock-free.
+    let phase_a_paths = fetch_memory_project_paths(conn, memory_ids)?;
+    let phase_a_identities = normalize_memory_project_identities(&phase_a_paths);
     let placeholders = memory_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
 
-    let tx = conn.transaction()?;
-    // Explicitly clear embeddings first; the FK would handle this too but
-    // being explicit documents the intent and matches single-row delete logs.
+    // Phase B: bulk re-verify, bump before delete, then delete.
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    verify_bulk_memory_project_paths_unchanged(&tx, &phase_a_paths)?;
+    for identity in &phase_a_identities {
+        bump_project_memory_epoch_for_identity(&tx, identity)?;
+    }
     {
-        let sql = format!(
-            "DELETE FROM memory_embeddings WHERE memory_id IN ({})",
-            placeholders
-        );
-        let mut stmt = tx.prepare(&sql)?;
-        let params: Vec<&dyn rusqlite::ToSql> = memory_ids
-            .iter()
-            .map(|id| id as &dyn rusqlite::ToSql)
-            .collect();
-        stmt.execute(&params[..])?;
+        let sql = format!("DELETE FROM memory_embeddings WHERE memory_id IN ({placeholders})");
+        tx.execute(&sql, params_from_iter(memory_ids.iter()))?;
     }
     let affected = {
-        let sql = format!("DELETE FROM memories WHERE id IN ({})", placeholders);
-        let mut stmt = tx.prepare(&sql)?;
-        let params: Vec<&dyn rusqlite::ToSql> = memory_ids
-            .iter()
-            .map(|id| id as &dyn rusqlite::ToSql)
-            .collect();
-        stmt.execute(&params[..])?
+        let sql = format!("DELETE FROM memories WHERE id IN ({placeholders})");
+        tx.execute(&sql, params_from_iter(memory_ids.iter()))?
     };
     tx.commit()?;
     Ok(affected)
@@ -2315,7 +2568,7 @@ pub fn list_all_sessions(filter: SessionFilter) -> Vec<SessionRow> {
     let mut rows = Vec::new();
     rows.extend(list_opencode_sessions(&filter));
     rows.extend(list_pi_sessions(&filter));
-    rows.sort_by(|a, b| b.last_activity_ms.cmp(&a.last_activity_ms));
+    rows.sort_by_key(|row| std::cmp::Reverse(row.last_activity_ms));
     rows
 }
 
@@ -2936,21 +3189,38 @@ pub fn get_session_notes(
 }
 
 pub fn update_session_fact(
-    conn: &Connection,
+    conn: &mut Connection,
     fact_id: i64,
     content: &str,
 ) -> Result<usize, rusqlite::Error> {
-    conn.execute(
+    // Phase A: read the fact's owning session before opening the transaction.
+    let session_id = lookup_session_fact_session_id(conn, fact_id)?;
+
+    // Phase B: re-check the owner, mutate, and bump session_facts_version together.
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    verify_session_fact_session_unchanged(&tx, fact_id, &session_id)?;
+    let affected = tx.execute(
         "UPDATE session_facts SET content = ?1, updated_at = ?2 WHERE id = ?3",
-        rusqlite::params![content, chrono::Utc::now().timestamp_millis(), fact_id],
-    )
+        params![content, now_millis(), fact_id],
+    )?;
+    if affected > 0 {
+        bump_session_facts_version_for_session(&tx, &session_id)?;
+    }
+    tx.commit()?;
+    Ok(affected)
 }
 
-pub fn delete_session_fact(conn: &Connection, fact_id: i64) -> Result<usize, rusqlite::Error> {
-    conn.execute(
-        "DELETE FROM session_facts WHERE id = ?1",
-        rusqlite::params![fact_id],
-    )
+pub fn delete_session_fact(conn: &mut Connection, fact_id: i64) -> Result<usize, rusqlite::Error> {
+    // Phase A: read the fact's owning session before opening the transaction.
+    let session_id = lookup_session_fact_session_id(conn, fact_id)?;
+
+    // Phase B: re-check, bump before delete, then delete.
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    verify_session_fact_session_unchanged(&tx, fact_id, &session_id)?;
+    bump_session_facts_version_for_session(&tx, &session_id)?;
+    let affected = tx.execute("DELETE FROM session_facts WHERE id = ?1", params![fact_id])?;
+    tx.commit()?;
+    Ok(affected)
 }
 
 pub fn update_note(
@@ -3044,8 +3314,6 @@ pub fn get_session_meta(
         None => Ok(None),
     }
 }
-
-
 
 pub fn get_subagent_invocations(
     conn: &Connection,
@@ -3174,9 +3442,9 @@ fn map_dream_run_row(row: &rusqlite::Row<'_>) -> Result<DreamRun, rusqlite::Erro
     })
 }
 
-
 fn enrich_dream_run_tokens(conn: &Connection, run: &mut DreamRun) {
-    let Ok(mut tasks) = serde_json::from_value::<Vec<serde_json::Value>>(run.tasks_json.clone()) else {
+    let Ok(mut tasks) = serde_json::from_value::<Vec<serde_json::Value>>(run.tasks_json.clone())
+    else {
         return;
     };
     let Ok(mut stmt) = conn.prepare(
@@ -3206,16 +3474,21 @@ fn enrich_dream_run_tokens(conn: &Connection, run: &mut DreamRun) {
         totals.insert(row.0.clone(), row);
     }
     for task in &mut tasks {
-        let Some(name) = task.get("name").and_then(|v| v.as_str()) else { continue; };
+        let Some(name) = task.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
         if let Some((_, total, input, output, cache_read, cache_write)) = totals.get(name) {
             if let Some(obj) = task.as_object_mut() {
-                obj.insert("tokens".to_string(), serde_json::json!({
-                    "total": total,
-                    "input": input,
-                    "output": output,
-                    "cache_read": cache_read,
-                    "cache_write": cache_write,
-                }));
+                obj.insert(
+                    "tokens".to_string(),
+                    serde_json::json!({
+                        "total": total,
+                        "input": input,
+                        "output": output,
+                        "cache_read": cache_read,
+                        "cache_write": cache_write,
+                    }),
+                );
             }
         }
     }
@@ -3375,53 +3648,63 @@ pub fn get_user_memory_candidates(
     rows.collect()
 }
 
-pub fn dismiss_user_memory(conn: &Connection, id: i64) -> Result<(), rusqlite::Error> {
-    let now = chrono::Utc::now().timestamp_millis();
-    conn.execute(
+pub fn dismiss_user_memory(conn: &mut Connection, id: i64) -> Result<(), rusqlite::Error> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let affected = tx.execute(
         "UPDATE user_memories SET status = 'dismissed', updated_at = ?1 WHERE id = ?2",
-        rusqlite::params![now, id],
+        params![now_millis(), id],
     )?;
+    if affected > 0 {
+        bump_project_user_profile_version(&tx)?;
+    }
+    tx.commit()?;
     Ok(())
 }
 
-pub fn delete_user_memory(conn: &Connection, id: i64) -> Result<(), rusqlite::Error> {
-    conn.execute(
-        "DELETE FROM user_memories WHERE id = ?1",
-        rusqlite::params![id],
-    )?;
+pub fn delete_user_memory(conn: &mut Connection, id: i64) -> Result<(), rusqlite::Error> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let affected = tx.execute("DELETE FROM user_memories WHERE id = ?1", params![id])?;
+    if affected > 0 {
+        bump_project_user_profile_version(&tx)?;
+    }
+    tx.commit()?;
     Ok(())
 }
 
 pub fn delete_user_memory_candidate(conn: &Connection, id: i64) -> Result<(), rusqlite::Error> {
     conn.execute(
         "DELETE FROM user_memory_candidates WHERE id = ?1",
-        rusqlite::params![id],
+        params![id],
     )?;
     Ok(())
 }
 
-pub fn promote_user_memory_candidate(conn: &Connection, id: i64) -> Result<(), rusqlite::Error> {
-    let now = chrono::Utc::now().timestamp_millis();
+pub fn promote_user_memory_candidate(
+    conn: &mut Connection,
+    id: i64,
+) -> Result<(), rusqlite::Error> {
+    let now = now_millis();
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-    // Read the candidate content
-    let content: String = conn.query_row(
+    let content: String = tx.query_row(
         "SELECT content FROM user_memory_candidates WHERE id = ?1",
-        rusqlite::params![id],
+        params![id],
         |row| row.get(0),
     )?;
 
-    // Insert as a stable user memory
-    conn.execute(
-        "INSERT INTO user_memories (content, status, promoted_at, source_candidate_ids, created_at, updated_at) VALUES (?1, 'active', ?2, ?3, ?2, ?2)",
-        rusqlite::params![content, now, format!("[{}]", id)],
+    tx.execute(
+        "INSERT INTO user_memories
+           (content, status, promoted_at, source_candidate_ids, created_at, updated_at)
+         VALUES (?1, 'active', ?2, ?3, ?2, ?2)",
+        params![content, now, format!("[{id}]")],
     )?;
-
-    // Delete the candidate
-    conn.execute(
+    tx.execute(
         "DELETE FROM user_memory_candidates WHERE id = ?1",
-        rusqlite::params![id],
+        params![id],
     )?;
+    bump_project_user_profile_version(&tx)?;
 
+    tx.commit()?;
     Ok(())
 }
 
@@ -3884,8 +4167,28 @@ mod cache_turn_tests {
     #[test]
     fn tool_calls_continuation_same_turn() {
         let rows = vec![
-            raw(Harness::Opencode, "m1", "s1", 100, 10, 80, 10, 100, Some("tool-calls")),
-            raw(Harness::Opencode, "m2", "s1", 200, 10, 85, 5, 100, Some("stop")),
+            raw(
+                Harness::Opencode,
+                "m1",
+                "s1",
+                100,
+                10,
+                80,
+                10,
+                100,
+                Some("tool-calls"),
+            ),
+            raw(
+                Harness::Opencode,
+                "m2",
+                "s1",
+                200,
+                10,
+                85,
+                5,
+                100,
+                Some("stop"),
+            ),
         ];
         let events = build_db_cache_events(rows, false);
         assert_eq!(events.len(), 2);
@@ -3898,8 +4201,28 @@ mod cache_turn_tests {
     #[test]
     fn stop_then_new_turn() {
         let rows = vec![
-            raw(Harness::Opencode, "m1", "s1", 100, 10, 80, 10, 100, Some("stop")),
-            raw(Harness::Opencode, "m2", "s1", 200, 10, 80, 10, 100, Some("stop")),
+            raw(
+                Harness::Opencode,
+                "m1",
+                "s1",
+                100,
+                10,
+                80,
+                10,
+                100,
+                Some("stop"),
+            ),
+            raw(
+                Harness::Opencode,
+                "m2",
+                "s1",
+                200,
+                10,
+                80,
+                10,
+                100,
+                Some("stop"),
+            ),
         ];
         let events = build_db_cache_events(rows, false);
         assert_eq!(events.len(), 2);
@@ -3912,8 +4235,28 @@ mod cache_turn_tests {
     #[test]
     fn end_turn_acts_like_stop() {
         let rows = vec![
-            raw(Harness::Opencode, "m1", "s1", 100, 10, 80, 10, 100, Some("end_turn")),
-            raw(Harness::Opencode, "m2", "s1", 200, 10, 80, 10, 100, Some("tool-calls")),
+            raw(
+                Harness::Opencode,
+                "m1",
+                "s1",
+                100,
+                10,
+                80,
+                10,
+                100,
+                Some("end_turn"),
+            ),
+            raw(
+                Harness::Opencode,
+                "m2",
+                "s1",
+                200,
+                10,
+                80,
+                10,
+                100,
+                Some("tool-calls"),
+            ),
         ];
         let events = build_db_cache_events(rows, false);
         assert!(events[0].is_turn_start);
@@ -3923,10 +4266,50 @@ mod cache_turn_tests {
     #[test]
     fn interleaved_sessions_keep_per_session_turns() {
         let rows = vec![
-            raw(Harness::Opencode, "a1", "s1", 100, 10, 80, 10, 100, Some("tool-calls")),
-            raw(Harness::Opencode, "b1", "s2", 101, 10, 80, 10, 100, Some("tool-calls")),
-            raw(Harness::Opencode, "a2", "s1", 200, 10, 85, 5, 100, Some("stop")),
-            raw(Harness::Opencode, "b2", "s2", 201, 10, 85, 5, 100, Some("stop")),
+            raw(
+                Harness::Opencode,
+                "a1",
+                "s1",
+                100,
+                10,
+                80,
+                10,
+                100,
+                Some("tool-calls"),
+            ),
+            raw(
+                Harness::Opencode,
+                "b1",
+                "s2",
+                101,
+                10,
+                80,
+                10,
+                100,
+                Some("tool-calls"),
+            ),
+            raw(
+                Harness::Opencode,
+                "a2",
+                "s1",
+                200,
+                10,
+                85,
+                5,
+                100,
+                Some("stop"),
+            ),
+            raw(
+                Harness::Opencode,
+                "b2",
+                "s2",
+                201,
+                10,
+                85,
+                5,
+                100,
+                Some("stop"),
+            ),
         ];
         let events = build_db_cache_events(rows, false);
         assert_eq!(events[0].turn_id, "a1");
@@ -3954,7 +4337,17 @@ mod cache_turn_tests {
                 150,
                 Some("tool-calls"),
             ),
-            raw(Harness::Opencode, "m2", "s1", 200, 10, 50, 90, 150, Some("stop")),
+            raw(
+                Harness::Opencode,
+                "m2",
+                "s1",
+                200,
+                10,
+                50,
+                90,
+                150,
+                Some("stop"),
+            ),
         ];
         let events = build_db_cache_events(rows, false);
         // events[0] is the turn-start; severity stays whatever the absolute hit_ratio classifies it as.
@@ -3979,7 +4372,17 @@ mod cache_turn_tests {
                 150,
                 Some("tool-calls"),
             ),
-            raw(Harness::Opencode, "m2", "s1", 200, 10, 140, 5, 155, Some("stop")),
+            raw(
+                Harness::Opencode,
+                "m2",
+                "s1",
+                200,
+                10,
+                140,
+                5,
+                155,
+                Some("stop"),
+            ),
         ];
         let events = build_db_cache_events(rows, false);
         assert_eq!(events[0].severity, "stable");
@@ -3991,7 +4394,17 @@ mod cache_turn_tests {
         // build_db_cache_events is harness-agnostic for grouping;
         // just verify Pi rows with stop_reason are processed correctly.
         let rows = vec![
-            raw(Harness::Pi, "p1", "s1", 100, 10, 80, 10, 100, Some("tool-calls")),
+            raw(
+                Harness::Pi,
+                "p1",
+                "s1",
+                100,
+                10,
+                80,
+                10,
+                100,
+                Some("tool-calls"),
+            ),
             raw(Harness::Pi, "p2", "s1", 200, 10, 80, 10, 100, Some("stop")),
         ];
         let events = build_db_cache_events(rows, false);
@@ -4006,7 +4419,12 @@ mod cache_turn_tests {
 mod get_session_cache_events_by_turn_count_tests {
     use super::*;
 
-    fn event(message_id: &str, session_id: &str, timestamp: i64, is_turn_start: bool) -> DbCacheEvent {
+    fn event(
+        message_id: &str,
+        session_id: &str,
+        timestamp: i64,
+        is_turn_start: bool,
+    ) -> DbCacheEvent {
         DbCacheEvent {
             harness: Harness::Opencode,
             message_id: message_id.to_string(),
@@ -4051,15 +4469,15 @@ mod get_session_cache_events_by_turn_count_tests {
     fn trims_oldest_turns_when_over_target() {
         // 5 turns, target=3 → keep last 3 turns (turns 3-5 = m5-m12)
         let events = vec![
-            event("m1", "s1", 100, true),  // turn 1 start
-            event("m2", "s1", 200, false), // turn 1 cont
-            event("m3", "s1", 300, true),  // turn 2 start
-            event("m4", "s1", 400, false), // turn 2 cont
-            event("m5", "s1", 500, true),  // turn 3 start
-            event("m6", "s1", 600, false), // turn 3 cont
-            event("m7", "s1", 700, true),  // turn 4 start
-            event("m8", "s1", 800, false), // turn 4 cont
-            event("m9", "s1", 900, true),  // turn 5 start
+            event("m1", "s1", 100, true),    // turn 1 start
+            event("m2", "s1", 200, false),   // turn 1 cont
+            event("m3", "s1", 300, true),    // turn 2 start
+            event("m4", "s1", 400, false),   // turn 2 cont
+            event("m5", "s1", 500, true),    // turn 3 start
+            event("m6", "s1", 600, false),   // turn 3 cont
+            event("m7", "s1", 700, true),    // turn 4 start
+            event("m8", "s1", 800, false),   // turn 4 cont
+            event("m9", "s1", 900, true),    // turn 5 start
             event("m10", "s1", 1000, false), // turn 5 cont
             event("m11", "s1", 1100, false), // turn 5 cont
             event("m12", "s1", 1200, false), // turn 5 cont
@@ -4094,7 +4512,7 @@ mod get_session_cache_events_by_turn_count_tests {
     #[test]
     fn one_long_turn_returns_all() {
         // 50 events all in one turn, target=5 → all 50 returned as one turn
-        let mut events: Vec<DbCacheEvent> = (0..50)
+        let events: Vec<DbCacheEvent> = (0..50)
             .map(|i| event(&format!("m{i}"), "s1", 100 + i as i64 * 10, i == 0))
             .collect();
         let result = trim_events_to_turns(events.clone(), 5);
@@ -4120,21 +4538,17 @@ mod get_session_cache_events_by_turn_count_tests {
 
     #[test]
     fn target_zero_returns_empty() {
-        let events = vec![
-            event("m1", "s1", 100, true),
-            event("m2", "s1", 200, false),
-        ];
+        let events = vec![event("m1", "s1", 100, true), event("m2", "s1", 200, false)];
         let result = trim_events_to_turns(events, 0);
         assert!(result.is_empty());
     }
 }
 
-
 #[cfg(test)]
 mod memory_project_filter_tests {
     //! Issue #87: the dashboard Memories tab project filter returned zero
     //! results when any project was selected because the frontend sent the
-    //! resolved project *identity* (`git:<hash>` / `dir:<sha256>`) while
+    //! resolved project *identity* (`git:<hash>` / `dir:<md5-12>`) while
     //! `get_memories` / `get_memory_stats` filtered with `project_path = ?`
     //! against raw filesystem paths stored in the `memories` table.
     //!
@@ -4217,7 +4631,7 @@ mod memory_project_filter_tests {
         conn.last_insert_rowid()
     }
 
-    /// A non-git temp dir resolves to a `dir:<sha256>` identity that's
+    /// A non-git temp dir resolves to a `dir:<md5-12>` identity that's
     /// derived purely from the canonicalized path string — no shell-out, no
     /// git lookup. We use a stable dir so test order doesn't bite us when
     /// shared filesystem state changes.
@@ -4241,16 +4655,25 @@ mod memory_project_filter_tests {
 
         // Two distinct memories under the same project_path (the realistic
         // case where one path accumulates many memories over time).
-        insert_memory(&conn, "/tmp/test-proj-1", "ARCHITECTURE_DECISIONS", "active");
+        insert_memory(
+            &conn,
+            "/tmp/test-proj-1",
+            "ARCHITECTURE_DECISIONS",
+            "active",
+        );
         insert_memory(&conn, "/tmp/test-proj-1", "CONSTRAINTS", "active");
 
         // A memory under a different path that must NOT be returned when we
         // filter by the first path's identity.
-        insert_memory(&conn, "/tmp/test-proj-2", "ARCHITECTURE_DECISIONS", "active");
+        insert_memory(
+            &conn,
+            "/tmp/test-proj-2",
+            "ARCHITECTURE_DECISIONS",
+            "active",
+        );
 
         let identity = stable_dir_identity("/tmp/test-proj-1");
-        let paths = resolve_paths_for_memory_filter(&conn, &identity)
-            .expect("resolve paths");
+        let paths = resolve_paths_for_memory_filter(&conn, &identity).expect("resolve paths");
 
         assert_eq!(
             paths,
@@ -4280,8 +4703,7 @@ mod memory_project_filter_tests {
         // the filter value so the resulting query produces an empty result
         // set deterministically instead of erroring.
         let conn = make_memory_db();
-        let paths = resolve_paths_for_memory_filter(&conn, "git:abc123")
-            .expect("resolve paths");
+        let paths = resolve_paths_for_memory_filter(&conn, "git:abc123").expect("resolve paths");
         assert_eq!(paths, vec!["git:abc123".to_string()]);
     }
 
@@ -4305,8 +4727,8 @@ mod memory_project_filter_tests {
         insert_memory(&conn, "/tmp/issue87-b", "ARCHITECTURE_DECISIONS", "active");
 
         let identity = stable_dir_identity("/tmp/issue87-a");
-        let rows = get_memories(&conn, Some(&identity), None, None, None, 100, 0)
-            .expect("get_memories");
+        let rows =
+            get_memories(&conn, Some(&identity), None, None, None, 100, 0).expect("get_memories");
 
         assert_eq!(rows.len(), 2, "expected both memories under /tmp/issue87-a");
         for row in &rows {
@@ -4320,10 +4742,20 @@ mod memory_project_filter_tests {
         // total/active/permanent/archived/categories counts were all zero
         // whenever a project was selected from the frontend dropdown.
         let conn = make_memory_db();
-        insert_memory(&conn, "/tmp/issue87-stats", "ARCHITECTURE_DECISIONS", "active");
+        insert_memory(
+            &conn,
+            "/tmp/issue87-stats",
+            "ARCHITECTURE_DECISIONS",
+            "active",
+        );
         insert_memory(&conn, "/tmp/issue87-stats", "CONSTRAINTS", "active");
         insert_memory(&conn, "/tmp/issue87-stats", "USER_DIRECTIVES", "archived");
-        insert_memory(&conn, "/tmp/issue87-other", "ARCHITECTURE_DECISIONS", "active");
+        insert_memory(
+            &conn,
+            "/tmp/issue87-other",
+            "ARCHITECTURE_DECISIONS",
+            "active",
+        );
 
         let identity = stable_dir_identity("/tmp/issue87-stats");
         let stats = get_memory_stats(&conn, Some(&identity)).expect("get_memory_stats");
@@ -4350,8 +4782,7 @@ mod memory_project_filter_tests {
         insert_memory(&conn, "/tmp/a", "X", "active");
         insert_memory(&conn, "/tmp/b", "Y", "active");
 
-        let rows = get_memories(&conn, None, None, None, None, 100, 0)
-            .expect("get_memories");
+        let rows = get_memories(&conn, None, None, None, None, 100, 0).expect("get_memories");
         assert_eq!(rows.len(), 2);
     }
 
@@ -4396,8 +4827,18 @@ mod memory_project_filter_tests {
         // the correct safe state; the previous behavior was an active bug.
         let conn = make_memory_db();
         insert_memory(&conn, "git:abc1234567890abcdef", "CONSTRAINTS", "active");
-        insert_memory(&conn, "git:abc1234567890abcdef", "ARCHITECTURE_DECISIONS", "active");
-        insert_memory(&conn, "dir:fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321", "USER_DIRECTIVES", "active");
+        insert_memory(
+            &conn,
+            "git:abc1234567890abcdef",
+            "ARCHITECTURE_DECISIONS",
+            "active",
+        );
+        insert_memory(
+            &conn,
+            "dir:fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321",
+            "USER_DIRECTIVES",
+            "active",
+        );
 
         let rows = enumerate_memory_projects(&conn).expect("enumerate");
         for row in &rows {
@@ -4427,6 +4868,9 @@ mod memory_project_filter_tests {
     fn enumerate_memory_projects_empty_db_returns_empty() {
         let conn = make_memory_db();
         let rows = enumerate_memory_projects(&conn).expect("enumerate");
-        assert!(rows.is_empty(), "empty db should produce empty picker, got {rows:?}");
+        assert!(
+            rows.is_empty(),
+            "empty db should produce empty picker, got {rows:?}"
+        );
     }
 }

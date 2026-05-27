@@ -7,6 +7,11 @@ use tauri::State;
 // ── Memory commands ─────────────────────────────────────────
 
 #[tauri::command]
+pub fn get_dashboard_schema_warning(state: State<'_, AppState>) -> Option<i64> {
+    state.dashboard_schema_warning_version()
+}
+
+#[tauri::command]
 pub fn get_projects(state: State<'_, AppState>) -> Result<Vec<db::ProjectInfo>, String> {
     let path = state.get_db_path()?;
     let conn = db::open_readonly(&path).map_err(|e| e.to_string())?;
@@ -54,8 +59,8 @@ pub fn update_memory_status(
     status: String,
 ) -> Result<(), String> {
     let path = state.get_db_path()?;
-    let conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
-    db::update_memory_status(&conn, memory_id, &status).map_err(|e| e.to_string())
+    let mut conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
+    db::update_memory_status(&mut conn, memory_id, &status).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -65,15 +70,15 @@ pub fn update_memory_content(
     content: String,
 ) -> Result<(), String> {
     let path = state.get_db_path()?;
-    let conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
-    db::update_memory_content(&conn, memory_id, &content).map_err(|e| e.to_string())
+    let mut conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
+    db::update_memory_content(&mut conn, memory_id, &content).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn delete_memory(state: State<'_, AppState>, memory_id: i64) -> Result<(), String> {
     let path = state.get_db_path()?;
-    let conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
-    db::delete_memory(&conn, memory_id).map_err(|e| e.to_string())
+    let mut conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
+    db::delete_memory(&mut conn, memory_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -169,7 +174,6 @@ pub fn get_session_messages(
     db::get_session_messages(harness, &session_id).map_err(|e| e.to_string())
 }
 
-
 #[tauri::command]
 pub fn get_subagent_invocations(
     state: State<'_, AppState>,
@@ -261,16 +265,16 @@ pub fn update_session_fact(
     content: String,
 ) -> Result<(), String> {
     let path = state.get_db_path()?;
-    let conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
-    db::update_session_fact(&conn, fact_id, &content).map_err(|e| e.to_string())?;
+    let mut conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
+    db::update_session_fact(&mut conn, fact_id, &content).map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
 pub fn delete_session_fact(state: State<'_, AppState>, fact_id: i64) -> Result<(), String> {
     let path = state.get_db_path()?;
-    let conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
-    db::delete_session_fact(&conn, fact_id).map_err(|e| e.to_string())?;
+    let mut conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
+    db::delete_session_fact(&mut conn, fact_id).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -534,10 +538,7 @@ pub async fn get_available_pi_models() -> Vec<String> {
     // discovery for users who launched from a terminal.
     let candidates = if cfg!(target_os = "windows") {
         let home = std::env::var("USERPROFILE").unwrap_or_default();
-        vec![
-            format!("{}\\.pi\\bin\\pi.exe", home),
-            "pi.exe".to_string(),
-        ]
+        vec![format!("{}\\.pi\\bin\\pi.exe", home), "pi.exe".to_string()]
     } else {
         let home = std::env::var("HOME").unwrap_or_default();
         vec![
@@ -670,15 +671,15 @@ pub fn get_user_memory_candidates(
 #[tauri::command]
 pub fn dismiss_user_memory(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let path = state.get_db_path()?;
-    let conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
-    db::dismiss_user_memory(&conn, id).map_err(|e| e.to_string())
+    let mut conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
+    db::dismiss_user_memory(&mut conn, id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn delete_user_memory(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let path = state.get_db_path()?;
-    let conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
-    db::delete_user_memory(&conn, id).map_err(|e| e.to_string())
+    let mut conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
+    db::delete_user_memory(&mut conn, id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -691,8 +692,8 @@ pub fn delete_user_memory_candidate(state: State<'_, AppState>, id: i64) -> Resu
 #[tauri::command]
 pub fn promote_user_memory_candidate(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let path = state.get_db_path()?;
-    let conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
-    db::promote_user_memory_candidate(&conn, id).map_err(|e| e.to_string())
+    let mut conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
+    db::promote_user_memory_candidate(&mut conn, id).map_err(|e| e.to_string())
 }
 
 // ── Health commands ─────────────────────────────────────────

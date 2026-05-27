@@ -25,33 +25,18 @@ pub enum EmbeddingProbeOutcome {
         dimensions: Option<usize>,
     },
     /// 401 / 403 — credentials rejected.
-    AuthFailed {
-        status: u16,
-        preview: String,
-    },
+    AuthFailed { status: u16, preview: String },
     /// 404 / 405 or 2xx without an embedding body — endpoint doesn't serve
     /// embeddings (wrong URL, or provider doesn't offer the API).
-    EndpointUnsupported {
-        status: u16,
-        preview: String,
-    },
+    EndpointUnsupported { status: u16, preview: String },
     /// Other non-2xx status.
-    HttpError {
-        status: u16,
-        preview: String,
-    },
+    HttpError { status: u16, preview: String },
     /// Connection failed, DNS failed, TLS failed, etc.
-    NetworkError {
-        message: String,
-    },
+    NetworkError { message: String },
     /// Request took longer than `timeout_ms`.
-    Timeout {
-        timeout_ms: u64,
-    },
+    Timeout { timeout_ms: u64 },
     /// Endpoint URL is missing `http://` or `https://` prefix.
-    InvalidScheme {
-        endpoint: String,
-    },
+    InvalidScheme { endpoint: String },
     /// Config contains `{env:VAR}` / `{file:path}` tokens that did not
     /// resolve — the dashboard runs its own process with its own environment,
     /// so env vars set only in the user's shell won't be visible here.
@@ -185,12 +170,9 @@ fn resolve_and_read_file(raw_path: &str, config_dir: Option<&Path>) -> Option<St
 }
 
 /// POST `{model, input}` to `${endpoint}/embeddings` and classify the outcome.
-pub async fn probe_embedding_endpoint(
-    options: EmbeddingProbeOptions,
-) -> EmbeddingProbeOutcome {
+pub async fn probe_embedding_endpoint(options: EmbeddingProbeOptions) -> EmbeddingProbeOutcome {
     let endpoint = options.endpoint.trim().trim_end_matches('/').to_string();
-    if endpoint.is_empty()
-        || !(endpoint.starts_with("https://") || endpoint.starts_with("http://"))
+    if endpoint.is_empty() || !(endpoint.starts_with("https://") || endpoint.starts_with("http://"))
     {
         return EmbeddingProbeOutcome::InvalidScheme {
             endpoint: options.endpoint.clone(),
@@ -387,8 +369,7 @@ mod tests {
     #[test]
     fn substitute_reports_unresolved_env_tokens() {
         std::env::remove_var("MC_TEST_NONEXISTENT_VAR_FOR_PROBE");
-        let (out, residual) =
-            substitute_value("{env:MC_TEST_NONEXISTENT_VAR_FOR_PROBE}", None);
+        let (out, residual) = substitute_value("{env:MC_TEST_NONEXISTENT_VAR_FOR_PROBE}", None);
         // Unresolved token is preserved so the caller can detect it; the
         // probe will then surface it as UnresolvedToken.
         assert_eq!(out, "{env:MC_TEST_NONEXISTENT_VAR_FOR_PROBE}");
@@ -450,8 +431,10 @@ mod tests {
     fn substitute_handles_multiple_tokens_preserving_order() {
         std::env::set_var("MC_TEST_TOK_A", "A");
         std::env::set_var("MC_TEST_TOK_B", "B");
-        let (out, residual) =
-            substitute_value("start-{env:MC_TEST_TOK_A}-mid-{env:MC_TEST_TOK_B}-end", None);
+        let (out, residual) = substitute_value(
+            "start-{env:MC_TEST_TOK_A}-mid-{env:MC_TEST_TOK_B}-end",
+            None,
+        );
         assert_eq!(out, "start-A-mid-B-end");
         assert!(residual.is_none());
         std::env::remove_var("MC_TEST_TOK_A");
@@ -530,9 +513,7 @@ mod tests {
     }
     impl Error for ChainErr {
         fn source(&self) -> Option<&(dyn Error + 'static)> {
-            self.source
-                .as_deref()
-                .map(|e| e as &(dyn Error + 'static))
+            self.source.as_deref().map(|e| e as &(dyn Error + 'static))
         }
     }
 
@@ -584,7 +565,10 @@ mod tests {
             timeout_ms: 1000,
         })
         .await;
-        assert!(matches!(outcome, EmbeddingProbeOutcome::InvalidScheme { .. }));
+        assert!(matches!(
+            outcome,
+            EmbeddingProbeOutcome::InvalidScheme { .. }
+        ));
     }
 
     #[tokio::test]
@@ -596,6 +580,9 @@ mod tests {
             timeout_ms: 1000,
         })
         .await;
-        assert!(matches!(outcome, EmbeddingProbeOutcome::InvalidScheme { .. }));
+        assert!(matches!(
+            outcome,
+            EmbeddingProbeOutcome::InvalidScheme { .. }
+        ));
     }
 }
