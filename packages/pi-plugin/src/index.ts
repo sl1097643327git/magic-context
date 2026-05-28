@@ -80,6 +80,7 @@ import { loadPiConfig } from "./config";
 import {
 	awaitInFlightHistorians,
 	clearContextHandlerSession,
+	clearPiM0Cache,
 	clearSystemPromptRefresh,
 	hasSystemPromptRefresh,
 	type PiAutoSearchHandlerOptions,
@@ -598,6 +599,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		injection: {
 			injectionBudgetTokens: config.memory.injection_budget_tokens,
 			temporalAwareness: config.experimental?.temporal_awareness === true,
+			keyFilesEnabled: config.dreamer?.pin_key_files?.enabled ?? false,
+			keyFilesTokenBudget: config.dreamer?.pin_key_files?.token_budget ?? 10_000,
 		},
 		// Scheduler config — TTL + threshold gating for cache-busting
 		// stages. Heuristic cleanup runs only on execute passes so
@@ -726,8 +729,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		);
 	}
 
-	// Inject the magic-context block (guidance + project-docs +
-	// user-profile + key-files) into the system prompt for every agent
+	// Inject the magic-context guidance block into the system prompt for every agent
 	// turn, then run hash-detection + sticky-date freezing so the
 	// resulting prompt stays cache-stable across turns when nothing
 	// material has changed.
@@ -893,6 +895,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			});
 
 			if (result.hashChanged) {
+				clearPiM0Cache(db, sessionId, "system prompt hash change");
 				// Real prompt-content change. Cache prefix is already
 				// busted on this turn. Signal all three independent
 				// refresh sets so the next pi.on("context") event
@@ -1092,7 +1095,15 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	// hook is the safety net for everything else: migrated sessions
 	// without a compaction marker, sessions where historian failed,
 	// or any future flow where Pi's heuristic decides to compact.
-	pi.on("session_before_compact", async () => {
+	pi.on("session_before_compact", async (_event, ctx) => {
+		try {
+			const sessionId = ctx.sessionManager?.getSessionId?.();
+			if (typeof sessionId === "string" && sessionId.length > 0) {
+				clearPiM0Cache(db, sessionId, "session_before_compact");
+			}
+		} catch {
+			// best-effort; still cancel Pi native compaction below
+		}
 		info("session_before_compact: cancelling — magic-context owns compaction");
 		return { cancel: true };
 	});
@@ -1396,6 +1407,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				typeof outgoingSessionId === "string" &&
 				outgoingSessionId.length > 0
 			) {
+				clearPiM0Cache(db, outgoingSessionId, "session_before_switch");
 				clearPiSystemPromptSession(outgoingSessionId);
 				clearContextHandlerSession(outgoingSessionId);
 			}

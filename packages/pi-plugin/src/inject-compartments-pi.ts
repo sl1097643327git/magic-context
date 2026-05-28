@@ -25,10 +25,28 @@
  *     historyRefreshSessions signal.
  */
 
-import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
+import {
+	type ContextDatabase,
+	GLOBAL_USER_PROFILE_PROJECT_PATH,
+	buildCompartmentBlock,
+	clearCachedM0,
+	escapeXmlContent,
+	getCompartments,
+	getMaxM0MutationId,
+	getOrCreateSessionMeta,
+	getProjectState,
+	getSessionFacts,
+	persistCachedM0,
+	readProjectDocsCanonical,
+} from "@magic-context/core/features/magic-context/storage";
+import { getMemoriesByProject } from "@magic-context/core/features/magic-context/memory/storage-memory";
+import { getActiveUserMemories } from "@magic-context/core/features/magic-context/user-memory/storage-user-memory";
+import { buildKeyFilesBlock } from "@magic-context/core/hooks/magic-context/key-files-block";
 import {
 	type PreparedCompartmentInjection,
 	prepareCompartmentInjection,
+	renderMemoryBlock,
+	trimMemoriesToBudget,
 } from "@magic-context/core/hooks/magic-context/inject-compartments";
 import type { MessageLike } from "@magic-context/core/hooks/magic-context/tag-messages";
 import { sessionLog as logSession } from "@magic-context/core/shared/logger";
@@ -319,6 +337,344 @@ function injectHistoryBlockIntoFirstUserMessage(
 		timestamp: Date.now(),
 	});
 	return true;
+}
+
+
+const PI_M1_PLACEHOLDER =
+	"<session-history-since>(no new content since last materialization)</session-history-since>";
+const PI_M0_UPGRADE_STATE = "pi-m0m1-v2";
+
+export interface PiM0M1State {
+	sessionId: string;
+	projectIdentity: string;
+	projectDirectory: string;
+	injectionBudgetTokens?: number;
+	keyFilesEnabled?: boolean;
+	keyFilesTokenBudget?: number;
+}
+
+export interface PiM0SnapshotMarkers {
+	maxCompartmentSeq: number;
+	maxMemoryId: number;
+	maxMutationId: number;
+	projectMemoryEpoch: number;
+	projectUserProfileVersion: number;
+	projectDocsHash: string;
+	sessionFactsVersion: number;
+	materializedAt: number;
+	upgradeState: string;
+}
+
+export interface PiMaterializeDecision {
+	value: boolean;
+	reason: string | null;
+}
+
+export interface PiM0M1InjectionResult extends PiInjectionResult {
+	m0Materialized: boolean;
+	m0Reason: string | null;
+	m0Bytes: number;
+	m1Bytes: number;
+}
+
+function decodeCachedM0(value: Buffer | Uint8Array | null): string | null {
+	if (!value) return null;
+	return Buffer.from(value.buffer, value.byteOffset, value.byteLength).toString(
+		"utf8",
+	);
+}
+
+function getSessionFactsVersion(db: ContextDatabase, sessionId: string): number {
+	try {
+		const row = db
+			.prepare(
+				"SELECT COALESCE(MAX(updated_at), 0) AS version FROM session_facts WHERE session_id = ?",
+			)
+			.get(sessionId) as { version?: number } | undefined;
+		return typeof row?.version === "number" ? row.version : 0;
+	} catch {
+		return 0;
+	}
+}
+
+function getCachedMarkers(db: ContextDatabase, state: PiM0M1State): PiM0SnapshotMarkers | null {
+	const meta = getOrCreateSessionMeta(db, state.sessionId);
+	if (!meta.cachedM0Bytes) return null;
+	if (meta.cachedM0MaxCompartmentSeq === null) return null;
+	if (meta.cachedM0MaxMemoryId === null) return null;
+	return {
+		maxCompartmentSeq: meta.cachedM0MaxCompartmentSeq,
+		maxMemoryId: meta.cachedM0MaxMemoryId,
+		maxMutationId: meta.cachedM0MaxMutationId ?? 0,
+		projectMemoryEpoch: meta.cachedM0ProjectMemoryEpoch ?? 0,
+		projectUserProfileVersion: meta.cachedM0ProjectUserProfileVersion ?? 0,
+		projectDocsHash: meta.cachedM0ProjectDocsHash ?? "",
+		sessionFactsVersion: meta.cachedM0SessionFactsVersion ?? 0,
+		materializedAt: meta.cachedM0MaterializedAt ?? 0,
+		upgradeState: meta.cachedM0UpgradeState ?? "",
+	};
+}
+
+function readCurrentMarkers(
+	db: ContextDatabase,
+	state: PiM0M1State,
+	projectDocsHash?: string,
+): PiM0SnapshotMarkers {
+	const compartments = getCompartments(db, state.sessionId);
+	const memories = getMemoriesByProject(db, state.projectIdentity, [
+		"active",
+		"permanent",
+	]);
+	const projectState = getProjectState(db, state.projectIdentity);
+	const globalState = getProjectState(db, GLOBAL_USER_PROFILE_PROJECT_PATH);
+	return {
+		maxCompartmentSeq:
+			compartments.length > 0
+				? Math.max(...compartments.map((compartment) => compartment.sequence))
+				: 0,
+		maxMemoryId:
+			memories.length > 0 ? Math.max(...memories.map((memory) => memory.id)) : 0,
+		maxMutationId: getMaxM0MutationId(db, state.sessionId) ?? 0,
+		projectMemoryEpoch: projectState?.projectMemoryEpoch ?? 0,
+		projectUserProfileVersion: globalState?.projectUserProfileVersion ?? 0,
+		projectDocsHash:
+			projectDocsHash ?? readProjectDocsCanonical(state.projectDirectory).canonicalHash,
+		sessionFactsVersion: getSessionFactsVersion(db, state.sessionId),
+		materializedAt: Date.now(),
+		upgradeState: PI_M0_UPGRADE_STATE,
+	};
+}
+
+export function mustMaterializePi(
+	state: PiM0M1State,
+	db: ContextDatabase,
+): PiMaterializeDecision {
+	const meta = getOrCreateSessionMeta(db, state.sessionId);
+	const current = readCurrentMarkers(db, state);
+	if (!meta.cachedM0Bytes) return { value: true, reason: "first_render" };
+	if (meta.cachedM0UpgradeState !== PI_M0_UPGRADE_STATE) {
+		return { value: true, reason: "renderer_upgrade" };
+	}
+	if (current.projectDocsHash !== (meta.cachedM0ProjectDocsHash ?? "")) {
+		return { value: true, reason: "project_docs_change" };
+	}
+	if (current.projectMemoryEpoch !== (meta.cachedM0ProjectMemoryEpoch ?? 0)) {
+		return { value: true, reason: "project_memory_change" };
+	}
+	if (
+		current.projectUserProfileVersion !==
+		(meta.cachedM0ProjectUserProfileVersion ?? 0)
+	) {
+		return { value: true, reason: "user_profile_change" };
+	}
+	if (current.maxMutationId > (meta.cachedM0MaxMutationId ?? 0)) {
+		return { value: true, reason: "pending_mutations" };
+	}
+	if (current.maxCompartmentSeq > (meta.cachedM0MaxCompartmentSeq ?? 0)) {
+		return { value: true, reason: "new_compartment" };
+	}
+	if (current.maxMemoryId > (meta.cachedM0MaxMemoryId ?? 0)) {
+		return { value: true, reason: "new_memory" };
+	}
+	if (current.sessionFactsVersion !== (meta.cachedM0SessionFactsVersion ?? 0)) {
+		return { value: true, reason: "session_facts_change" };
+	}
+	return { value: false, reason: null };
+}
+
+function renderUserProfileBlock(db: ContextDatabase): string {
+	const memories = getActiveUserMemories(db);
+	if (memories.length === 0) return "";
+	return `<user-profile>\n${memories
+		.map((memory) => `- ${escapeXmlContent(memory.content)}`)
+		.join("\n")}\n</user-profile>`;
+}
+
+export function renderM0Pi(
+	state: PiM0M1State,
+	db: ContextDatabase,
+	projectDocs = readProjectDocsCanonical(state.projectDirectory).renderedBlock,
+): string {
+	let memories = getMemoriesByProject(db, state.projectIdentity, [
+		"active",
+		"permanent",
+	]);
+	if (state.injectionBudgetTokens && memories.length > 0) {
+		memories = trimMemoriesToBudget(
+			state.sessionId,
+			memories,
+			state.injectionBudgetTokens,
+		);
+	}
+	const memoryBlock = renderMemoryBlock(memories) ?? undefined;
+	const history = buildCompartmentBlock(
+		getCompartments(db, state.sessionId),
+		getSessionFacts(db, state.sessionId),
+		memoryBlock,
+	);
+	const sections = [projectDocs, renderUserProfileBlock(db), history].filter(
+		(section) => section.length > 0,
+	);
+	if (sections.length === 0) return "<session-history></session-history>";
+	return `<session-history>\n${sections.join("\n\n")}\n</session-history>`;
+}
+
+export function materializeM0Pi(
+	state: PiM0M1State,
+	db: ContextDatabase,
+): { m0: string; snapshotMarkers: PiM0SnapshotMarkers } {
+	const docs = readProjectDocsCanonical(state.projectDirectory);
+	const snapshotMarkers = readCurrentMarkers(db, state, docs.canonicalHash);
+	const m0 = renderM0Pi(state, db, docs.renderedBlock);
+	persistCachedM0(db, state.sessionId, {
+		m0Bytes: Buffer.from(m0, "utf8"),
+		projectMemoryEpoch: snapshotMarkers.projectMemoryEpoch,
+		projectUserProfileVersion: snapshotMarkers.projectUserProfileVersion,
+		maxCompartmentSeq: snapshotMarkers.maxCompartmentSeq,
+		maxMemoryId: snapshotMarkers.maxMemoryId,
+		maxMutationId: snapshotMarkers.maxMutationId,
+		projectDocsHash: snapshotMarkers.projectDocsHash,
+		materializedAt: snapshotMarkers.materializedAt,
+		sessionFactsVersion: snapshotMarkers.sessionFactsVersion,
+		upgradeState: snapshotMarkers.upgradeState,
+	});
+	return { m0, snapshotMarkers };
+}
+
+export function renderM1Pi(
+	state: PiM0M1State,
+	db: ContextDatabase,
+	markers: PiM0SnapshotMarkers,
+): string {
+	const sections: string[] = [];
+	if (state.keyFilesEnabled) {
+		const keyFiles = buildKeyFilesBlock(db, state.projectDirectory, {
+			enabled: true,
+			tokenBudget: state.keyFilesTokenBudget ?? 10_000,
+		});
+		if (keyFiles) sections.push(keyFiles);
+	}
+
+	const newCompartments = getCompartments(db, state.sessionId).filter(
+		(compartment) => compartment.sequence > markers.maxCompartmentSeq,
+	);
+	if (newCompartments.length > 0) {
+		sections.push(
+			`<new-compartments>\n${buildCompartmentBlock(newCompartments, [])}\n</new-compartments>`,
+		);
+	}
+
+	const newMemories = getMemoriesByProject(db, state.projectIdentity, [
+		"active",
+		"permanent",
+	]).filter((memory) => memory.id > markers.maxMemoryId);
+	if (newMemories.length > 0) {
+		sections.push(
+			`<new-memories>\n${renderMemoryBlock(newMemories) ?? ""}\n</new-memories>`,
+		);
+	}
+
+	if (sections.length === 0) return PI_M1_PLACEHOLDER;
+	return `<session-history-since>\n${sections.join("\n\n")}\n</session-history-since>`;
+}
+
+function findCompartmentBoundaryForSnapshot(
+	db: ContextDatabase,
+	sessionId: string,
+	markers: PiM0SnapshotMarkers,
+): string | null {
+	const compartments = getCompartments(db, sessionId).filter(
+		(compartment) => compartment.sequence <= markers.maxCompartmentSeq,
+	);
+	const last = compartments.at(-1);
+	return last?.endMessageId && last.endMessageId.length > 0
+		? last.endMessageId
+		: null;
+}
+
+function prependM0M1Messages(piMessages: PiAgentMessage[], m0: string, m1: string): void {
+	const firstTimestamp = piMessages[0]?.timestamp;
+	const baseTimestamp = typeof firstTimestamp === "number" ? firstTimestamp : Date.now();
+	piMessages.unshift(
+		{ role: "user", content: [{ type: "text", text: m0 }], timestamp: baseTimestamp - 2 },
+		{ role: "user", content: [{ type: "text", text: m1 }], timestamp: baseTimestamp - 1 },
+	);
+}
+
+export function injectM0M1Pi(
+	state: PiM0M1State,
+	db: ContextDatabase,
+	piMessages: PiAgentMessage[],
+	entryIds?: readonly (string | undefined)[],
+): PiM0M1InjectionResult {
+	let decision = mustMaterializePi(state, db);
+	let m0: string;
+	let markers: PiM0SnapshotMarkers | null;
+	let materialized = false;
+	if (decision.value) {
+		const result = materializeM0Pi(state, db);
+		m0 = result.m0;
+		markers = result.snapshotMarkers;
+		materialized = true;
+	} else {
+		const meta = getOrCreateSessionMeta(db, state.sessionId);
+		m0 = decodeCachedM0(meta.cachedM0Bytes) ?? "";
+		markers = getCachedMarkers(db, state);
+		if (!m0 || !markers) {
+			decision = { value: true, reason: "cache_invalid" };
+			const result = materializeM0Pi(state, db);
+			m0 = result.m0;
+			markers = result.snapshotMarkers;
+			materialized = true;
+		}
+	}
+
+	let m1 = renderM1Pi(state, db, markers);
+	if (!materialized && m0.length > 0 && m1.length > m0.length * 0.15) {
+		decision = { value: true, reason: "drift" };
+		const result = materializeM0Pi(state, db);
+		m0 = result.m0;
+		markers = result.snapshotMarkers;
+		m1 = renderM1Pi(state, db, markers);
+		materialized = true;
+	}
+
+	const boundaryId = findCompartmentBoundaryForSnapshot(
+		db,
+		state.sessionId,
+		markers,
+	);
+	const skippedVisibleMessages = boundaryId
+		? trimPiMessagesToBoundary(piMessages, entryIds, boundaryId)
+		: 0;
+	prependM0M1Messages(piMessages, m0, m1);
+	logSession(
+		state.sessionId,
+		`injected m[0]/m[1] into Pi messages (${m0.length} + ${m1.length} bytes, materialized=${materialized}${decision.reason ? ` reason=${decision.reason}` : ""})`,
+	);
+	return {
+		injected: true,
+		compartmentCount: getCompartments(db, state.sessionId).length,
+		factCount: getSessionFacts(db, state.sessionId).length,
+		memoryCount: getMemoriesByProject(db, state.projectIdentity, [
+			"active",
+			"permanent",
+		]).length,
+		skippedVisibleMessages,
+		m0Materialized: materialized,
+		m0Reason: decision.reason,
+		m0Bytes: m0.length,
+		m1Bytes: m1.length,
+	};
+}
+
+export function clearM0M1PiCache(
+	db: ContextDatabase,
+	sessionId: string,
+	reason: string,
+): void {
+	clearCachedM0(db, sessionId);
+	logSession(sessionId, `cleared cached m[0] (${reason})`);
 }
 
 export interface PiInjectionResult {

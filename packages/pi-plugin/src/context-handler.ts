@@ -135,8 +135,9 @@ import {
 	type PiHeuristicCleanupResult,
 } from "./heuristic-cleanup-pi";
 import {
-	injectSessionHistoryIntoPi,
-	type PiInjectionResult,
+	clearM0M1PiCache,
+	injectM0M1Pi,
+	type PiM0M1InjectionResult as PiInjectionResult,
 } from "./inject-compartments-pi";
 import { hasVisibleNoteReadCallPi } from "./note-visibility-pi";
 import { injectPiNudge } from "./nudge-injector";
@@ -322,6 +323,14 @@ export function signalPiSystemPromptRefresh(sessionId: string): void {
  */
 export function signalPiPendingMaterialization(sessionId: string): void {
 	pendingMaterializationSessions.add(sessionId);
+}
+
+export function clearPiM0Cache(
+	db: ContextDatabase,
+	sessionId: string,
+	reason: string,
+): void {
+	clearM0M1PiCache(db, sessionId, reason);
 }
 
 export function signalPiDeferredHistoryRefresh(sessionId: string): void {
@@ -634,6 +643,8 @@ export interface PiHeuristicsOptions {
 export interface PiInjectionOptions {
 	injectionBudgetTokens: number;
 	temporalAwareness?: boolean;
+	keyFilesEnabled?: boolean;
+	keyFilesTokenBudget?: number;
 }
 
 /** Scheduler config — gates cache-busting stages on TTL + threshold. */
@@ -1327,6 +1338,13 @@ export function registerPiContextHandler(
 				previousModelKey !== undefined &&
 				currentModelKey !== undefined &&
 				previousModelKey !== currentModelKey;
+			if (modelChanged) {
+				clearPiM0Cache(
+					options.db,
+					sessionId,
+					`model switch ${previousModelKey} -> ${currentModelKey}`,
+				);
+			}
 			if (currentModelKey !== undefined) {
 				liveModelBySession.set(sessionId, currentModelKey);
 			}
@@ -1638,6 +1656,7 @@ export function registerPiContextHandler(
 				tagger,
 				sessionId,
 				projectIdentity,
+				projectDirectory,
 				messages: event.messages,
 				ctxReduceEnabled: options.ctxReduceEnabled,
 				protectedTags: options.protectedTags ?? 20,
@@ -2526,6 +2545,7 @@ interface RunPipelineArgs {
 	tagger: Tagger;
 	sessionId: string;
 	projectIdentity: string;
+	projectDirectory: string;
 	messages: Parameters<typeof createPiTranscript>[0];
 	ctxReduceEnabled: boolean;
 	protectedTags: number;
@@ -3092,14 +3112,26 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	if (args.injection) {
 		try {
 			const tInjection = performance.now();
-			injectionResult = injectSessionHistoryIntoPi(
+			if (args.isCacheBusting || deferredHistoryRefresh) {
+				clearM0M1PiCache(
+					args.db,
+					args.sessionId,
+					args.isCacheBusting
+						? "history refresh"
+						: "deferred history refresh",
+				);
+			}
+			injectionResult = injectM0M1Pi(
+				{
+					sessionId: args.sessionId,
+					projectIdentity: args.projectIdentity,
+					projectDirectory: args.projectDirectory,
+					injectionBudgetTokens: args.injection.injectionBudgetTokens,
+					keyFilesEnabled: args.injection.keyFilesEnabled,
+					keyFilesTokenBudget: args.injection.keyFilesTokenBudget,
+				},
 				args.db,
-				args.sessionId,
-				args.messages as Parameters<typeof injectSessionHistoryIntoPi>[2],
-				args.isCacheBusting || deferredHistoryRefresh,
-				args.projectIdentity,
-				args.injection.injectionBudgetTokens,
-				args.injection.temporalAwareness,
+				args.messages as Parameters<typeof injectM0M1Pi>[2],
 				args.entryIds,
 			);
 			// PEEK-then-drain-on-success (Oracle audit Round 8 #6):
