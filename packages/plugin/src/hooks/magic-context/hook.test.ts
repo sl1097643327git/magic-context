@@ -754,14 +754,17 @@ describe("magic-context hook", () => {
 
         await hook["experimental.chat.messages.transform"]?.({}, { messages });
 
-        expect(messages[0]?.parts).toEqual([
-            expect.objectContaining({
-                type: "text",
-                text: expect.stringContaining(
-                    "Also drop via `ctx_reduce` things you don't need anymore from the last turn",
+        expect(
+            messages.some((message) =>
+                message.parts.some(
+                    (part) =>
+                        part.type === "text" &&
+                        part.text.includes(
+                            "Also drop via `ctx_reduce` things you don't need anymore from the last turn",
+                        ),
                 ),
-            }),
-        ]);
+            ),
+        ).toBe(true);
     });
 
     it("keeps the hidden ctx_reduce reminder when the previous tool-heavy turn did not reduce", async () => {
@@ -785,13 +788,16 @@ describe("magic-context hook", () => {
 
         await hook["experimental.chat.messages.transform"]?.({}, { messages });
 
-        expect(messages[0]?.parts).toEqual([
-            expect.objectContaining({
-                type: "text",
-                text: expect.stringContaining(
-                    "Also drop via `ctx_reduce` things you don't need anymore from the last turn",
+        expect(
+            messages.some((message) =>
+                message.parts.some(
+                    (part) =>
+                        part.type === "text" &&
+                        part.text.includes(
+                            "Also drop via `ctx_reduce` things you don't need anymore from the last turn",
+                        ),
                 ),
-            }),
-        ]);
+            ),
+        ).toBe(true);
     });
 });

@@ -357,6 +357,8 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         projectPath,
         historianRunnable,
         experimentalUserMemories: dreamerConfig?.user_memories?.enabled,
+        experimentalPinKeyFiles: dreamerConfig?.pin_key_files?.enabled ?? false,
+        experimentalPinKeyFilesTokenBudget: dreamerConfig?.pin_key_files?.token_budget,
         experimentalTemporalAwareness: deps.config.experimental?.temporal_awareness === true,
         historianTwoPass: deps.config.historian?.two_pass === true,
         compressorMinCompartmentRatio:

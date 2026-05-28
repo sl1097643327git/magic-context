@@ -936,6 +936,52 @@ describe("createTransform", () => {
         expect(nudger).not.toHaveBeenCalled();
     });
 
+    it("injects empty m[0] and placeholder m[1] for first-pass primary sessions", async () => {
+        //#given
+        useTempDataHome("context-transform-m0m1-first-pass-");
+        const directory = makeTempDir("context-transform-m0m1-project-");
+        const scheduler: Scheduler = { shouldExecute: mock(() => "defer" as const) };
+        const db = openDatabase();
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler,
+            contextUsageMap: new Map<string, { usage: ContextUsage; updatedAt: number }>([
+                [
+                    "ses-m0m1-first",
+                    { usage: { percentage: 10, inputTokens: 1_000 }, updatedAt: Date.now() },
+                ],
+            ]),
+            nudger: () => null,
+            db,
+            nudgePlacements: createNudgePlacementStore(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 50,
+            protectedTags: 0,
+            autoDropToolAge: 1000,
+            dropToolStructure: true,
+            directory,
+        });
+        const messages: TestMessage[] = [
+            {
+                info: { id: "m-user", role: "user", sessionID: "ses-m0m1-first" },
+                parts: [{ type: "text", text: "hello" }],
+            },
+        ];
+
+        //#when
+        await transform({}, { messages });
+
+        //#then
+        expect(messages).toHaveLength(3);
+        expect(text(messages[0], 0)).toBe("<session-history></session-history>");
+        expect(text(messages[1], 0)).toBe(
+            "<session-history-since>(no new content since last materialization)</session-history-since>",
+        );
+        expect(text(messages[2], 0)).toContain("hello");
+    });
+
     it("injects project memory inside session-history when compartments exist", async () => {
         //#given
         useTempDataHome("context-transform-memory-compartment-");
@@ -1041,7 +1087,9 @@ describe("createTransform", () => {
         await transform({}, { messages });
 
         //#then
+        expect(messages).toHaveLength(1);
         expect(text(messages[0]!, 0)).not.toContain("<project-memory>");
+        expect(text(messages[0]!, 0)).not.toContain("<session-history-since>");
     });
 
     it("applies queued drops for subagent sessions", async () => {

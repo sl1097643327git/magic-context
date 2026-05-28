@@ -226,6 +226,8 @@ export interface TransformDeps {
     getFallbackModelId?: (sessionId: string) => string | undefined;
     projectPath?: string;
     experimentalUserMemories?: boolean;
+    experimentalPinKeyFiles?: boolean;
+    experimentalPinKeyFilesTokenBudget?: number;
     /** When true, inject wall-clock gap markers (<!-- +Xm -->) on user messages and
      *  add start/end date attributes to <compartment> elements in <session-history>.
      *  Controlled by `experimental.temporal_awareness` config. */
@@ -1186,6 +1188,17 @@ export function createTransform(deps: TransformDeps) {
             // messages don't reach providers that reject them (Kimi/Moonshot
             // returns 400 "must not be empty"). See sentinel.ts for details.
             liveProviderID,
+            historyRefreshSessions: deps.historyRefreshSessions,
+            m0M1: {
+                projectPath: projectIdentity ?? deps.projectPath,
+                projectDirectory: sessionDirectory,
+                memoryInjectionBudgetTokens: deps.memoryConfig?.injectionBudgetTokens,
+                historyBudgetTokens,
+                keyFiles: {
+                    enabled: deps.experimentalPinKeyFiles === true,
+                    tokenBudget: deps.experimentalPinKeyFilesTokenBudget ?? 10_000,
+                },
+            },
         });
         logTransformTiming(sessionId, "postTransformPhase", tPostProcess);
 

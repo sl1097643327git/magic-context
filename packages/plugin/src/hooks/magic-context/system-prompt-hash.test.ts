@@ -26,7 +26,6 @@ import {
     openDatabase,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
-import { insertUserMemory } from "../../features/magic-context/user-memory/storage-user-memory";
 import { createSystemPromptHashHandler } from "./system-prompt-hash";
 
 const tempDirs: string[] = [];
@@ -74,10 +73,6 @@ function buildHandler(opts?: {
         injectionSkipSignatures: opts?.injectionSkipSignatures,
         experimentalUserMemories: opts?.experimentalUserMemories,
     });
-}
-
-function countOccurrences(haystack: string, needle: string): number {
-    return haystack.split(needle).length - 1;
 }
 
 describe("system-prompt-hash drain semantics (Oracle review 2026-04-26 Finding A1)", () => {
@@ -223,42 +218,30 @@ describe("system-prompt-hash token estimation (council audit bg_51106601 #2)", (
     });
 });
 
-describe("system-prompt-hash XML escaping for system-prompt adjuncts", () => {
-    it("escapes project-docs content without escaping wrapper tags", async () => {
-        useTempDataHome("sph-docs-escape-");
+describe("system-prompt-hash v2 system prompt contents", () => {
+    it("keeps project docs, user profile, and key files out of the system prompt", async () => {
+        useTempDataHome("sph-v2-adjuncts-out-");
         const directory = mkdtempSync(join(tmpdir(), "sph-docs-project-"));
         tempDirs.push(directory);
         writeFileSync(join(directory, "ARCHITECTURE.md"), "Alpha <closing-tag> & beta", "utf-8");
-        const sessionId = "ses-docs-escape";
+        const sessionId = "ses-v2-adjuncts-out";
         const { handler } = buildHandler({
             dreamerEnabled: true,
             injectDocs: true,
             directory,
+            experimentalUserMemories: true,
         });
 
-        const system = ["You are a helpful coding assistant."];
+        const system = ["You are a helpful coding assistant. Today's date: 2026-05-28"];
         await handler({ sessionID: sessionId }, { system });
         const joined = system.join("\n");
 
-        expect(joined).toContain("<project-docs>");
-        expect(joined).toContain("<ARCHITECTURE.md>");
-        expect(joined).toContain("Alpha &lt;closing-tag&gt; &amp; beta\n</ARCHITECTURE.md>");
-        expect(joined).not.toContain("Alpha <closing-tag> & beta");
-    });
-
-    it("escapes user-profile memory content so literal closing tags cannot terminate the wrapper", async () => {
-        useTempDataHome("sph-profile-escape-");
-        const sessionId = "ses-profile-escape";
-        insertUserMemory(openDatabase(), "User wrote literal </user-profile> & <xml>", []);
-        const { handler } = buildHandler({ experimentalUserMemories: true });
-
-        const system = ["You are a helpful coding assistant."];
-        await handler({ sessionID: sessionId }, { system });
-        const joined = system.join("\n");
-
-        expect(joined).toContain("<user-profile>");
-        expect(joined).toContain("- User wrote literal &lt;/user-profile&gt; &amp; &lt;xml&gt;");
-        expect(countOccurrences(joined, "</user-profile>")).toBe(1);
+        expect(joined).toContain("## Magic Context");
+        expect(joined).toContain("Today's date: 2026-05-28");
+        expect(joined).not.toContain("<project-docs>");
+        expect(joined).not.toContain("<user-profile>");
+        expect(joined).not.toContain("<key-files>");
+        expect(joined).not.toContain("Alpha &lt;closing-tag&gt;");
     });
 });
 

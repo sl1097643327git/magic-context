@@ -18,3 +18,20 @@ export function canConsumeDeferredOnThisPass(args: DeferredConsumptionArgs): boo
         args.contextPercentage >= FORCE_MATERIALIZE_PERCENTAGE
     );
 }
+
+export interface MaterializationPassSignals {
+    /** True when this transform pass successfully wrote fresh cached m[0] bytes. */
+    m0RematerializedThisPass: boolean;
+    /** True when retry exhaustion forced fallback to a previous cached m[0]. */
+    materializationContentionRetryExhausted: boolean;
+    /** True when postprocess observed newer m0_mutation_log ids than cached m[0]. */
+    m0MutationDriftDetected: boolean;
+}
+
+export function createMaterializationPassSignals(): MaterializationPassSignals {
+    return {
+        m0RematerializedThisPass: false,
+        materializationContentionRetryExhausted: false,
+        m0MutationDriftDetected: false,
+    };
+}

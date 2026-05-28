@@ -5,6 +5,7 @@ import {
     clearPersistedStickyTurnReminder,
     clearPersistedTodoSyntheticAnchor,
     getAutoSearchHintDecisions,
+    getMaxM0MutationId,
     getNoteNudgeAnchors,
     getPendingCompactionMarkerState,
     getPendingOps,
@@ -33,6 +34,8 @@ import { dropStaleReduceCalls } from "./drop-stale-reduce-calls";
 import { applyHeuristicCleanup } from "./heuristic-cleanup";
 import {
     getVisibleMemoryIds,
+    injectM0M1,
+    type M0M1State,
     type PreparedCompartmentInjection,
     renderCompartmentInjection,
 } from "./inject-compartments";
@@ -156,6 +159,14 @@ interface RunPostTransformPhaseArgs {
      * providers that don't filter empties — Kimi/Moonshot, etc.).
      */
     liveProviderID?: string;
+    historyRefreshSessions?: Set<string>;
+    m0M1?: {
+        projectPath?: string;
+        projectDirectory?: string;
+        memoryInjectionBudgetTokens?: number;
+        historyBudgetTokens?: number;
+        keyFiles?: { enabled: boolean; tokenBudget: number };
+    };
 }
 
 export interface PostTransformPhaseResult {
@@ -510,7 +521,37 @@ export async function runPostTransformPhase(
         }
     }
 
-    if (args.fullFeatureMode && args.pendingCompartmentInjection) {
+    const m0M1Enabled =
+        args.fullFeatureMode &&
+        args.m0M1 !== undefined &&
+        (!!args.m0M1.projectPath || !!args.m0M1.projectDirectory);
+    if (m0M1Enabled && args.m0M1) {
+        try {
+            const result = injectM0M1({
+                db: args.db,
+                sessionId: args.sessionId,
+                messages: args.messages,
+                state: args.sessionMeta as M0M1State,
+                projectPath: args.m0M1.projectPath,
+                projectDirectory: args.m0M1.projectDirectory,
+                memoryInjectionBudgetTokens: args.m0M1.memoryInjectionBudgetTokens,
+                historyBudgetTokens: args.m0M1.historyBudgetTokens,
+                keyFiles: args.m0M1.keyFiles,
+            });
+            if (result.injected) {
+                sessionLog(
+                    args.sessionId,
+                    `transform: injected m[0]/m[1] (rematerialized=${result.m0RematerializedThisPass}, reason=${result.decision.reason ?? "cache_hit"})`,
+                );
+            }
+        } catch (error) {
+            sessionLog(
+                args.sessionId,
+                "transform: m[0]/m[1] injection failed:",
+                getErrorMessage(error),
+            );
+        }
+    } else if (args.fullFeatureMode && args.pendingCompartmentInjection) {
         const compartmentResult = renderCompartmentInjection(
             args.sessionId,
             args.messages,
@@ -954,6 +995,21 @@ export async function runPostTransformPhase(
         args.deferredMaterializationSessions.delete(args.sessionId);
     }
 
+    if (
+        args.fullFeatureMode &&
+        isCacheBustingPass &&
+        args.m0M1 &&
+        (!!args.m0M1.projectPath || !!args.m0M1.projectDirectory)
+    ) {
+        checkM0MutationDriftAndSignal({
+            db: args.db,
+            sessionId: args.sessionId,
+            cachedM0MaxMutationId: args.sessionMeta.cachedM0MaxMutationId,
+            pendingMaterializationSessions: args.pendingMaterializationSessions,
+            historyRefreshSessions: args.historyRefreshSessions,
+        });
+    }
+
     const workExecutedSuccessfully =
         explicitMaterializedSuccessfully ||
         deferredMaterializedSuccessfully ||
@@ -1044,4 +1100,25 @@ export async function runPostTransformPhase(
     }
 
     return { explicitMaterializedSuccessfully, deferredMaterializedSuccessfully };
+}
+
+export function checkM0MutationDriftAndSignal(args: {
+    db: ContextDatabase;
+    sessionId: string;
+    cachedM0MaxMutationId: number | null;
+    pendingMaterializationSessions: Set<string>;
+    historyRefreshSessions?: Set<string>;
+}): boolean {
+    const currentMaxMutationId = getMaxM0MutationId(args.db, args.sessionId) ?? 0;
+    const cachedMaxMutationId = args.cachedM0MaxMutationId ?? 0;
+    if (currentMaxMutationId !== cachedMaxMutationId) {
+        args.pendingMaterializationSessions.add(args.sessionId);
+        args.historyRefreshSessions?.add(args.sessionId);
+        sessionLog(
+            args.sessionId,
+            `m[0] drift watcher: mutation id changed ${cachedMaxMutationId} → ${currentMaxMutationId}; scheduling next-pass materialization`,
+        );
+        return true;
+    }
+    return false;
 }

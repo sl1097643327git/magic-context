@@ -1,12 +1,26 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, it } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { replaceAllCompartmentState } from "../../features/magic-context/compartment-storage";
 import { insertMemory } from "../../features/magic-context/memory/storage-memory";
+import {
+    bumpSessionFactsVersion,
+    getOrCreateSessionMeta,
+    queueM0Mutation,
+    setProjectState,
+} from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { Database } from "../../shared/sqlite";
 import {
     clearInjectionCache,
+    injectM0M1,
+    MaterializeContentionError,
+    materializeM0,
+    materializeWithRetry,
+    mustMaterialize,
     prepareCompartmentInjection,
     renderCompartmentInjection,
 } from "./inject-compartments";
@@ -16,13 +30,29 @@ const SESSION_ID = "ses_test_inject";
 const PROJECT_PATH = "/tmp/test-inject-project";
 
 let db: Database;
+const tempDirs: string[] = [];
 
 function makeDb(): Database {
     const d = new Database(":memory:");
     initializeDatabase(d);
     // session_meta row must exist for memory_block_cache writes
-    d.prepare("INSERT INTO session_meta (session_id) VALUES (?)").run(SESSION_ID);
+    getOrCreateSessionMeta(d, SESSION_ID);
     return d;
+}
+
+function makeProjectDir(): string {
+    const dir = mkdtempSync(join(tmpdir(), "mc-renderer-test-"));
+    tempDirs.push(dir);
+    return dir;
+}
+
+function readStateFromMeta(): ReturnType<typeof getOrCreateSessionMeta> {
+    return getOrCreateSessionMeta(db, SESSION_ID);
+}
+
+function renderedText(message: MessageLike): string {
+    const part = message.parts[0] as { type: string; text?: string } | undefined;
+    return part?.type === "text" ? (part.text ?? "") : "";
 }
 
 function userMessage(id: string, text: string): MessageLike {
@@ -35,6 +65,8 @@ function userMessage(id: string, text: string): MessageLike {
 afterEach(() => {
     if (db) db.close();
     clearInjectionCache(SESSION_ID);
+    for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
+    tempDirs.length = 0;
 });
 
 describe("prepareCompartmentInjection — empty compartments fallback", () => {
@@ -345,5 +377,331 @@ describe("prepareCompartmentInjection — SQLITE_BUSY handling (issue #23)", () 
         expect(() =>
             prepareCompartmentInjection(errorProxy, SESSION_ID, messages, true, PROJECT_PATH),
         ).toThrow("schema mismatch");
+    });
+});
+
+describe("m[0]/m[1] materialization", () => {
+    it("mustMaterialize returns true on first call", () => {
+        db = makeDb();
+        const decision = mustMaterialize({
+            db,
+            sessionId: SESSION_ID,
+            state: readStateFromMeta(),
+            projectPath: PROJECT_PATH,
+            projectDirectory: makeProjectDir(),
+        });
+        expect(decision).toEqual({ value: true, reason: "first_render" });
+    });
+
+    it("mustMaterialize returns false when cached markers match current state", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        materializeM0({
+            db,
+            sessionId: SESSION_ID,
+            state: readStateFromMeta(),
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+        });
+        const state = readStateFromMeta();
+
+        const decision = mustMaterialize({
+            db,
+            sessionId: SESSION_ID,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+        });
+
+        expect(decision).toEqual({ value: false, reason: null });
+    });
+
+    it("mustMaterialize detects project_memory_epoch decreases after DB restore", () => {
+        db = makeDb();
+        setProjectState(db, PROJECT_PATH, { projectMemoryEpoch: 4 });
+        const state = {
+            ...readStateFromMeta(),
+            cachedM0Bytes: Buffer.from("<session-history></session-history>"),
+            cachedM0ProjectMemoryEpoch: 5,
+            cachedM0ProjectUserProfileVersion: 0,
+            cachedM0MaxCompartmentSeq: 0,
+            cachedM0MaxMemoryId: 0,
+            cachedM0MaxMutationId: 0,
+            cachedM0ProjectDocsHash: "",
+            cachedM0SessionFactsVersion: 0,
+            cachedM0UpgradeState: "ready",
+        };
+
+        expect(
+            mustMaterialize({
+                db,
+                sessionId: SESSION_ID,
+                state,
+                projectPath: PROJECT_PATH,
+                projectDirectory: makeProjectDir(),
+            }).reason,
+        ).toBe("project_memory_epoch");
+    });
+
+    it("mustMaterialize detects a new compartment via max sequence", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        materializeM0({
+            db,
+            sessionId: SESSION_ID,
+            state: readStateFromMeta(),
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+        });
+        const state = readStateFromMeta();
+        replaceAllCompartmentState(
+            db,
+            SESSION_ID,
+            [
+                {
+                    sequence: 2,
+                    startMessage: 1,
+                    endMessage: 1,
+                    startMessageId: "m1",
+                    endMessageId: "m1",
+                    title: "New",
+                    content: "New summary",
+                },
+            ],
+            [],
+        );
+
+        expect(
+            mustMaterialize({
+                db,
+                sessionId: SESSION_ID,
+                state,
+                projectPath: PROJECT_PATH,
+                projectDirectory,
+            }).reason,
+        ).toBe("max_compartment_seq");
+    });
+
+    it("mustMaterialize detects a new m0_mutation_log entry by monotonic id", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        materializeM0({
+            db,
+            sessionId: SESSION_ID,
+            state: readStateFromMeta(),
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+        });
+        const state = readStateFromMeta();
+        queueM0Mutation(db, {
+            sessionId: SESSION_ID,
+            mutationType: "compartment_merge",
+            queuedAt: 1,
+        });
+
+        expect(
+            mustMaterialize({
+                db,
+                sessionId: SESSION_ID,
+                state,
+                projectPath: PROJECT_PATH,
+                projectDirectory,
+            }).reason,
+        ).toBe("max_mutation_id");
+    });
+
+    it("mustMaterialize detects project docs hash changes", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        materializeM0({
+            db,
+            sessionId: SESSION_ID,
+            state: readStateFromMeta(),
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+        });
+        const state = readStateFromMeta();
+        writeFileSync(join(projectDirectory, "ARCHITECTURE.md"), "# New architecture\n");
+
+        expect(
+            mustMaterialize({
+                db,
+                sessionId: SESSION_ID,
+                state,
+                projectPath: PROJECT_PATH,
+                projectDirectory,
+            }).reason,
+        ).toBe("project_docs_hash");
+    });
+
+    it("mustMaterialize detects a session facts version bump", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        materializeM0({
+            db,
+            sessionId: SESSION_ID,
+            state: readStateFromMeta(),
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+        });
+        const state = readStateFromMeta();
+        db.exec("BEGIN");
+        bumpSessionFactsVersion(db, SESSION_ID);
+        db.exec("COMMIT");
+
+        expect(
+            mustMaterialize({
+                db,
+                sessionId: SESSION_ID,
+                state,
+                projectPath: PROJECT_PATH,
+                projectDirectory,
+            }).reason,
+        ).toBe("session_facts_version");
+    });
+
+    it("materializeM0 Phase 3 commits all cached_m0 fields", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        const result = materializeM0({
+            db,
+            sessionId: SESSION_ID,
+            state: readStateFromMeta(),
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+        });
+        const row = db
+            .prepare(
+                `SELECT cached_m0_bytes, cached_m0_project_memory_epoch,
+                        cached_m0_project_user_profile_version, cached_m0_max_compartment_seq,
+                        cached_m0_max_memory_id, cached_m0_max_mutation_id,
+                        cached_m0_project_docs_hash, cached_m0_materialized_at,
+                        cached_m0_session_facts_version, cached_m0_upgrade_state
+                   FROM session_meta WHERE session_id = ?`,
+            )
+            .get(SESSION_ID) as Record<string, unknown>;
+
+        expect(row.cached_m0_bytes).not.toBeNull();
+        expect(Buffer.from(row.cached_m0_bytes as Buffer).toString("utf8")).toBe(result.m0Text);
+        expect(row.cached_m0_project_memory_epoch).toBe(0);
+        expect(row.cached_m0_project_user_profile_version).toBe(0);
+        expect(row.cached_m0_max_compartment_seq).toBe(0);
+        expect(row.cached_m0_max_memory_id).toBe(0);
+        expect(row.cached_m0_max_mutation_id).toBe(0);
+        expect(row.cached_m0_project_docs_hash).toBe("");
+        expect(typeof row.cached_m0_materialized_at).toBe("number");
+        expect(row.cached_m0_session_facts_version).toBe(0);
+        expect(row.cached_m0_upgrade_state).toBe("ready");
+    });
+
+    it("materializeM0 throws MaterializeContentionError when epoch changes between snapshot and swap", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+
+        expect(() =>
+            materializeM0({
+                db,
+                sessionId: SESSION_ID,
+                state: readStateFromMeta(),
+                projectPath: PROJECT_PATH,
+                projectDirectory,
+                beforePhase3ForTest: () => {
+                    setProjectState(db, PROJECT_PATH, { projectMemoryEpoch: 1 });
+                },
+            }),
+        ).toThrow(MaterializeContentionError);
+    });
+
+    it("materializeWithRetry retries three times then throws", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        let attempts = 0;
+
+        expect(() =>
+            materializeWithRetry(
+                {
+                    db,
+                    sessionId: SESSION_ID,
+                    state: readStateFromMeta(),
+                    projectPath: PROJECT_PATH,
+                    projectDirectory,
+                    beforePhase3ForTest: () => {
+                        attempts += 1;
+                        queueM0Mutation(db, {
+                            sessionId: SESSION_ID,
+                            mutationType: "compartment_merge",
+                        });
+                    },
+                },
+                3,
+            ),
+        ).toThrow(MaterializeContentionError);
+        expect(attempts).toBe(3);
+    });
+
+    it("injectM0M1 updates root cached state after successful materialization", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        const state = readStateFromMeta();
+        const messages = [userMessage("m1", "hello")];
+
+        const result = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+        });
+
+        expect(result.injected).toBe(true);
+        expect(result.m0RematerializedThisPass).toBe(true);
+        expect(state.cachedM0Bytes).toBeInstanceOf(Buffer);
+        expect(state.cachedM0ProjectMemoryEpoch).toBe(0);
+        expect(state.cachedM0MaxCompartmentSeq).toBe(0);
+        expect(state.cachedM0MaxMutationId).toBe(0);
+        expect(state.cachedM0ProjectDocsHash).toBe("");
+        expect(typeof state.cachedM0MaterializedAt).toBe("number");
+        expect(state.cachedM0SessionFactsVersion).toBe(0);
+        expect(state.cachedM0UpgradeState).toBe("ready");
+        expect(state.snapshotMarkers?.maxMemoryId).toBe(0);
+        expect(
+            mustMaterialize({
+                db,
+                sessionId: SESSION_ID,
+                state,
+                projectPath: PROJECT_PATH,
+                projectDirectory,
+            }).value,
+        ).toBe(false);
+    });
+
+    it("defer pass reuses byte-identical m[0] bytes from the prior materialization", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        const state = readStateFromMeta();
+        const firstMessages = [userMessage("m1", "hello")];
+        injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: firstMessages,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+        });
+        const firstM0 = renderedText(firstMessages[0]);
+
+        const secondMessages = [userMessage("m2", "hello again")];
+        const second = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: secondMessages,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+        });
+
+        expect(second.m0RematerializedThisPass).toBe(false);
+        expect(renderedText(secondMessages[0])).toBe(firstM0);
     });
 });

@@ -1,29 +1,19 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import { buildMagicContextSection } from "../../agents/magic-context-prompt";
-import { escapeXmlContent } from "../../features/magic-context/compartment-storage";
 import {
     type ContextDatabase,
     getOrCreateSessionMeta,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
-import { getActiveUserMemories } from "../../features/magic-context/user-memory/storage-user-memory";
-import { log, sessionLog } from "../../shared/logger";
-import { clearKeyFilesCacheForSession, readVersionedKeyFiles } from "./key-files-block";
+import { sessionLog } from "../../shared/logger";
+import { clearKeyFilesCacheForSession } from "./key-files-block";
 import { estimateTokens } from "./read-session-formatting";
 
 const MAGIC_CONTEXT_MARKER = "## Magic Context";
-const PROJECT_DOCS_MARKER = "<project-docs>";
-const USER_PROFILE_MARKER = "<user-profile>";
-const KEY_FILES_MARKER = "<key-files>";
-
 // Module-scope caches are per-plugin-instance (one plugin process per OpenCode
 // process) and accumulate session entries over the plugin's lifetime. Without
 // cleanup on `session.deleted`, these maps grow unbounded. Exported so hook.ts
 // can register a cleanup callback tied to the session-deleted lifecycle event.
-const cachedUserProfileBySession = new Map<string, string | null>();
-
 /**
  * Clear all per-session cache entries the system-prompt handler maintains,
  * including the module-scope user-profile/key-files maps and the per-handler
@@ -37,7 +27,6 @@ export function clearSystemPromptHashSession(
         cachedDocsBySession: Map<string, string | null>;
     },
 ): void {
-    cachedUserProfileBySession.delete(sessionId);
     clearKeyFilesCacheForSession(sessionId);
     handleMaps.stickyDateBySession.delete(sessionId);
     handleMaps.cachedDocsBySession.delete(sessionId);
@@ -83,34 +72,6 @@ function isInternalOpenCodeAgent(systemPromptContent: string): boolean {
     );
 }
 
-const DOC_FILES = ["ARCHITECTURE.md", "STRUCTURE.md"] as const;
-
-/**
- * Read dreamer-maintained project docs from the repo root.
- * Returns a wrapped XML block or null if no docs exist.
- */
-function readProjectDocs(directory: string): string | null {
-    const sections: string[] = [];
-
-    for (const filename of DOC_FILES) {
-        const filePath = join(directory, filename);
-        try {
-            if (existsSync(filePath)) {
-                const content = readFileSync(filePath, "utf-8").trim();
-                if (content.length > 0) {
-                    sections.push(`<${filename}>\n${escapeXmlContent(content)}\n</${filename}>`);
-                }
-            }
-        } catch (error) {
-            log(`[magic-context] failed to read ${filename}:`, error);
-        }
-    }
-
-    if (sections.length === 0) return null;
-
-    return `${PROJECT_DOCS_MARKER}\n${sections.join("\n\n")}\n</project-docs>`;
-}
-
 /**
  * Handle system prompt via experimental.chat.system.transform:
  *
@@ -152,9 +113,8 @@ export function createSystemPromptHashHandler(deps: {
     lastHeuristicsTurnId: Map<string, string>;
     /**
      * Issue #53: when false, Magic Context skips ALL system-prompt injection
-     * for ALL agents. Global escape hatch for users who don't want any
-     * Magic Context guidance / docs / user-profile / key-files / sticky date
-     * touching the system prompt. (default: true)
+     * for ALL agents. Global escape hatch for users who don't want Magic
+     * Context guidance / sticky date touching the system prompt. (default: true)
      */
     injectionEnabled?: boolean;
     /**
@@ -165,11 +125,11 @@ export function createSystemPromptHashHandler(deps: {
      * globally.
      */
     injectionSkipSignatures?: string[];
-    /** When true, inject stable user memories as <user-profile> into system prompt */
+    /** @deprecated user memories now render in m[0]/m[1], not system prompt. */
     experimentalUserMemories?: boolean;
-    /** When true, inject pinned key files as <key-files> into system prompt */
+    /** @deprecated key files now render in m[1], not system prompt. */
     experimentalPinKeyFiles?: boolean;
-    /** Token budget for key files injection (default 10000) */
+    /** @deprecated key files now render in m[1], not system prompt. */
     experimentalPinKeyFilesTokenBudget?: number;
     /** When true, add a temporal-awareness guidance paragraph + surface compartment dates */
     experimentalTemporalAwareness?: boolean;
@@ -184,13 +144,6 @@ export function createSystemPromptHashHandler(deps: {
     // and only update it on cache-busting passes. This prevents a midnight date
     // flip from causing an unnecessary flush + cache rebuild.
     const stickyDateBySession = new Map<string, string>();
-
-    // Per-session cached doc content: read from disk on first access, refreshed
-    // only on cache-busting passes so mid-session dreamer doc updates don't cause
-    // spurious cache busts.
-    const cachedDocsBySession = new Map<string, string | null>();
-
-    const shouldInjectDocs = deps.dreamerEnabled && deps.injectDocs;
 
     const handler = async (
         input: { sessionID?: string },
@@ -295,93 +248,13 @@ export function createSystemPromptHashHandler(deps: {
             );
         }
 
-        // ── Step 1.5: Inject dreamer-maintained project docs ──
-        //
-        // `isCacheBusting` here uses ONLY `systemPromptRefreshSessions`, the
-        // narrow signal for adjunct refresh. NOT `historyRefreshSessions` and
-        // NOT `pendingMaterializationSessions` — those are independent
-        // lifetimes consumed by other handlers.
-        //
-        // Why this narrow signal: system-prompt adjuncts (docs, user profile,
-        // key files, sticky date) are disk/config-derived state, not pending-
-        // op state and not history-block state. A historian publication
-        // changes `<session-history>` but does NOT change disk adjuncts;
-        // re-reading them on every historian publish would burn IO for no
-        // reason. Producers that DO change adjuncts (`/ctx-flush`, real
-        // variant change, system-prompt hash change) explicitly add to
-        // `systemPromptRefreshSessions` alongside the other sets.
-        //
-        // Drained at end of handler (one-shot semantics): future defer
-        // passes hit cached values until a producer re-signals.
-        //
-        // See council Finding #12 for the original asymmetry design rationale,
-        // and Oracle review 2026-04-26 for the current three-set split.
+        // ── Step 1.5: m[0]/m[1]-resident adjuncts ──
+        // Project docs, user profile, and key files intentionally do NOT
+        // enter the system prompt in cache architecture v2.0. Project docs
+        // and baseline user profile are materialized into m[0]; key files
+        // are the volatile resident at m[1]. Keep only guidance + sticky
+        // date in system so BP1 remains stable.
         const isCacheBusting = deps.systemPromptRefreshSessions.has(sessionId);
-
-        if (shouldInjectDocs && !isSubagentSession) {
-            const hasCached = cachedDocsBySession.has(sessionId);
-
-            if (!hasCached || isCacheBusting) {
-                // Read fresh from disk on first access or cache-busting pass
-                const docsContent = readProjectDocs(deps.directory);
-                cachedDocsBySession.set(sessionId, docsContent);
-                if (docsContent && !hasCached) {
-                    sessionLog(sessionId, `loaded project docs (${docsContent.length} chars)`);
-                } else if (docsContent && isCacheBusting) {
-                    sessionLog(sessionId, "refreshed project docs (cache-busting pass)");
-                }
-            }
-
-            const docsBlock = cachedDocsBySession.get(sessionId);
-            if (docsBlock && !fullPrompt.includes(PROJECT_DOCS_MARKER)) {
-                output.system.push(docsBlock);
-            }
-        }
-
-        // ── Step 1.6: Inject stable user memories as user profile ──
-        if (deps.experimentalUserMemories && !isSubagentSession) {
-            const hasCachedProfile = cachedUserProfileBySession.has(sessionId);
-
-            if (!hasCachedProfile || isCacheBusting) {
-                const memories = getActiveUserMemories(deps.db);
-                if (memories.length > 0) {
-                    const items = memories
-                        .map((m) => `- ${escapeXmlContent(m.content)}`)
-                        .join("\n");
-                    cachedUserProfileBySession.set(
-                        sessionId,
-                        `${USER_PROFILE_MARKER}\n${items}\n</user-profile>`,
-                    );
-                    if (!hasCachedProfile) {
-                        sessionLog(sessionId, `loaded ${memories.length} user profile memorie(s)`);
-                    }
-                } else {
-                    cachedUserProfileBySession.set(sessionId, null);
-                }
-            }
-
-            const profileBlock = cachedUserProfileBySession.get(sessionId);
-            if (profileBlock && !fullPrompt.includes(USER_PROFILE_MARKER)) {
-                output.system.push(profileBlock);
-            }
-        }
-
-        // ── Step 1.7: Inject pinned key files ──
-        if (deps.experimentalPinKeyFiles && sessionMetaEarly) {
-            const keyFilesBlock = readVersionedKeyFiles({
-                db: deps.db,
-                sessionId,
-                sessionMeta: sessionMetaEarly,
-                directory: deps.directory,
-                isCacheBusting,
-                config: {
-                    enabled: deps.experimentalPinKeyFiles,
-                    tokenBudget: deps.experimentalPinKeyFilesTokenBudget ?? 10_000,
-                },
-            });
-            if (keyFilesBlock && !fullPrompt.includes(KEY_FILES_MARKER))
-                output.system.push(keyFilesBlock);
-        }
 
         // ── Step 2: Freeze volatile date to prevent unnecessary cache busts ──
         const DATE_PATTERN = /Today's date: .+/;
@@ -505,7 +378,7 @@ export function createSystemPromptHashHandler(deps: {
         clearSession: (sessionId: string) => {
             clearSystemPromptHashSession(sessionId, {
                 stickyDateBySession,
-                cachedDocsBySession,
+                cachedDocsBySession: new Map(),
             });
         },
     };
