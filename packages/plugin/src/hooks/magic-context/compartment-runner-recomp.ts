@@ -1,13 +1,14 @@
+import { isCompartmentLeaseHeld } from "../../features/magic-context/compartment-lease";
 import {
     clearRecompStaging,
     getRecompStaging,
-    promoteRecompStaging,
     saveRecompStagingPass,
 } from "../../features/magic-context/compartment-storage";
 import { clearCompressionDepth } from "../../features/magic-context/compression-depth-storage";
 import { promoteSessionFactsToMemory } from "../../features/magic-context/memory";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import { getMemoriesByProject } from "../../features/magic-context/memory/storage-memory";
+import { appendM0Mutation, bumpSessionFactsVersion } from "../../features/magic-context/storage";
 import {
     clearPendingCompactionMarkerStateIf,
     getPendingCompactionMarkerState,
@@ -15,7 +16,9 @@ import {
 } from "../../features/magic-context/storage-meta";
 import { normalizeSDKResponse } from "../../shared";
 import { getErrorMessage } from "../../shared/error-message";
+import { getHarness } from "../../shared/harness";
 import { sessionLog } from "../../shared/logger";
+import type { Database } from "../../shared/sqlite";
 import { updateCompactionMarkerAfterPublication } from "./compaction-marker-manager";
 import { buildCompartmentAgentPrompt } from "./compartment-prompt";
 import { runCompressionPassIfNeeded } from "./compartment-runner-compressor";
@@ -40,6 +43,101 @@ import {
 } from "./read-session-chunk";
 import { sendIgnoredMessage } from "./send-session-notification";
 
+function insertRecompCompartmentRows(
+    db: Database,
+    sessionId: string,
+    compartments: CandidateCompartment[],
+    now: number,
+): void {
+    const stmt = db.prepare(
+        "INSERT INTO compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, created_at, harness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    );
+    for (const c of compartments) {
+        stmt.run(
+            sessionId,
+            c.sequence,
+            c.startMessage,
+            c.endMessage,
+            c.startMessageId,
+            c.endMessageId,
+            c.title,
+            c.content,
+            now,
+            getHarness(),
+        );
+    }
+}
+
+function insertRecompFactRows(
+    db: Database,
+    sessionId: string,
+    facts: Array<{ category: string; content: string }>,
+    now: number,
+): void {
+    const stmt = db.prepare(
+        "INSERT INTO session_facts (session_id, category, content, created_at, updated_at, harness) VALUES (?, ?, ?, ?, ?, ?)",
+    );
+    for (const fact of facts) {
+        stmt.run(sessionId, fact.category, fact.content, now, now, getHarness());
+    }
+}
+
+export function promoteRecompStagingWithM0Mutation(
+    db: Database,
+    sessionId: string,
+    holderId: string,
+): {
+    compartments: CandidateCompartment[];
+    facts: Array<{ category: string; content: string }>;
+} | null {
+    const now = Date.now();
+    db.exec("BEGIN IMMEDIATE");
+    let finished = false;
+    try {
+        if (!isCompartmentLeaseHeld(db, sessionId, holderId)) {
+            db.exec("ROLLBACK");
+            finished = true;
+            return null;
+        }
+
+        const staging = getRecompStaging(db, sessionId);
+        if (!staging || staging.compartments.length === 0) {
+            db.exec("ROLLBACK");
+            finished = true;
+            return null;
+        }
+
+        db.prepare("DELETE FROM compartments WHERE session_id = ?").run(sessionId);
+        db.prepare("DELETE FROM session_facts WHERE session_id = ?").run(sessionId);
+        insertRecompCompartmentRows(db, sessionId, staging.compartments, now);
+        insertRecompFactRows(db, sessionId, staging.facts, now);
+        bumpSessionFactsVersion(db, sessionId);
+        appendM0Mutation(db, {
+            sessionId,
+            mutationType: "recomp_boundary_change",
+            targetId: null,
+            queuedAt: now,
+        });
+        db.prepare("DELETE FROM recomp_compartments WHERE session_id = ?").run(sessionId);
+        db.prepare("DELETE FROM recomp_facts WHERE session_id = ?").run(sessionId);
+        db.prepare(
+            "UPDATE session_meta SET memory_block_cache = '', memory_block_ids = '' WHERE session_id = ?",
+        ).run(sessionId);
+
+        db.exec("COMMIT");
+        finished = true;
+        return { compartments: staging.compartments, facts: staging.facts };
+    } finally {
+        if (!finished) {
+            try {
+                db.exec("ROLLBACK");
+            } catch {
+                // Transaction may already be closed by SQLite after an error.
+            }
+        }
+    }
+}
+
 export async function executeContextRecompInternal(deps: CompartmentRunnerDeps): Promise<string> {
     const {
         client,
@@ -55,6 +153,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
     if (!holderId) {
         return "## Magic Recomp — Skipped\n\nCould not acquire the compartment-state lease for this session.";
     }
+    const leaseHolderId = holderId;
     // State file for the current pass — hoisted to be accessible in finally{}
     let currentStateFilePath: string | undefined;
     updateSessionMeta(db, sessionId, { compartmentInProgress: true });
@@ -115,7 +214,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             // Ensure latest candidates are saved to staging before promoting
             saveRecompStagingPass(db, sessionId, passCount, candidateCompartments, candidateFacts);
 
-            const promoted = promoteRecompStaging(db, sessionId, holderId);
+            const promoted = promoteRecompStagingWithM0Mutation(db, sessionId, leaseHolderId);
             if (!promoted) return null;
 
             // Full recomp rebuilds every compartment from message 1 onward, so
@@ -326,7 +425,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
 
         // Final success: promote staging → real tables
         saveRecompStagingPass(db, sessionId, passCount, candidateCompartments, candidateFacts);
-        const promoted = promoteRecompStaging(db, sessionId, holderId);
+        const promoted = promoteRecompStagingWithM0Mutation(db, sessionId, leaseHolderId);
         if (!promoted) {
             sessionLog(sessionId, "recomp publish skipped: compartment lease no longer held");
             return "## Magic Recomp — Skipped\n\nAnother process acquired the compartment-state lease before recomp could publish. No state was written.";

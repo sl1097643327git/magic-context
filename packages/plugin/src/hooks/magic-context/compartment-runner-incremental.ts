@@ -21,6 +21,7 @@ import { promoteSessionFactsToMemory } from "../../features/magic-context/memory
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import { getMemoriesByProject } from "../../features/magic-context/memory/storage-memory";
 import {
+    bumpSessionFactsVersion,
     clearEmergencyRecovery,
     clearHistorianFailureState,
     incrementHistorianFailure,
@@ -308,6 +309,7 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             }
             appendCompartments(db, sessionId, newCompartments);
             replaceSessionFacts(db, sessionId, validatedPass.facts ?? []);
+            bumpSessionFactsVersion(db, sessionId);
             clearHistorianFailureState(db, sessionId);
             // Successful historian publication means the overflow recovery is
             // complete for this session. Clear the flag so we don't keep

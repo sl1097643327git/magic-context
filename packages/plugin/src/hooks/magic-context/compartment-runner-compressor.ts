@@ -6,21 +6,26 @@ import {
     DEFAULT_COMPRESSOR_MIN_COMPARTMENT_RATIO,
     DEFAULT_HISTORIAN_TIMEOUT_MS,
 } from "../../config/schema/magic-context";
-import type { Compartment } from "../../features/magic-context/compartment-storage";
+import { isCompartmentLeaseHeld } from "../../features/magic-context/compartment-lease";
+import type {
+    Compartment,
+    CompartmentInput,
+} from "../../features/magic-context/compartment-storage";
+import { getIncrementDepthStatement } from "../../features/magic-context/compression-depth-storage";
 import {
+    appendM0Mutation,
+    bumpSessionFactsVersion,
     getAverageCompressionDepth,
     getCompartments,
     getSessionFacts,
-    incrementCompressionDepth,
     openDatabase,
-    replaceAllCompartmentState,
-    replaceAllCompartmentStateAndBumpDepth,
 } from "../../features/magic-context/storage";
 import { recordChildInvocation } from "../../features/magic-context/subagent-token-capture";
 import type { PluginContext } from "../../plugin/types";
 import { normalizeSDKResponse, promptSyncWithModelSuggestionRetry } from "../../shared";
 import { extractLatestAssistantText } from "../../shared/assistant-message-extractor";
 import { getErrorMessage } from "../../shared/error-message";
+import { getHarness } from "../../shared/harness";
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import type { CavemanLevel } from "./caveman";
@@ -30,6 +35,118 @@ import { buildCompressorPrompt } from "./compartment-prompt";
 import { estimateTokens } from "./read-session-formatting";
 
 const HISTORIAN_AGENT = "historian";
+
+function insertCompressedCompartmentRows(
+    db: Database,
+    sessionId: string,
+    compartments: CompartmentInput[],
+    now: number,
+): void {
+    const stmt = db.prepare(
+        "INSERT INTO compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, created_at, harness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    );
+    for (const c of compartments) {
+        stmt.run(
+            sessionId,
+            c.sequence,
+            c.startMessage,
+            c.endMessage,
+            c.startMessageId,
+            c.endMessageId,
+            c.title,
+            c.content,
+            now,
+            getHarness(),
+        );
+    }
+}
+
+function insertCompressedFactRows(
+    db: Database,
+    sessionId: string,
+    facts: Array<{ category: string; content: string }>,
+    now: number,
+): void {
+    const stmt = db.prepare(
+        "INSERT INTO session_facts (session_id, category, content, created_at, updated_at, harness) VALUES (?, ?, ?, ?, ?, ?)",
+    );
+    for (const fact of facts) {
+        stmt.run(sessionId, fact.category, fact.content, now, now, getHarness());
+    }
+}
+
+function publishCompressedState(args: {
+    db: Database;
+    sessionId: string;
+    holderId?: string;
+    compartments: CompartmentInput[];
+    facts: Array<{ category: string; content: string }>;
+    depthStartOrdinal: number;
+    depthEndOrdinal: number;
+    mutationTargetId: number | null;
+}): boolean {
+    const {
+        db,
+        sessionId,
+        holderId,
+        compartments,
+        facts,
+        depthStartOrdinal,
+        depthEndOrdinal,
+        mutationTargetId,
+    } = args;
+    const now = Date.now();
+
+    const writeState = () => {
+        db.prepare("DELETE FROM compartments WHERE session_id = ?").run(sessionId);
+        db.prepare("DELETE FROM session_facts WHERE session_id = ?").run(sessionId);
+        insertCompressedCompartmentRows(db, sessionId, compartments, now);
+        insertCompressedFactRows(db, sessionId, facts, now);
+        bumpSessionFactsVersion(db, sessionId);
+        appendM0Mutation(db, {
+            sessionId,
+            mutationType: "compartment_merge",
+            targetId: mutationTargetId,
+            queuedAt: now,
+        });
+        db.prepare(
+            "UPDATE session_meta SET memory_block_cache = '', memory_block_ids = '' WHERE session_id = ?",
+        ).run(sessionId);
+        if (depthEndOrdinal >= depthStartOrdinal) {
+            const stmt = getIncrementDepthStatement(db);
+            for (let ordinal = depthStartOrdinal; ordinal <= depthEndOrdinal; ordinal += 1) {
+                stmt.run(sessionId, ordinal, getHarness());
+            }
+        }
+    };
+
+    if (!holderId) {
+        db.transaction(writeState)();
+        return true;
+    }
+
+    db.exec("BEGIN IMMEDIATE");
+    let finished = false;
+    try {
+        if (!isCompartmentLeaseHeld(db, sessionId, holderId)) {
+            db.exec("ROLLBACK");
+            finished = true;
+            return false;
+        }
+        writeState();
+        db.exec("COMMIT");
+        finished = true;
+        return true;
+    } finally {
+        if (!finished) {
+            try {
+                db.exec("ROLLBACK");
+            } catch {
+                // Transaction may already be closed by SQLite after an error.
+            }
+        }
+    }
+}
 
 /** Per-session cache of the last depth histogram string we logged.
  *  Used to suppress repeat log lines when the histogram hasn't changed
@@ -536,7 +653,7 @@ function finalizeCompression(args: FinalizeArgs): boolean {
         compartments,
         leadingCount,
         trailingIndex,
-        selectedCompartments: _selectedCompartments,
+        selectedCompartments,
         compressed,
         originalStart,
         originalEnd,
@@ -604,21 +721,16 @@ function finalizeCompression(args: FinalizeArgs): boolean {
     ];
 
     const factInputs = facts.map((f) => ({ category: f.category, content: f.content }));
-    const published = holderId
-        ? replaceAllCompartmentStateAndBumpDepth(
-              db,
-              holderId,
-              sessionId,
-              allCompartments,
-              factInputs,
-              originalStart,
-              originalEnd,
-          )
-        : (() => {
-              replaceAllCompartmentState(db, sessionId, allCompartments, factInputs);
-              incrementCompressionDepth(db, sessionId, originalStart, originalEnd);
-              return true;
-          })();
+    const published = publishCompressedState({
+        db,
+        sessionId,
+        holderId,
+        compartments: allCompartments,
+        facts: factInputs,
+        depthStartOrdinal: originalStart,
+        depthEndOrdinal: originalEnd,
+        mutationTargetId: selectedCompartments[0]?.id ?? null,
+    });
     if (!published) {
         sessionLog(
             sessionId,

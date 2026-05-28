@@ -7,6 +7,7 @@ import { log } from "../../../shared/logger";
 import type { Database } from "../../../shared/sqlite";
 import { renewLease } from "../dreamer/lease";
 import { DREAMER_SYSTEM_PROMPT } from "../dreamer/task-prompts";
+import { bumpProjectUserProfileVersion } from "../storage";
 import { recordChildInvocation } from "../subagent-token-capture";
 import {
     deleteUserMemoryCandidates,
@@ -222,45 +223,60 @@ If no promotions are warranted, return empty arrays. Always consume reviewed can
             return result;
         }
 
-        // Apply promotions
-        if (parsed.promote) {
-            for (const p of parsed.promote) {
-                if (p.content?.trim()) {
-                    insertUserMemory(args.db, p.content.trim(), p.candidate_ids ?? []);
-                    result.promoted++;
-                    log(`[dreamer] user-memories: promoted "${p.content.trim().slice(0, 60)}..."`);
-                }
-            }
-        }
+        const promotions = (parsed.promote ?? [])
+            .map((p) => ({
+                content: p.content?.trim() ?? "",
+                candidateIds: p.candidate_ids ?? [],
+            }))
+            .filter((p) => p.content.length > 0);
+        const updates = (parsed.update_existing ?? [])
+            .map((u) => ({
+                memoryId: u.memory_id,
+                content: u.content?.trim() ?? "",
+            }))
+            .filter((u) => Boolean(u.memoryId) && u.content.length > 0);
+        const dismissals = (parsed.dismiss_existing ?? []).filter((d) => Boolean(d.memory_id));
+        const consumeCandidateIds = parsed.consume_candidate_ids ?? [];
 
-        // Apply updates to existing memories
-        if (parsed.update_existing) {
-            for (const u of parsed.update_existing) {
-                if (u.memory_id && u.content?.trim()) {
-                    updateUserMemoryContent(args.db, u.memory_id, u.content.trim());
-                    result.merged++;
-                    log(`[dreamer] user-memories: updated memory #${u.memory_id}`);
-                }
+        args.db.transaction(() => {
+            for (const promotion of promotions) {
+                insertUserMemory(args.db, promotion.content, promotion.candidateIds);
             }
-        }
 
-        // Apply dismissals
-        if (parsed.dismiss_existing) {
-            for (const d of parsed.dismiss_existing) {
-                if (d.memory_id) {
-                    dismissUserMemory(args.db, d.memory_id);
-                    result.dismissed++;
-                    log(
-                        `[dreamer] user-memories: dismissed memory #${d.memory_id} — ${d.reason ?? "no reason"}`,
-                    );
-                }
+            for (const update of updates) {
+                updateUserMemoryContent(args.db, update.memoryId, update.content);
             }
-        }
 
-        // Consume reviewed candidates
-        if (parsed.consume_candidate_ids && parsed.consume_candidate_ids.length > 0) {
-            deleteUserMemoryCandidates(args.db, parsed.consume_candidate_ids);
-            result.candidatesConsumed = parsed.consume_candidate_ids.length;
+            for (const dismissal of dismissals) {
+                dismissUserMemory(args.db, dismissal.memory_id);
+            }
+
+            if (consumeCandidateIds.length > 0) {
+                deleteUserMemoryCandidates(args.db, consumeCandidateIds);
+            }
+
+            if (promotions.length > 0 || updates.length > 0 || dismissals.length > 0) {
+                bumpProjectUserProfileVersion(args.db);
+            }
+        })();
+
+        result.promoted = promotions.length;
+        result.merged = updates.length;
+        result.dismissed = dismissals.length;
+        result.candidatesConsumed = consumeCandidateIds.length;
+
+        for (const promotion of promotions) {
+            log(`[dreamer] user-memories: promoted "${promotion.content.slice(0, 60)}..."`);
+        }
+        for (const update of updates) {
+            log(`[dreamer] user-memories: updated memory #${update.memoryId}`);
+        }
+        for (const dismissal of dismissals) {
+            log(
+                `[dreamer] user-memories: dismissed memory #${dismissal.memory_id} — ${dismissal.reason ?? "no reason"}`,
+            );
+        }
+        if (consumeCandidateIds.length > 0) {
             log(`[dreamer] user-memories: consumed ${result.candidatesConsumed} candidate(s)`);
         }
 

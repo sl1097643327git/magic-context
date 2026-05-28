@@ -60,6 +60,7 @@ export {
     type M0MutationLogRow,
     type M0MutationType,
     queueM0Mutation,
+    queueM0Mutation as appendM0Mutation,
 } from "./storage-m0-mutation-log";
 export {
     type AppendAutoSearchHintOutcome,
@@ -126,6 +127,7 @@ export {
     setStrippedPlaceholderIds,
     updateSessionMeta,
 } from "./storage-meta";
+export { bumpSessionFactsVersion } from "./storage-meta-shared";
 export {
     addNote,
     deleteNote,

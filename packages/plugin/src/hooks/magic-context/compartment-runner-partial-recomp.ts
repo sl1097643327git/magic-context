@@ -8,7 +8,6 @@ import {
     getRecompPartialRange,
     getRecompStaging,
     getSessionFacts,
-    promoteRecompStaging,
     saveRecompStagingPass,
     setRecompPartialRange,
 } from "../../features/magic-context/compartment-storage";
@@ -26,6 +25,7 @@ import { log } from "../../shared/logger";
 import { updateCompactionMarkerAfterPublication } from "./compaction-marker-manager";
 import { buildCompartmentAgentPrompt } from "./compartment-prompt";
 import { runValidatedHistorianPass } from "./compartment-runner-historian";
+import { promoteRecompStagingWithM0Mutation } from "./compartment-runner-recomp";
 import { buildExistingStateXml } from "./compartment-runner-state-xml";
 import type { CandidateCompartment, CompartmentRunnerDeps } from "./compartment-runner-types";
 import {
@@ -139,6 +139,7 @@ export async function executePartialRecompInternal(
     if (!holderId) {
         return "## Magic Recomp — Failed\n\nCould not acquire the compartment-state lease for this session.";
     }
+    const leaseHolderId = holderId;
     updateSessionMeta(db, sessionId, { compartmentInProgress: true });
 
     try {
@@ -319,7 +320,7 @@ export async function executePartialRecompInternal(
             // Save a final staging pass containing prior + new + tail. Promote
             // replaces the real tables atomically with this set.
             saveRecompStagingPass(db, sessionId, passCount + 1, merged, currentFacts);
-            const promoted = promoteRecompStaging(db, sessionId, holderId);
+            const promoted = promoteRecompStagingWithM0Mutation(db, sessionId, leaseHolderId);
             if (!promoted) {
                 log("[magic-context] partial recomp promote returned null");
                 return null;
