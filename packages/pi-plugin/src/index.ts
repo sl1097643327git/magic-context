@@ -43,6 +43,7 @@ import {
 	getOverflowState,
 	recordOverflowDetected,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
+import { runDeferredV22Backfill } from "@magic-context/core/features/magic-context/v22-deferred-backfill";
 import {
 	deriveHistorianChunkTokens,
 	resolveHistorianContextLimit,
@@ -457,6 +458,13 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		);
 		return;
 	}
+
+	// v22 deferred legacy-memory identity backfill. openDatabase() has already
+	// run migrations; the runner is fire-and-forget and logs failures without
+	// blocking Pi startup.
+	runDeferredV22Backfill(db).catch((err) => {
+		warn(`[v22-backfill] background runner failed: ${err}`);
+	});
 
 	// Capture boot project for initial config load and logging only. Runtime
 	// identity/path resolution uses ctx.cwd per hook/command so session cwd

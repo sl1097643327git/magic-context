@@ -14,10 +14,11 @@ import { getInstalledAdapters } from "../adapters";
 import type { HarnessAdapter } from "../adapters/types";
 import { resolveAdaptersForCommand } from "../lib/harness-select";
 import { confirm, intro, log, outro, selectMany, spinner } from "../lib/prompts";
+import type { V22BackfillCommandArgs } from "../lib/v22-backfill-commands";
 import { runDoctor as runOpenCodeDoctor } from "./doctor-opencode";
 import { doctor as runPiDoctor } from "./doctor-pi";
 
-export interface RunDoctorOptions {
+export interface RunDoctorOptions extends V22BackfillCommandArgs {
     force?: boolean;
     issue?: boolean;
     clear?: boolean;
@@ -53,6 +54,9 @@ async function dispatchDoctor(adapter: HarnessAdapter, options: RunDoctorOptions
             return runOpenCodeDoctor({
                 force: options.force,
                 issue: options.issue,
+                checkV22Backfill: options.checkV22Backfill,
+                retryV22Backfill: options.retryV22Backfill,
+                rekeyV22DirIdentity: options.rekeyV22DirIdentity,
             });
         }
         case "pi": {
@@ -60,6 +64,11 @@ async function dispatchDoctor(adapter: HarnessAdapter, options: RunDoctorOptions
             const piArgs: string[] = [];
             if (options.force) piArgs.push("--force");
             if (options.issue) piArgs.push("--issue");
+            if (options.checkV22Backfill) piArgs.push("--check-v22-backfill");
+            if (options.retryV22Backfill) piArgs.push("--retry-v22-backfill");
+            if (options.rekeyV22DirIdentity !== undefined) {
+                piArgs.push("--rekey-v22-dir-identity", options.rekeyV22DirIdentity ?? "");
+            }
             return runPiDoctor(piArgs);
         }
     }

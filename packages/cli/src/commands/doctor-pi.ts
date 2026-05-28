@@ -47,6 +47,7 @@ import {
     isPiMagicContextPackageEntry,
 } from "../lib/pi-package-entry";
 import { type PromptIO, promptIO } from "../lib/prompts";
+import { runV22BackfillCommands, type V22BackfillCommandArgs } from "../lib/v22-backfill-commands";
 import { writePiSettingsPackage } from "./setup-pi";
 
 const PACKAGE_NAME = "@cortexkit/pi-magic-context";
@@ -92,7 +93,7 @@ interface DoctorDeps {
     spawnSync: typeof spawnSync;
 }
 
-export interface RunDoctorOptions {
+export interface RunDoctorOptions extends V22BackfillCommandArgs {
     force?: boolean;
     issue?: boolean;
     help?: boolean;
@@ -133,6 +134,15 @@ function printDoctorHelp(): void {
     console.log("    magic-context-pi doctor          Run health checks");
     console.log("    magic-context-pi doctor --force  Repair safe issues, then re-check");
     console.log("    magic-context-pi doctor --issue  Create a sanitized bug report");
+    console.log(
+        "    magic-context-pi doctor --check-v22-backfill  Show v22 memory backfill status",
+    );
+    console.log(
+        "    magic-context-pi doctor --retry-v22-backfill  Retry failed v22 memory backfill rows",
+    );
+    console.log(
+        "    magic-context-pi doctor --rekey-v22-dir-identity <path>  Re-key legacy dir identity rows",
+    );
     console.log("    magic-context-pi doctor --help   Show this help");
     console.log("");
 }
@@ -844,6 +854,19 @@ export async function runDoctor(options: RunDoctorOptions = {}): Promise<number>
         return runIssueFlow({ cwd, prompts, deps });
     }
 
+    const v22Result = await runV22BackfillCommands(
+        {
+            name: "Pi",
+            openDatabase: deps.openDatabase,
+            closeDatabase: deps.closeDatabase,
+            log: prompts.log,
+        },
+        options,
+    );
+    if (v22Result.handled) {
+        return v22Result.exitCode;
+    }
+
     prompts.intro("Magic Context for Pi Doctor");
     const first = await runHealthChecks({ cwd, prompts, deps });
     console.log("");
@@ -870,11 +893,21 @@ export async function runDoctor(options: RunDoctorOptions = {}): Promise<number>
     return first.fail > 0 ? 1 : 0;
 }
 
+function valueAfter(args: string[], flag: string): string | null {
+    const index = args.indexOf(flag);
+    if (index === -1) return null;
+    return args[index + 1] ?? "";
+}
+
 export function parseDoctorArgs(args: string[]): RunDoctorOptions {
+    const rekeyV22DirIdentity = valueAfter(args, "--rekey-v22-dir-identity");
     return {
         force: args.includes("--force"),
         issue: args.includes("--issue"),
         help: args.includes("--help") || args.includes("-h"),
+        checkV22Backfill: args.includes("--check-v22-backfill"),
+        retryV22Backfill: args.includes("--retry-v22-backfill"),
+        ...(rekeyV22DirIdentity !== null ? { rekeyV22DirIdentity } : {}),
     };
 }
 

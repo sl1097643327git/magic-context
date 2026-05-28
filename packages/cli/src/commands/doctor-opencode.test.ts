@@ -1,5 +1,15 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+    initializeDatabase,
+    runMigrations,
+} from "@magic-context/core/features/magic-context/storage";
+import { computeLegacyRustDirIdentity } from "@magic-context/core/features/magic-context/v22-deferred-backfill";
+import { Database } from "@magic-context/core/shared/sqlite";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
+import { runV22BackfillCommands } from "../lib/v22-backfill-commands";
 import { migrateLegacyAgentEnabledConfigForDoctor } from "./doctor-opencode";
 
 function migrate(input: Record<string, unknown>) {
@@ -56,5 +66,150 @@ describe("doctor OpenCode legacy agent enabled migration", () => {
 
         expect(serialized).toContain('"disable": true');
         expect(serialized).not.toContain('"enabled"');
+    });
+});
+
+const tempDirs: string[] = [];
+const dbs: Database[] = [];
+
+function makeTempDir(prefix = "mc-v22-doctor-"): string {
+    const dir = mkdtempSync(join(tmpdir(), prefix));
+    tempDirs.push(dir);
+    return dir;
+}
+
+function makeDb(): Database {
+    const db = new Database(":memory:");
+    initializeDatabase(db);
+    runMigrations(db);
+    dbs.push(db);
+    return db;
+}
+
+function insertMemory(database: Database, projectPath: string, normalizedHash: string): number {
+    const result = database
+        .prepare(
+            `INSERT INTO memories
+                (project_path, category, content, normalized_hash, first_seen_at, created_at, updated_at, last_seen_at)
+             VALUES (?, 'CONSTRAINTS', ?, ?, 1, 1, 1, 1)`,
+        )
+        .run(projectPath, `content-${normalizedHash}`, normalizedHash) as {
+        lastInsertRowid: number;
+    };
+    return Number(result.lastInsertRowid);
+}
+
+function metaValue(database: Database, key: string): string | null {
+    const row = database
+        .prepare("SELECT value FROM schema_migrations_meta WHERE key = ?")
+        .get(key) as { value: string } | undefined;
+    return row?.value ?? null;
+}
+
+function makeHarness(database: Database, messages: string[]) {
+    return {
+        name: "test",
+        openDatabase: () => database,
+        closeDatabase: () => {},
+        log: {
+            info: (message: string) => messages.push(`info:${message}`),
+            success: (message: string) => messages.push(`success:${message}`),
+            warn: (message: string) => messages.push(`warn:${message}`),
+            error: (message: string) => messages.push(`error:${message}`),
+        },
+    };
+}
+
+afterEach(() => {
+    for (const db of dbs.splice(0)) {
+        db.close();
+    }
+    for (const dir of tempDirs.splice(0)) {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+describe("doctor v22 backfill commands", () => {
+    it("--check-v22-backfill reports status", async () => {
+        const database = makeDb();
+        const messages: string[] = [];
+
+        const result = await runV22BackfillCommands(makeHarness(database, messages), {
+            checkV22Backfill: true,
+        });
+
+        expect(result).toEqual({ handled: true, exitCode: 0 });
+        expect(messages.join("\n")).toContain("v22 backfill status: pending");
+    });
+
+    it("--retry-v22-backfill with no failures is a no-op and marks completed", async () => {
+        const database = makeDb();
+        const messages: string[] = [];
+
+        const result = await runV22BackfillCommands(makeHarness(database, messages), {
+            retryV22Backfill: true,
+        });
+
+        expect(result.exitCode).toBe(0);
+        expect(messages.join("\n")).toContain("No v22 backfill failures to retry.");
+        expect(metaValue(database, "v22_legacy_memory_backfill")).toBe("completed");
+    });
+
+    it("--retry-v22-backfill clears successful retries and sets status completed", async () => {
+        const database = makeDb();
+        const dir = makeTempDir();
+        const rowId = insertMemory(database, dir, "retry");
+        database
+            .prepare(
+                `INSERT INTO v22_backfill_failures
+                    (table_name, row_id, raw_project_path, error_class, error_message, failed_at)
+                 VALUES ('memories', ?, ?, 'permission_denied', 'permission denied', 1)`,
+            )
+            .run(rowId, dir);
+        database
+            .prepare(
+                "UPDATE schema_migrations_meta SET value = 'completed_with_failures' WHERE key = 'v22_legacy_memory_backfill'",
+            )
+            .run();
+        const messages: string[] = [];
+
+        const result = await runV22BackfillCommands(makeHarness(database, messages), {
+            retryV22Backfill: true,
+        });
+
+        expect(result.exitCode).toBe(0);
+        const failures = database
+            .prepare("SELECT COUNT(*) AS count FROM v22_backfill_failures")
+            .get() as { count: number };
+        expect(failures.count).toBe(0);
+        expect(metaValue(database, "v22_legacy_memory_backfill")).toBe("completed");
+        const memory = database
+            .prepare("SELECT project_path FROM memories WHERE id = ?")
+            .get(rowId) as {
+            project_path: string;
+        };
+        expect(memory.project_path).toMatch(/^dir:[0-9a-f]{12}$/);
+    });
+
+    it("--rekey-v22-dir-identity rekeys matching legacy dir rows", async () => {
+        const database = makeDb();
+        const dir = makeTempDir();
+        const oldIdentity = computeLegacyRustDirIdentity(dir);
+        const rowId = insertMemory(database, oldIdentity, "rekey");
+        const messages: string[] = [];
+
+        const result = await runV22BackfillCommands(makeHarness(database, messages), {
+            rekeyV22DirIdentity: dir,
+        });
+
+        expect(result.exitCode).toBe(0);
+        const memory = database
+            .prepare("SELECT project_path FROM memories WHERE id = ?")
+            .get(rowId) as {
+            project_path: string;
+        };
+        expect(memory.project_path).toMatch(/^dir:[0-9a-f]{12}$/);
+        expect(memory.project_path).not.toBe(oldIdentity);
+        expect(messages.join("\n")).toContain("Re-keyed 1 row(s)");
     });
 });

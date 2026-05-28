@@ -35,6 +35,12 @@ function getVersion(): string {
     return "0.0.0";
 }
 
+function valueAfter(args: string[], flag: string): string | null {
+    const index = args.indexOf(flag);
+    if (index === -1) return null;
+    return args[index + 1] ?? "";
+}
+
 function printUsage(): void {
     console.log("");
     console.log("  Magic Context CLI");
@@ -46,6 +52,9 @@ function printUsage(): void {
     console.log("    doctor --force   Force-clear plugin cache");
     console.log("    doctor --issue   Collect diagnostics and open a GitHub issue");
     console.log("    doctor --clear   Interactive cache cleanup picker");
+    console.log("    doctor --check-v22-backfill       Show v22 memory backfill status");
+    console.log("    doctor --retry-v22-backfill       Retry failed v22 memory backfill rows");
+    console.log("    doctor --rekey-v22-dir-identity <path>  Re-key legacy dir identity rows");
     console.log("    doctor migrate   Migrate OpenCode session to Pi JSONL");
     console.log("");
     console.log("  Harness selection:");
@@ -87,10 +96,14 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
             return runMigrateCli(rest.slice(1));
         }
         const { runDoctor } = await import("./commands/doctor");
+        const rekeyV22DirIdentity = valueAfter(rest, "--rekey-v22-dir-identity");
         return runDoctor({
             force: rest.includes("--force"),
             issue: rest.includes("--issue"),
             clear: rest.includes("--clear"),
+            checkV22Backfill: rest.includes("--check-v22-backfill"),
+            retryV22Backfill: rest.includes("--retry-v22-backfill"),
+            ...(rekeyV22DirIdentity !== null ? { rekeyV22DirIdentity } : {}),
             argv: rest,
         });
     }

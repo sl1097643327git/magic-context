@@ -14,7 +14,9 @@ import { getMagicContextBuiltinCommands } from "./features/builtin-commands/comm
 import { DREAMER_SYSTEM_PROMPT } from "./features/magic-context/dreamer/task-prompts";
 import { resolveProjectIdentity } from "./features/magic-context/memory/project-identity";
 import { SIDEKICK_SYSTEM_PROMPT } from "./features/magic-context/sidekick/agent";
+import { isDatabasePersisted, openDatabase } from "./features/magic-context/storage-db";
 import { recordToolDefinition } from "./features/magic-context/tool-definition-tokens";
+import { runDeferredV22Backfill } from "./features/magic-context/v22-deferred-backfill";
 import { createAutoUpdateCheckerHook } from "./hooks/auto-update-checker";
 import {
     COMPARTMENT_AGENT_SYSTEM_PROMPT,
@@ -117,6 +119,23 @@ const plugin: Plugin = async (ctx) => {
         ctx,
         pluginConfig,
     });
+
+    // v22 deferred legacy-memory identity backfill. createSessionHooks() opens
+    // the shared DB and runs migrations before returning a non-null hook, so
+    // this fire-and-forget runner starts only after the schema is ready. Its
+    // batch transactions serialize naturally with concurrent ctx_memory writes.
+    if (pluginConfig.enabled && hooks.magicContext) {
+        try {
+            const db = openDatabase();
+            if (isDatabasePersisted(db)) {
+                runDeferredV22Backfill(db).catch((err) => {
+                    log(`[v22-backfill] background runner failed: ${err}`);
+                });
+            }
+        } catch (err) {
+            log(`[v22-backfill] failed to start background runner: ${err}`);
+        }
+    }
 
     // Resolve storage dir up front. Used by the RPC server below AND by
     // the auto-update checker (for cross-process dedup of npm hits when

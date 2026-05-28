@@ -7,7 +7,7 @@ import { Database } from "@magic-context/core/shared/sqlite";
 import { parse as parseJsonc } from "comment-json";
 import type { PiDiagnosticReport } from "../lib/diagnostics-pi";
 import type { PromptIO, PromptSpinner, SelectOption } from "../lib/prompts";
-import { type RunDoctorOptions, runDoctor } from "./doctor-pi";
+import { parseDoctorArgs, type RunDoctorOptions, runDoctor } from "./doctor-pi";
 
 const tempRoots: string[] = [];
 const originalHome = process.env.HOME;
@@ -154,6 +154,21 @@ afterEach(() => {
 });
 
 describe("Pi doctor", () => {
+    it("parses v22 backfill flags", () => {
+        expect(
+            parseDoctorArgs([
+                "--check-v22-backfill",
+                "--retry-v22-backfill",
+                "--rekey-v22-dir-identity",
+                "/tmp/project",
+            ]),
+        ).toMatchObject({
+            checkV22Backfill: true,
+            retryV22Backfill: true,
+            rekeyV22DirIdentity: "/tmp/project",
+        });
+    });
+
     it("passes Phase 1 with a healthy mocked environment", async () => {
         const root = makeTempRoot();
         const cwd = makeTempRoot("mc-pi-doctor-cwd-");

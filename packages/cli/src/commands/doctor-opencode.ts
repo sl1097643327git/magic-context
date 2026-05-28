@@ -10,6 +10,7 @@ import {
     type EmbeddingProbeOutcome,
     probeEmbeddingEndpoint,
 } from "@magic-context/core/features/magic-context/memory/embedding-probe";
+import { closeDatabase, openDatabase } from "@magic-context/core/features/magic-context/storage";
 import { detectConflicts } from "@magic-context/core/shared/conflict-detector";
 import { fixConflicts } from "@magic-context/core/shared/conflict-fixer";
 import {
@@ -25,6 +26,7 @@ import { bundleIssueReport } from "../lib/logs-opencode";
 import { isOpenCodeInstalled } from "../lib/opencode-helpers";
 import { detectConfigPaths, getMagicContextLogPath } from "../lib/paths";
 import { confirm, intro, log, outro, selectOne, spinner, text } from "../lib/prompts";
+import { runV22BackfillCommands, type V22BackfillCommandArgs } from "../lib/v22-backfill-commands";
 
 const PLUGIN_NAME = "@cortexkit/opencode-magic-context";
 const PLUGIN_ENTRY_WITH_VERSION = `${PLUGIN_NAME}@latest`;
@@ -516,10 +518,23 @@ async function checkEmbeddingConfig(magicContextConfigPath: string): Promise<{ i
 // ── Main doctor entry ───────────────────────────────────────────────
 
 export async function runDoctor(
-    options: { force?: boolean; issue?: boolean } = {},
+    options: { force?: boolean; issue?: boolean } & V22BackfillCommandArgs = {},
 ): Promise<number> {
     if (options.issue) {
         return runIssueFlow();
+    }
+
+    const v22Result = await runV22BackfillCommands(
+        {
+            name: "OpenCode",
+            openDatabase,
+            closeDatabase,
+            log,
+        },
+        options,
+    );
+    if (v22Result.handled) {
+        return v22Result.exitCode;
     }
 
     intro("Magic Context Doctor");
