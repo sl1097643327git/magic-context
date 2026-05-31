@@ -224,6 +224,48 @@ describe("E5 upgrade reminder", () => {
         expect(getOrCreateSessionMeta(db, "ses-clean").upgradeRemindedAt).toBeNull();
     });
 
+    it("transient delivery (Pi toast) does NOT stamp and re-fires on a new process", async () => {
+        // Pi delivers via ctx.ui.notify — a transient toast with no scrollback.
+        // Stamping on a missed toast permanently suppressed the reminder (dogfood
+        // 2026-05-31, Pi session 019de471). With deliveryPersists:false the stamp
+        // is never written and the reminder re-fires each process until upgraded.
+        const db = openDatabase();
+        insertLegacyCompartment(db, "ses-pi");
+        const sent: string[] = [];
+        const deps = (): UpgradeReminderDeps => ({
+            ...makeDeps(db, sent),
+            deliveryPersists: false,
+        });
+
+        await maybeSendUpgradeReminder(deps(), "ses-pi");
+        expect(sent).toHaveLength(1);
+        // No durable stamp on a transient toast.
+        expect(getOrCreateSessionMeta(db, "ses-pi").upgradeRemindedAt).toBeNull();
+
+        // New process (guard cleared) → re-fires (would have been suppressed by a
+        // stamp on the persistent path).
+        __resetUpgradeReminderProcessGuard();
+        await maybeSendUpgradeReminder(deps(), "ses-pi");
+        expect(sent).toHaveLength(2);
+    });
+
+    it("transient delivery ignores a STALE durable stamp left by a pre-fix build", async () => {
+        // Pi session 019de471 was stamped by the buggy stamp-on-toast path. After
+        // the fix, that stale stamp must NOT gate transient delivery.
+        const db = openDatabase();
+        insertLegacyCompartment(db, "ses-pi-stale");
+        updateSessionMeta(db, "ses-pi-stale", { upgradeRemindedAt: Date.now() });
+        const sent: string[] = [];
+
+        await maybeSendUpgradeReminder(
+            { ...makeDeps(db, sent), deliveryPersists: false },
+            "ses-pi-stale",
+        );
+
+        // Fires despite the stale stamp (per-process guard governs, not the stamp).
+        expect(sent).toHaveLength(1);
+    });
+
     it("skips subagent sessions", async () => {
         const db = openDatabase();
         insertLegacyCompartment(db, "ses-sub");

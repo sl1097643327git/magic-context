@@ -128,6 +128,19 @@ export interface UpgradeReminderDeps {
      *  omitted on harnesses without a dialog system. When `resume` is set, the
      *  dialog shows resume-flavored copy. */
     pushTuiDialogAction?: (sessionId: string, resume?: ResumeInfo) => void;
+    /** Whether the non-TUI `sendIgnoredMessage` delivery PERSISTS in the user's
+     *  scrollback. Default true (OpenCode Desktop ignored messages persist).
+     *
+     *  Pi delivers via `ctx.ui.notify`, a TRANSIENT toast that vanishes and
+     *  leaves no scrollback. Stamping `upgrade_reminded_at` on a transient toast
+     *  permanently suppresses the reminder after a single missed toast (dogfood
+     *  2026-05-31, Pi session 019de471: one 10:36 toast stamped the session and
+     *  it never re-prompted). When false, the durable stamp is neither written
+     *  NOR read as a gate — the per-process guard alone dedups, so the reminder
+     *  re-fires on each process start until the session is actually upgraded
+     *  (legacy compartments cleared) — mirroring the TUI "don't stamp on mere
+     *  display" principle. */
+    deliveryPersists?: boolean;
 }
 
 /**
@@ -191,7 +204,14 @@ export async function maybeSendUpgradeReminder(
     // serve` lifetime (re-prompts on the next reopen, which is correct).
     const resume = getResumeInfo(deps.db, sessionId);
 
-    if (!resume) {
+    // The durable `upgrade_reminded_at` stamp is meaningful only when delivery
+    // persists in scrollback. For transient delivery (Pi toast) the stamp is
+    // never written, so it must not be read as a gate either — otherwise a stale
+    // stamp from a pre-fix build would suppress forever. Pi relies on the
+    // per-process guard, re-prompting each start until the session is upgraded.
+    const durableStampActive = deps.deliveryPersists !== false;
+
+    if (!resume && durableStampActive) {
         // Fresh-upgrade path: gated by the one-shot durable stamp.
         if (meta.upgradeRemindedAt !== null) {
             remindedThisProcess.add(sessionId);
@@ -223,8 +243,10 @@ export async function maybeSendUpgradeReminder(
             // Non-TUI (Desktop/headless): no interactive buttons, so the persisted
             // ignored message IS the one-shot delivery. Stamp on send so we don't
             // re-post a duplicate every restart. (Resume re-fires via staging
-            // regardless of the stamp.)
-            if (meta.upgradeRemindedAt === null) {
+            // regardless of the stamp.) Skip the stamp for TRANSIENT delivery
+            // (Pi toast) — see deliveryPersists: stamping a toast that leaves no
+            // scrollback would permanently suppress after one missed toast.
+            if (durableStampActive && meta.upgradeRemindedAt === null) {
                 try {
                     updateSessionMeta(deps.db, sessionId, { upgradeRemindedAt: Date.now() });
                 } catch {

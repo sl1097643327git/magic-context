@@ -843,6 +843,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 								ctx.ui.notify(text, "info");
 							},
 							getNotificationParams: () => ({}),
+							// Pi's ctx.ui.notify is a TRANSIENT toast (no scrollback),
+							// so the durable stamp must not suppress after one missed
+							// toast — re-prompt each Pi start until the session upgrades.
+							deliveryPersists: false,
 						},
 						sessionId,
 					).catch(() => {
