@@ -120,19 +120,29 @@ function computeTiers(
     compartments: DecayRenderCompartment[],
     historyBudgetTokens: number,
 ): number[] {
-    const total = compartments.length;
-    // Legacy rows have no importance signal; treat them at their legacy tier and
-    // exclude from the pressure model (they use truncation, not the curve).
-    const curveInputs = compartments.map((c, index) => ({
-        index: total - index, // 1-based from newest
-        importance: Math.max(1, Math.min(100, c.importance ?? 50)),
-    }));
+    const v2Compartments = compartments
+        .map((c, originalIndex) => ({ c, originalIndex }))
+        .filter(({ c }) => c.legacy !== 1);
+    const v2Total = v2Compartments.length;
+    const v2IndexByOriginalIndex = new Map<number, number>();
+
+    // Legacy rows are governed by deterministic truncation, not the decay
+    // curve. Including them would let non-rendered curve cost from unrelated
+    // rows demote v2 paraphrases, breaking budget honesty for mixed sessions.
+    const curveInputs = v2Compartments.map(({ c, originalIndex }, v2Ordinal) => {
+        const curveIndex = v2Total - v2Ordinal; // 1-based from newest v2 row
+        v2IndexByOriginalIndex.set(originalIndex, curveIndex);
+        return {
+            index: curveIndex,
+            importance: Math.max(1, Math.min(100, c.importance ?? 50)),
+        };
+    });
     const pressure =
         historyBudgetTokens > 0 ? computeBudgetPressure(curveInputs, historyBudgetTokens) : 1;
 
     return compartments.map((c, index) => {
         if (c.legacy === 1) return legacyTier(c);
-        return renderedTier(total - index, c.importance ?? 50, pressure, 0);
+        return renderedTier(v2IndexByOriginalIndex.get(index) ?? 1, c.importance ?? 50, pressure, 0);
     });
 }
 

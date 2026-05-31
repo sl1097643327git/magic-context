@@ -48,7 +48,7 @@
 import type { ContextDatabase } from "../features/magic-context/storage";
 import { saveSourceContent } from "../features/magic-context/storage-source";
 import { updateTagByteSize, updateTagInputByteSize } from "../features/magic-context/storage-tags";
-import type { Tagger } from "../features/magic-context/tagger";
+import { makeToolCompositeKey, type Tagger } from "../features/magic-context/tagger";
 import {
     byteSize,
     prependTag,
@@ -138,13 +138,12 @@ export function tagTranscript(
     const skipPrefixInjection = options.skipPrefixInjection === true;
     const targets = new Map<number, TagTarget>();
 
-    // Per-callId tool aggregation tracked across the single walk. Tags
-    // get allocated in transcript order (first occurrence reserves the
-    // tag number); subsequent occurrences reuse the same tag and merge
-    // their occurrence into the aggregate's TagTarget. This preserves
-    // chronological tag numbering while still aggregating drop behavior
-    // across both invocation and result.
+    // Tool aggregation is keyed by the same owner+callId identity used by
+    // assignToolTag. OpenCode/Pi callId counters can repeat across turns, so
+    // a bare callId key can merge distinct invocations and replay drops/status
+    // changes against the wrong tool pair.
     const toolAggregates = new Map<string, ToolAggregate & { tagId: number }>();
+    const openToolAggregateKeysByCallId = new Map<string, string[]>();
 
     // v3.3.1 Layer C (plan v3.3.1 Finding #16): the previous outer
     // db.transaction() wrapper rolled back EVERY tag insert + savedSource
@@ -215,12 +214,20 @@ export function tagTranscript(
                     continue;
                 }
 
-                const existing = toolAggregates.get(callId);
+                const pendingKeys = openToolAggregateKeysByCallId.get(callId) ?? [];
+                const existingKey =
+                    part.kind === "tool_result"
+                        ? pendingKeys.find((key) => {
+                              const aggregate = toolAggregates.get(key);
+                              return !aggregate?.occurrences.some((occ) => occ.kind === "tool_result");
+                          })
+                        : undefined;
+                const aggregateKey = existingKey ?? makeToolCompositeKey(messageId, callId);
+                const existing = toolAggregates.get(aggregateKey);
                 if (existing) {
-                    // Second (or later) occurrence for this call_id.
-                    // Merge into the existing aggregate, update byte_size
-                    // in DB if larger, and rebuild the TagTarget so the
-                    // closures over `occurrences` see all parts.
+                    // Later occurrence for this owner+callId pair. Merge into the
+                    // aggregate, update byte accounting if larger, and rebuild the
+                    // TagTarget so drops mutate both invocation and result.
                     existing.occurrences.push({
                         message,
                         part,
@@ -254,12 +261,9 @@ export function tagTranscript(
                         buildAggregateTarget(existing.tagId, existing.occurrences),
                     );
                 } else {
-                    // First occurrence — reserve the tag number.
-                    // v3.3.1 Layer C: Pi main aggregation path. Owner
-                    // is the Pi message hosting the tool aggregate.
-                    // Owner stays stable across passes because Pi
-                    // re-emits the full transcript each time and
-                    // message ids are durable.
+                    // First occurrence for this owner+callId identity — reserve
+                    // the tag number. Owner stays stable across passes because
+                    // transcript message ids are durable.
                     const tagId = tagger.assignToolTag(
                         sessionId,
                         callId,
@@ -284,7 +288,10 @@ export function tagTranscript(
                         toolName: meta.toolName ?? null,
                         inputByteSize: part.kind === "tool_use" ? meta.inputByteSize : 0,
                     };
-                    toolAggregates.set(callId, aggregate);
+                    toolAggregates.set(aggregateKey, aggregate);
+                    if (part.kind === "tool_use") {
+                        openToolAggregateKeysByCallId.set(callId, [...pendingKeys, aggregateKey]);
+                    }
                     // Inject §N§ prefix into this occurrence's visible text
                     // when it's a tool_result. (OpenCode parity: prefix
                     // only goes on the result, not the invocation.)

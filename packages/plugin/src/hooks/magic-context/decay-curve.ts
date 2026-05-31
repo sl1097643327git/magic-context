@@ -124,7 +124,11 @@ export function computeBudgetPressure(
     if (historyBudget <= 0) return 1;
     let naturalCost = 0;
     for (const c of compartments) {
-        naturalCost += TIER_COST[tier(c.index, c.importance, 1.0)];
+        const naturalTier = tier(c.index, c.importance, 1.0);
+        // Archived compartments render as an empty string, so charging the
+        // historical P5 placeholder cost here creates phantom pressure from
+        // bytes that will never appear in the prompt.
+        naturalCost += naturalTier >= 5 ? 0 : TIER_COST[naturalTier];
     }
     return Math.max(P_FLOOR, naturalCost / historyBudget);
 }
@@ -142,7 +146,8 @@ export function computeBudgetPressureTwoPass(
     let p = computeBudgetPressure(compartments, historyBudget);
     let actualCost = 0;
     for (const c of compartments) {
-        actualCost += TIER_COST[tier(c.index, c.importance, p)];
+        const actualTier = tier(c.index, c.importance, p);
+        actualCost += actualTier >= 5 ? 0 : TIER_COST[actualTier];
     }
     if (actualCost > historyBudget * 1.1) {
         p = p * (actualCost / historyBudget);

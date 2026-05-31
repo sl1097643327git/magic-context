@@ -125,6 +125,23 @@ describe("decay-curve — budget pressure", () => {
         expect(cost).toBeLessThan(budget * 1.3);
     });
 
+
+    it("does not charge archived-tail compartments as rendered pressure", () => {
+        const visible = Array.from({ length: 63 }, (_, k) => ({
+            index: k + 1,
+            importance: 50,
+        }));
+        const archivedTail = Array.from({ length: 400 }, (_, k) => ({
+            index: k + 64,
+            importance: 50,
+        }));
+        const budget = 20_000;
+
+        expect(computeBudgetPressure([...visible, ...archivedTail], budget)).toBe(
+            computeBudgetPressure(visible, budget),
+        );
+    });
+
     it("two-pass tightens an overshooting tight budget", () => {
         const comps = Array.from({ length: 600 }, (_, k) => ({
             index: k + 1,
