@@ -1,10 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
-import {
-	type ContextDatabase,
-	clearPendingPiCompactionMarkerStateIf,
-	setPendingPiCompactionMarkerState,
-} from "@magic-context/core/features/magic-context/storage";
+import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { COMPARTMENT_AGENT_SYSTEM_PROMPT } from "@magic-context/core/hooks/magic-context/compartment-prompt";
 import { executeContextRecompWithResult } from "@magic-context/core/hooks/magic-context/compartment-runner";
 import {
@@ -15,17 +11,13 @@ import type { RawMessageProvider } from "@magic-context/core/hooks/magic-context
 import { setRawMessageProvider } from "@magic-context/core/hooks/magic-context/read-session-chunk";
 import { describeError } from "@magic-context/core/shared/error-message";
 import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner";
-import { applyDeferredPiCompactionMarker } from "../compaction-marker-manager-pi";
 import {
-	signalPiDeferredHistoryRefresh,
 	signalPiHistoryRefresh,
 	signalPiPendingMaterialization,
 } from "../context-handler";
-import {
-	buildPiCompactionSummary,
-	findFirstKeptEntryId,
-} from "../pi-historian-runner";
+import { ensureProjectRegisteredFromPiDirectory } from "../embedding-bootstrap";
 import { createPiHistorianClient } from "../pi-recomp-client-shared";
+import { queueAndApplyPiRecompMarker } from "../pi-recomp-marker";
 import { readPiSessionMessages } from "../read-session-pi";
 import { setMagicContextRecompActive, updateStatusLine } from "../status-line";
 import { resolveSessionId, sendCtxStatusMessage } from "./pi-command-utils";
@@ -154,6 +146,16 @@ export function registerCtxRecompCommand(
 						historianTimeoutMs: deps.historianTimeoutMs,
 						memoryEnabled: deps.memoryEnabled,
 						autoPromote: deps.autoPromote,
+						// Embedding substrate: register before the recomp publish path
+						// calls embedAndStoreCompartments, else rebuilt rows keep NULL
+						// p1_embedding (dropped from ctx_search / dreamer linkage).
+						ensureProjectRegistered: ensureProjectRegisteredFromPiDirectory,
+						// Recomp-runner model chain parity with OpenCode: configured
+						// fallbacks + the session's own model as last-ditch retry.
+						fallbackModels: deps.historianFallbacks,
+						fallbackModelId: ctx.model
+							? `${ctx.model.provider}/${ctx.model.id}`
+							: undefined,
 					},
 					parsed.kind === "partial" ? { range: parsed.range } : {},
 				);
@@ -194,99 +196,6 @@ export function registerCtxRecompCommand(
 			}
 		},
 	});
-}
-
-function queueAndApplyPiRecompMarker(args: {
-	db: ContextDatabase;
-	sessionId: string;
-	ctx: unknown;
-}): void {
-	const appendCompaction = resolvePiAppendCompaction(args.ctx);
-	const readBranchEntries = resolvePiReadBranchEntries(args.ctx);
-	if (!appendCompaction || !readBranchEntries) return;
-
-	const compartments = getCompartments(args.db, args.sessionId);
-	const last = compartments[compartments.length - 1];
-	if (!last) return;
-
-	let firstKeptEntryId: string | null = null;
-	try {
-		firstKeptEntryId = findFirstKeptEntryId(
-			readBranchEntries(),
-			last.endMessage,
-		);
-	} catch {
-		firstKeptEntryId = null;
-	}
-	if (!firstKeptEntryId || last.endMessageId.length === 0) return;
-
-	const pending = {
-		firstKeptEntryId,
-		endMessageId: last.endMessageId,
-		ordinal: last.endMessage,
-		tokensBefore: 0,
-		summary: buildPiCompactionSummary(compartments),
-		publishedAt: Date.now(),
-	};
-
-	setPendingPiCompactionMarkerState(args.db, args.sessionId, pending);
-	const outcome = applyDeferredPiCompactionMarker(
-		{ db: args.db, appendCompaction, readBranchEntries },
-		args.sessionId,
-		pending,
-	);
-	if (outcome.kind === "retryable-failure") {
-		signalPiDeferredHistoryRefresh(args.sessionId);
-		return;
-	}
-	if (
-		!clearPendingPiCompactionMarkerStateIf(args.db, args.sessionId, pending)
-	) {
-		signalPiDeferredHistoryRefresh(args.sessionId);
-	}
-}
-
-function resolvePiAppendCompaction(
-	ctx: unknown,
-):
-	| ((
-			summary: string,
-			firstKeptEntryId: string,
-			tokensBefore: number,
-			details?: unknown,
-			fromHook?: boolean,
-	  ) => string | undefined)
-	| undefined {
-	const sm = (ctx as { sessionManager?: unknown })?.sessionManager as
-		| {
-				appendCompaction?: (
-					summary: string,
-					firstKeptEntryId: string,
-					tokensBefore: number,
-					details?: unknown,
-					fromHook?: boolean,
-				) => string | undefined;
-		  }
-		| undefined;
-	if (typeof sm?.appendCompaction !== "function") return undefined;
-	return sm.appendCompaction.bind(sm);
-}
-
-function resolvePiReadBranchEntries(
-	ctx: unknown,
-): (() => unknown[]) | undefined {
-	const sm = (ctx as { sessionManager?: unknown })?.sessionManager as
-		| { getBranch?: () => unknown[] }
-		| undefined;
-	if (typeof sm?.getBranch !== "function") return undefined;
-	return () => {
-		try {
-			const entries = sm.getBranch?.call(sm);
-			return Array.isArray(entries) ? entries : [];
-		} catch {
-			return [];
-		}
-	};
 }
 
 function parseRecompArgs(

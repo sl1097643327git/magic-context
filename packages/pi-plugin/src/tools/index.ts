@@ -48,6 +48,14 @@ export interface RegisterToolsOptions {
 	 *  the dreamer is configured to evaluate them. When false, smart-note
 	 *  writes are rejected to avoid stuck-pending state. */
 	dreamerEnabled?: boolean;
+	/** When true, omit session-scoped tools (ctx_note, ctx_expand) from the
+	 *  registered surface. Set by `--no-session` children (sidekick, dreamer):
+	 *  those tools resolve `ctx.sessionManager.getSessionId()` to the EPHEMERAL
+	 *  child session, so ctx_note would write notes orphaned under the hidden
+	 *  child id and ctx_expand would expand the child's empty transcript. The
+	 *  project-scoped tools (ctx_search project memories/commits, ctx_memory)
+	 *  stay registered because they carry real value for sidekick/dreamer. */
+	sessionScopedToolsDisabled?: boolean;
 }
 
 export function registerMagicContextTools(
@@ -74,14 +82,21 @@ export function registerMagicContextTools(
 		}),
 	);
 
-	pi.registerTool(
-		createCtxNoteTool({
-			db: opts.db,
-			dreamerEnabled: opts.dreamerEnabled ?? false,
-		}),
-	);
+	// ctx_note and ctx_expand are session-scoped: they resolve the CURRENT
+	// session id at call time. For `--no-session` children that id is the hidden
+	// ephemeral child session, so a note would be orphaned and an expand would
+	// target the child's empty transcript. Omit them for those children; keep
+	// the project-scoped tools (ctx_search / ctx_memory) which carry real value.
+	if (!opts.sessionScopedToolsDisabled) {
+		pi.registerTool(
+			createCtxNoteTool({
+				db: opts.db,
+				dreamerEnabled: opts.dreamerEnabled ?? false,
+			}),
+		);
 
-	pi.registerTool(createCtxExpandTool({ db: opts.db }));
+		pi.registerTool(createCtxExpandTool({ db: opts.db }));
+	}
 
 	// `todowrite` parity with OpenCode. Pi-coding-agent has no built-in
 	// task list tool, so without this the synthetic-todowrite injector

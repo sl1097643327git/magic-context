@@ -62,6 +62,7 @@ import { buildKeyFilesBlock } from "@magic-context/core/hooks/magic-context/key-
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import type { MessageLike } from "@magic-context/core/hooks/magic-context/tag-messages";
 import { sessionLog as logSession } from "@magic-context/core/shared/logger";
+import { SYNTH_USER_ID_PREFIX } from "./read-session-pi";
 
 /**
  * Pi message shapes — kept structurally compatible with
@@ -163,6 +164,22 @@ function buildMessageLikeProjection(
  * Mirrors the `messages.splice(0, cutoffIndex+1)` behavior the shared
  * `prepareCompartmentInjection` does on its (OpenCode) MessageLike[].
  *
+ * # Synthetic-user (folded toolResult) cutoffs
+ *
+ * A compartment's `endMessageId` comes from `convertEntriesToRawMessages`,
+ * which folds a run of `toolResult` entries into a synthetic-user RawMessage
+ * with id `${SYNTH_USER_ID_PREFIX}<firstFoldedToolResultEntryId>`. The LIVE Pi
+ * message array does NOT contain that synthetic id — folding is a historian-
+ * chunking artifact only; the underlying toolResult messages are present as
+ * real entries. So a raw `resolveStableId(msg) === cutoffMessageId` comparison
+ * can never match a synth-user cutoff, `cutoffIndex` stays -1, and the
+ * summarized prefix is never trimmed → duplicate content + overflow in
+ * tool-heavy sessions. When the cutoff is synthetic, strip the prefix and match
+ * against the underlying real toolResult entry id instead (the suffix is, by
+ * construction, the real entry id of the first folded toolResult, which IS a
+ * visible message). Trimming through that toolResult covers the whole folded
+ * run because the bidirectional orphan sweep below removes the rest of the run.
+ *
  * Returns the count of messages removed — used for log parity.
  */
 function trimPiMessagesToBoundary(
@@ -171,10 +188,16 @@ function trimPiMessagesToBoundary(
 	cutoffMessageId: string,
 ): number {
 	if (cutoffMessageId.length === 0) return 0;
+	// Resolve a synthetic-user (folded toolResult) cutoff to the real entry id
+	// of the underlying toolResult, which is what the live message carries.
+	const effectiveCutoffId = cutoffMessageId.startsWith(SYNTH_USER_ID_PREFIX)
+		? cutoffMessageId.slice(SYNTH_USER_ID_PREFIX.length)
+		: cutoffMessageId;
+	if (effectiveCutoffId.length === 0) return 0;
 	let cutoffIndex = -1;
 	for (let i = 0; i < piMessages.length; i++) {
 		const msg = piMessages[i];
-		if (msg && resolveStableId(msg, i, entryIds) === cutoffMessageId) {
+		if (msg && resolveStableId(msg, i, entryIds) === effectiveCutoffId) {
 			cutoffIndex = i;
 			break;
 		}
@@ -1032,6 +1055,19 @@ export function injectM0M1Pi(
 						state.projectIdentity,
 						["active", "permanent"],
 						markers.materializedAt,
+					);
+					// Align the m[1] memory watermark to the EXACT set rendered into
+					// this fallback m[0], by construction. readCurrentMarkers computed
+					// markers.maxMemoryId from its OWN separate getMemoriesByProject
+					// read; if a sibling inserted a memory between that read and this
+					// one, renderM1Pi(markers) could re-emit a memory already in m[0]
+					// as "new" (duplicate across m[0]/m[1]). Deriving the watermark
+					// from fallbackMemories — the same set renderM0Pi receives —
+					// removes the TOCTOU window (parity with materializeM0Pi's
+					// snapshot-aligned watermark).
+					markers.maxMemoryId = fallbackMemories.reduce(
+						(max, m) => (m.id > max ? m.id : max),
+						0,
 					);
 					let dpm = 1;
 					m0 = renderM0Pi(state, db, docs.renderedBlock, dpm, fallbackMemories);

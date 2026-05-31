@@ -104,6 +104,44 @@ describe("trimPiMessagesToBoundary", () => {
 		expect(removed).toBe(3);
 		expect(messages).toEqual([user("keep")]);
 	});
+
+	it("resolves a synth-user-* cutoff to the underlying real toolResult entry id", () => {
+		// A compartment ending on a folded-toolResult boundary carries
+		// endMessageId = `synth-user-<realToolResultEntryId>`. The live array has
+		// no message with that synthetic id — only the real toolResult (entry id
+		// "tr-real"). Pre-fix, the cutoff never matched and NOTHING was trimmed
+		// (history duplicated -> overflow). The fix strips the prefix and matches
+		// the real toolResult, then the orphan sweep removes its paired assistant.
+		const messages = [
+			assistant(["call-a"]),
+			result("call-a"),
+			assistant([], "next turn"),
+			user("keep"),
+		];
+
+		const removed = __test.trimPiMessagesToBoundary(
+			messages,
+			["a", "tr-real", "a2", "keep"],
+			"synth-user-tr-real",
+		);
+
+		// toolResult "tr-real" (cutoff) + its paired assistant "call-a" (orphan
+		// sweep) are removed; the later turn + keep survive.
+		expect(removed).toBe(2);
+		expect(messages.map((m) => m.role)).toEqual(["assistant", "user"]);
+		expect((messages[1] as { content: string }).content).toBe("keep");
+	});
+
+	it("returns 0 (no spurious trim) when a synth-user-* cutoff has no matching real entry", () => {
+		const messages = [assistant(["call-a"]), user("keep")];
+		const removed = __test.trimPiMessagesToBoundary(
+			messages,
+			["a", "keep"],
+			"synth-user-nonexistent",
+		);
+		expect(removed).toBe(0);
+		expect(messages.length).toBe(2);
+	});
 });
 
 function piState(sessionId: string, cwd: string) {

@@ -2,11 +2,7 @@
 
 import { describe, expect, it } from "bun:test";
 import { findFirstKeptEntryId } from "./pi-historian-runner";
-import {
-	convertEntriesToRawMessages,
-	isMidTurnPi,
-	SYNTH_USER_ID_PREFIX,
-} from "./read-session-pi";
+import { convertEntriesToRawMessages, isMidTurnPi } from "./read-session-pi";
 
 describe("isMidTurnPi", () => {
 	it("is mid-turn when the latest assistant stopReason is toolUse", () => {
@@ -337,13 +333,14 @@ describe("findFirstKeptEntryId — replay-safe boundary resolution", () => {
 		expect(findFirstKeptEntryId(entries, 1)).toBe("asst-1");
 	});
 
-	it("ADVANCES past a folded-toolResult synthetic user to the next real entry", () => {
-		// boundary after ordinal 2 (asst-1) → ordinal 3 is the synthetic user
-		// folding tr-1 (id `${PREFIX}tr-1`), which Pi compaction replay cannot
-		// match. Must advance to ordinal 4 (asst-2), NOT return the synthetic id.
-		const kept = findFirstKeptEntryId(entries, 2);
-		expect(kept).toBe("asst-2");
-		expect(kept?.startsWith(SYNTH_USER_ID_PREFIX)).toBe(false);
+	it("DEFERS (null) when the kept-start ordinal is a folded-toolResult synthetic user", () => {
+		// boundary after ordinal 2 (asst-1) → ordinal 3 (the FIRST kept-tail
+		// message) is the synthetic user folding tr-1. That folded toolResult run
+		// is un-summarized kept-tail content: advancing past it to asst-2 would
+		// DROP it (neither summarized nor kept), and cutting at the toolResult
+		// would orphan it. The only safe action is to defer the marker until a
+		// later pass when a real entry heads the kept tail.
+		expect(findFirstKeptEntryId(entries, 2)).toBeNull();
 	});
 
 	it("defers (null) when only folded tool-result tails remain after the boundary", () => {

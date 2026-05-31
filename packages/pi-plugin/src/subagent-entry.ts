@@ -101,11 +101,17 @@ export default function magicContextSubagentExtension(pi: ExtensionAPI): void {
 				// the parent passed via the --magic-context-dreamer-actions
 				// flag. Default false → write/delete/list only.
 				allowDreamerActions: dreamerActionsEnabled,
+				// `--no-session` children resolve getSessionId() to the ephemeral
+				// child session, so session-scoped ctx_note/ctx_expand would write
+				// orphaned notes / expand an empty transcript. Drop them; keep the
+				// project-scoped ctx_search / ctx_memory.
+				sessionScopedToolsDisabled: true,
 			});
 
 			log(
-				`[pi-subagent] registered tools: ctx_search, ctx_memory, ctx_note, ctx_expand` +
-					` (memory=${cfg.memory.enabled}, embedding=${cfg.embedding.provider !== "off"},` +
+				`[pi-subagent] registered tools: ctx_search, ctx_memory` +
+					` (ctx_note/ctx_expand omitted: --no-session child;` +
+					` memory=${cfg.memory.enabled}, embedding=${cfg.embedding.provider !== "off"},` +
 					` git_commits=${cfg.experimental.git_commit_indexing.enabled}, dreamer_actions=${dreamerActionsEnabled})`,
 			);
 		} catch (err) {

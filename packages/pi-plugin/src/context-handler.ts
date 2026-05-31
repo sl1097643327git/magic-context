@@ -2598,6 +2598,14 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	}
 
 	const transcript = createPiTranscript(args.messages, args.sessionId);
+	// Reasoning clearing/replay mutate `part.thinking` in place. They MUST target
+	// the transcript's `working` array (the channel commit() flushes), not the
+	// original `args.messages`: tagging/drops/caveman reassign working[idx] to
+	// fresh objects, so a reasoning mutation written to args.messages[idx] (a
+	// now-divergent object) would be discarded when commit() does
+	// source[idx] = working[idx], leaving the cleared-reasoning watermark ahead
+	// of the actual wire bytes → defer-pass replay divergence → cache bust.
+	const workingMessages = transcript.getWorkingMessages();
 	const currentTurnId = (() => {
 		const ids = buildPiMessageIdByIndex(
 			args.messages as PiAgentMessage[],
@@ -2801,14 +2809,14 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			const clearedReplay = replayClearedReasoningPi({
 				db: args.db,
 				sessionId: args.sessionId,
-				messages: args.messages,
+				messages: workingMessages,
 				messageIdToMaxTag,
 				piMessageStableId,
 			});
 			const inlineReplay = replayStrippedInlineThinkingPi({
 				db: args.db,
 				sessionId: args.sessionId,
-				messages: args.messages,
+				messages: workingMessages,
 				messageIdToMaxTag,
 				piMessageStableId,
 			});
@@ -2979,13 +2987,13 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			const meta = getOrCreateSessionMeta(args.db, args.sessionId);
 			const prevWatermark = meta.clearedReasoningThroughTag ?? 0;
 			const clearOutcome = clearOldReasoningPi({
-				messages: args.messages,
+				messages: workingMessages,
 				messageIdToMaxTag,
 				clearReasoningAge: args.reasoningClearing.clearReasoningAge,
 				piMessageStableId,
 			});
 			const stripOutcome = stripInlineThinkingPi({
-				messages: args.messages,
+				messages: workingMessages,
 				messageIdToMaxTag,
 				clearReasoningAge: args.reasoningClearing.clearReasoningAge,
 				piMessageStableId,

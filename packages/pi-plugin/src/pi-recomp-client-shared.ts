@@ -31,12 +31,22 @@ export function createPiHistorianClient(args: {
 			return {};
 		}
 		const promptText = extractPromptText(body.parts);
+		// Honor the per-attempt model override. The shared recomp/historian chain
+		// (promptSyncWithModelSuggestionRetry) drives fallbacks by rewriting
+		// body.model = { providerID, modelID } on each attempt and passing
+		// fallbackModels: undefined for override attempts. If we ignored body.model
+		// and always ran args.model, every "fallback" attempt would silently re-run
+		// the SAME primary — so an empty/invalid-but-200 primary could never
+		// escalate to the configured fallbacks or the session model. When an
+		// override is present, let the override own the model and disable the
+		// runner-level chain for this call (the shared layer owns iteration).
+		const modelOverride = readBodyModel(body);
 		const result = await args.runner.run({
 			agent: "magic-context-historian",
 			systemPrompt: args.systemPrompt,
 			userMessage: promptText,
-			model: args.model,
-			fallbackModels: args.fallbackModels,
+			model: modelOverride ?? args.model,
+			fallbackModels: modelOverride ? undefined : args.fallbackModels,
 			timeoutMs: args.timeoutMs,
 			cwd: args.directory,
 			thinkingLevel: args.thinkingLevel,
@@ -78,12 +88,40 @@ function readPathId(input: unknown): string {
 	return typeof path?.id === "string" ? path.id : "";
 }
 
-function readBody(input: unknown): { noReply?: boolean; parts?: unknown } {
+function readBody(input: unknown): {
+	noReply?: boolean;
+	parts?: unknown;
+	model?: unknown;
+} {
 	if (typeof input !== "object" || input === null) return {};
 	const body = (input as { body?: unknown }).body;
 	return typeof body === "object" && body !== null
-		? (body as { noReply?: boolean; parts?: unknown })
+		? (body as { noReply?: boolean; parts?: unknown; model?: unknown })
 		: {};
+}
+
+/**
+ * Read a per-attempt model override from the prompt body as the
+ * `"provider/modelID"` string the Pi SubagentRunner expects. The shared chain
+ * passes `body.model = { providerID, modelID }`. Returns undefined when no
+ * usable override is present (fall back to the client's primary model).
+ */
+function readBodyModel(body: { model?: unknown }): string | undefined {
+	const model = body.model;
+	if (typeof model !== "object" || model === null) return undefined;
+	const { providerID, modelID } = model as {
+		providerID?: unknown;
+		modelID?: unknown;
+	};
+	if (
+		typeof providerID === "string" &&
+		providerID.length > 0 &&
+		typeof modelID === "string" &&
+		modelID.length > 0
+	) {
+		return `${providerID}/${modelID}`;
+	}
+	return undefined;
 }
 
 function extractPromptText(parts: unknown): string {

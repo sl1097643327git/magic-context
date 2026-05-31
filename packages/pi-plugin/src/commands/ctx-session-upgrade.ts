@@ -18,8 +18,10 @@ import {
 	signalPiHistoryRefresh,
 	signalPiPendingMaterialization,
 } from "../context-handler";
+import { ensureProjectRegisteredFromPiDirectory } from "../embedding-bootstrap";
 import { runPiMemoryMigration } from "../pi-memory-migration";
 import { createPiHistorianClient } from "../pi-recomp-client-shared";
+import { queueAndApplyPiRecompMarker } from "../pi-recomp-marker";
 import { readPiSessionMessages } from "../read-session-pi";
 import { setMagicContextRecompActive, updateStatusLine } from "../status-line";
 import { resolveSessionId, sendCtxStatusMessage } from "./pi-command-utils";
@@ -204,6 +206,17 @@ export function registerCtxSessionUpgradeCommand(
 						historianTimeoutMs: deps.historianTimeoutMs,
 						memoryEnabled: deps.memoryEnabled,
 						autoPromote: deps.autoPromote,
+						// Embedding substrate: without this the recomp publish path
+						// no-ops embedAndStoreCompartments on an unregistered project,
+						// leaving rebuilt compartments with NULL p1_embedding (dropped
+						// from ctx_search / dreamer linkage). Parity with OpenCode.
+						ensureProjectRegistered: ensureProjectRegisteredFromPiDirectory,
+						// Recomp-runner model chain (parity with OpenCode
+						// recomp-orchestrator): configured fallbacks + the session's
+						// own model as the last-ditch retry, so an empty/invalid-but-
+						// HTTP-200 historian primary escalates instead of failing.
+						fallbackModels: deps.historianFallbacks,
+						fallbackModelId: sessionMainModel,
 					},
 					{},
 				);
@@ -229,6 +242,13 @@ export function registerCtxSessionUpgradeCommand(
 					});
 					return;
 				}
+
+				// Advance the Pi native compaction marker to the rebuilt boundary
+				// so getBranch() trims the pre-upgrade branch. Without this the
+				// upgrade republishes compartments but the entire pre-upgrade JSONL
+				// branch stays visible and grows unbounded until a later incremental
+				// historian pass advances the marker. Shared with /ctx-recomp.
+				queueAndApplyPiRecompMarker({ db: deps.db, sessionId, ctx });
 
 				signalPiHistoryRefresh(sessionId);
 				signalPiPendingMaterialization(sessionId);

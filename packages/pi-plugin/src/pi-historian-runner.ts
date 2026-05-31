@@ -722,6 +722,18 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			// `compartment-runner-incremental.ts:274` placement.
 			onNoteTrigger(db, sessionId, "historian_complete");
 
+			// Queue the tool/history drops for the just-compartmentalized range
+			// BEFORE signaling onPublished. onPublished fires the deferred
+			// materialization/history-refresh signal, and the code below awaits
+			// ensureProjectRegistered — during that await a concurrent `context`
+			// pass can consume the signal, materialize, and CAS-drain the pending
+			// marker. If the drops weren't queued yet, that pass would materialize
+			// with empty pendingOps and the drops would be stranded without their
+			// one-shot trigger. queueDrops is a pure synchronous DB write, so doing
+			// it here (post-COMMIT, pre-signal) keeps drops durable before any pass
+			// can observe the publish.
+			queueDropsForCompartmentalizedMessages(db, sessionId, lastNewEnd);
+
 			onPublished?.();
 
 			// user observations are inserted POST-COMMIT,
@@ -822,8 +834,6 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					.filter((c) => typeof c.id === "number" && c.p1.length > 0);
 				void embedAndStoreCompartments(db, sessionId, projectPath, toEmbed);
 			}
-
-			queueDropsForCompartmentalizedMessages(db, sessionId, lastNewEnd);
 
 			sessionLog(
 				sessionId,
@@ -1026,25 +1036,34 @@ export function buildPiCompactionSummary(
  * real underlying entry (user|assistant|unknown role) or the first
  * folded toolResult entry (synthetic user) — never empty.
  *
- * # Why we ADVANCE past synthetic-user ordinals
+ * # Why we DEFER (not advance) when the kept-start ordinal is synthetic
  *
  * A folded-toolResult run is emitted as a synthetic-user RawMessage whose id is
  * `${SYNTH_USER_ID_PREFIX}<realToolResultId>` — NOT a real SessionEntry id. Pi's
  * compaction replay (`getBranch`/`buildSessionContext`) starts the kept tail at
  * the entry whose real `entry.id === compaction.firstKeptEntryId`; a synthetic
- * id matches nothing, so the deferred drain treats the marker as stale, CAS-
- * clears the pending blob, and the native marker is NEVER written → the branch
- * never trims → unbounded growth toward overflow. Pi also never cuts a
- * compaction boundary at a `toolResult` because the kept tail must not start
- * with an orphaned tool result (the provider lowerers emit it unpaired). So when
- * the boundary lands on a synthetic-user (folded toolResult) ordinal, advance to
- * the next ordinal carrying a REAL, replay-safe entry id (the following
- * assistant/user). If no such later entry exists yet (tail is still folded tool
- * results), return null and defer the marker — exactly Pi's native behavior of
- * never choosing a tool-result tail as a cut point. Advancing the kept start
- * does NOT drop content: the skipped folded-toolResult raw messages belong to
- * the summarized span (their ordinals are ≤ the compartment's endMessage), so
- * they are covered by the summary, not lost from the kept tail.
+ * id matches nothing, so the deferred drain would treat the marker as stale,
+ * CAS-clear the pending blob, and the native marker would never be written.
+ *
+ * `target = lastCompactedOrdinal + 1` is BY CONSTRUCTION the first KEPT-tail
+ * raw message (everything at ordinal ≤ lastCompactedOrdinal is summarized). So
+ * if the message AT `target` is a synthetic-user (folded toolResult run), it is
+ * un-summarized kept-tail content. We must NOT advance past it to a later
+ * assistant: that would drop the folded toolResult run entirely (it is neither
+ * in the summary — ordinal > the compartment's endMessage — nor in the kept
+ * tail). We also cannot cut the boundary AT a toolResult, because the kept tail
+ * must not start with an orphaned tool result whose tool_use was summarized
+ * (provider 400). Both unsafe options collapse to one correct action: return
+ * null and DEFER the marker. The caller stages no marker this pass; the next
+ * historian pass re-resolves the boundary once a real, replay-safe entry (the
+ * following assistant/user) heads the kept tail — exactly Pi's native behavior
+ * of never choosing a tool-result tail as a cut point. Deferring loses no
+ * content (nothing is trimmed until a safe boundary exists) and the branch keeps
+ * accumulating safely until then.
+ *
+ * If the boundary message resolves to a real (non-synthetic) entry id, use it
+ * directly. An empty-id slot (unknown role with no entry id) is also unsafe to
+ * cut at, so defer there too.
  */
 export function findFirstKeptEntryId(
 	entries: unknown[],
@@ -1052,14 +1071,14 @@ export function findFirstKeptEntryId(
 ): string | null {
 	const rawMessages = convertEntriesToRawMessages(entries);
 	const target = lastCompactedOrdinal + 1;
-	// Advance from the boundary ordinal to the first RawMessage carrying a real
-	// (non-synthetic, non-empty) entry id. Synthetic-user ids can't be matched by
-	// Pi compaction replay and must never be used as firstKeptEntryId.
-	for (const m of rawMessages) {
-		if (m.ordinal < target) continue;
-		if (m.id.length === 0) continue;
-		if (m.id.startsWith(SYNTH_USER_ID_PREFIX)) continue;
-		return m.id;
-	}
-	return null;
+	const boundary = rawMessages.find((m) => m.ordinal === target);
+	if (!boundary) return null;
+	// The kept tail must START at this exact message. If it carries a real,
+	// replay-safe entry id, use it. If it is synthetic (folded toolResult run)
+	// or has no id, cutting here is unsafe and advancing past it would drop
+	// kept-tail content — defer the marker until a later pass when a real entry
+	// heads the kept tail.
+	if (boundary.id.length === 0) return null;
+	if (boundary.id.startsWith(SYNTH_USER_ID_PREFIX)) return null;
+	return boundary.id;
 }

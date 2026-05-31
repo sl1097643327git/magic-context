@@ -153,6 +153,22 @@ export function createPiTranscript(
 	 * so Pi can short-circuit downstream cache invalidation.
 	 */
 	getOutputMessages(): unknown[];
+	/**
+	 * Pi-only escape hatch: the mutable `working` array that part proxies
+	 * (tagging, drops, caveman) write to and `commit()` flushes back to source.
+	 *
+	 * Phases that mutate messages OUTSIDE the transcript part API — reasoning
+	 * clearing/replay, which set `part.thinking = "[cleared]"` in place — MUST
+	 * target this array, not the original `source`. Tagging/drops/caveman
+	 * REASSIGN `working[idx]` to fresh spread-copied objects; if reasoning mutated
+	 * `source[idx]` (a now-divergent object) instead, the later `commit()` would
+	 * overwrite `source[idx] = working[idx]` and silently discard the reasoning
+	 * mutation while the cleared-reasoning watermark still advanced — a defer-pass
+	 * replay divergence (wire keeps original reasoning, state says cleared) that
+	 * busts the prompt cache. Routing reasoning through `working` keeps every
+	 * mutation in the single channel `commit()` flushes.
+	 */
+	getWorkingMessages(): PiAgentMessage[];
 } {
 	const working = source.slice() as unknown as PiAgentMessage[];
 	const dirtyMessages = new Set<number>();
@@ -201,6 +217,9 @@ export function createPiTranscript(
 			// directly to source (splices, unshifts). Returning source
 			// is therefore authoritative.
 			return source;
+		},
+		getWorkingMessages(): PiAgentMessage[] {
+			return working;
 		},
 	};
 }
