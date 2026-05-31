@@ -250,6 +250,28 @@ describe("subagent-runner pure helpers", () => {
 });
 
 describe("PiSubagentRunner spawn lifecycle", () => {
+	it("treats a terminal stop turn as success even when drain SIGTERM closes the child", async () => {
+		const child = createMockChild();
+		const { runner } = runnerWith(child);
+
+		const resultPromise = runner.run(baseOptions);
+		child.writeStdoutLine({
+			type: "message_end",
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "looks done" }],
+				stopReason: "stop",
+			},
+		});
+		child.emitClose(null, "SIGTERM");
+
+		expect(await resultPromise).toEqual({
+			ok: true,
+			assistantText: "looks done",
+			durationMs: expect.any(Number),
+			meta: { stderr: undefined },
+		});
+	});
 	it("spawns pi, parses stdout, trims assistant text, and captures stderr", async () => {
 		const child = createMockChild();
 		const { runner, spawnImpl } = runnerWith(child, "custom-pi");
@@ -287,6 +309,31 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 			assistantText: "final answer",
 			durationMs: expect.any(Number),
 			meta: { stderr: "warning from pi" },
+		});
+	});
+
+	it("returns model_failed promptly for live terminal error stopReason", async () => {
+		const child = createMockChild();
+		const { runner } = runnerWith(child);
+
+		const resultPromise = runner.run({ ...baseOptions, timeoutMs: 60_000 });
+		child.writeStdoutLine({
+			type: "message_end",
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "partial" }],
+				stopReason: "error",
+				errorMessage: "provider exploded",
+			},
+		});
+		child.emitClose(null, "SIGTERM");
+
+		expect(await resultPromise).toEqual({
+			ok: false,
+			reason: "model_failed",
+			error: "provider exploded",
+			durationMs: expect.any(Number),
+			meta: { stderr: undefined },
 		});
 	});
 
@@ -554,7 +601,7 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		);
 	});
 
-	it("returns non_zero_exit even after a terminal agent_end", async () => {
+	it("does not let a post-terminal child signal override captured success", async () => {
 		const child = createMockChild();
 		const { runner } = runnerWith(child);
 
@@ -568,19 +615,15 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 				},
 			]),
 		);
-		child.writeStderr("process failed late");
-		child.emitClose(9);
+		child.writeStderr("process reported late noise");
+		child.emitClose(null, "SIGTERM");
 
-		const result = await resultPromise;
-		expect(result.ok).toBe(false);
-		if (!result.ok) {
-			expect(result.reason).toBe("non_zero_exit");
-			expect(result.meta).toEqual({
-				stderr: "process failed late",
-				exitCode: 9,
-				signal: null,
-			});
-		}
+		expect(await resultPromise).toEqual({
+			ok: true,
+			assistantText: "looks done",
+			durationMs: expect.any(Number),
+			meta: { stderr: "process reported late noise" },
+		});
 	});
 
 	it("retries fallback models by spawning fresh children", async () => {

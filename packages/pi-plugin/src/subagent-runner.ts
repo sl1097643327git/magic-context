@@ -539,6 +539,7 @@ export class PiSubagentRunner implements SubagentRunner {
 							typeof m.stopReason === "string" &&
 							(m.stopReason === "stop" ||
 								m.stopReason === "length" ||
+								m.stopReason === "error" ||
 								m.stopReason === "aborted");
 						if (isTerminalStopReason && !hasToolCall) {
 							sawAgentEnd = true;
@@ -661,8 +662,10 @@ export class PiSubagentRunner implements SubagentRunner {
 				if (settled) return;
 
 				// Common case: terminal assistant message_end was observed.
-				// Decide between success and model_failed based on the
-				// embedded stopReason.
+				// Pi print-mode often needs our drain SIGTERM after producing
+				// the final turn, so the captured stopReason/text is the source
+				// of truth; a signaled close here must not turn a valid answer
+				// into a fake subprocess failure.
 				if (sawAgentEnd) {
 					if (finalAssistantText === null) {
 						settle({
@@ -674,21 +677,6 @@ export class PiSubagentRunner implements SubagentRunner {
 						});
 						return;
 					}
-					if (code !== 0 || signal !== null) {
-						settle({
-							ok: false,
-							reason: "non_zero_exit",
-							error: `pi exited (code=${code}, signal=${signal}) after terminal assistant event. stderr: ${stderr.slice(0, 500) || "(empty)"}`,
-							durationMs: Date.now() - startTime,
-							meta: {
-								stderr: stderr.length > 0 ? stderr : undefined,
-								exitCode: code,
-								signal,
-							},
-						});
-						return;
-					}
-
 					if (
 						finalStopReason === "error" ||
 						finalStopReason === "aborted" ||
