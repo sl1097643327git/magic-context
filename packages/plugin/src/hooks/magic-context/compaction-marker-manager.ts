@@ -399,9 +399,9 @@ export function checkCompactionMarkerConsistency(db: Database): void {
             // Inconsistent — best-effort clean up any surviving half-written rows,
             // then clear persisted state so next publication can re-inject.
             //
-            // Only clear persisted state after verified successful cleanup
-            // (council Finding #11). If `removeCompactionMarker` fails (DB
-            // locked, IO error), keeping persisted state lets a retry on the
+            // Only clear persisted state after verified successful cleanup.
+            // If `removeCompactionMarker` fails (DB locked, IO error), keeping
+            // persisted state lets a retry on the
             // next startup try again; clearing would leave orphaned rows in
             // OpenCode's DB that filterCompacted still respects. The natural
             // healing path via the next historian publication still exists as

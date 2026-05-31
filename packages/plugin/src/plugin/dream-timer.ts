@@ -45,6 +45,25 @@ interface ProjectRegistration {
 
 /** Singleton timer state. */
 let activeTimer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Open the shared DB for timer work, returning null (with one clear log) when
+ * storage is unavailable. openDatabase() returns a typed-null on the
+ * schema-fence and open-failure paths (e.g. a stale binary that supports an
+ * older schema than the DB on disk), so every timer entry point MUST null-check
+ * before using the handle — otherwise the null reaches `db.transaction(...)`
+ * deep in embedding registration and throws a confusing TypeError.
+ */
+function openTimerDatabaseOrNull(context: string): Database | null {
+    const db = openDatabase();
+    if (!db) {
+        log(
+            `[dreamer] storage unavailable; skipping ${context} (the cache schema is newer than this binary supports — restart/upgrade OpenCode/Pi/Magic Context to recover)`,
+        );
+        return null;
+    }
+    return db;
+}
 /** All projects that have called startDreamScheduleTimer in this process,
  *  keyed by directory so re-registration of the same directory is idempotent. */
 const registeredProjects = new Map<string, ProjectRegistration>();
@@ -63,7 +82,8 @@ const registeredProjects = new Map<string, ProjectRegistration>();
 export async function startDreamScheduleTimer(
     args: ProjectRegistration,
 ): Promise<(() => void) | undefined> {
-    const db = openDatabase();
+    const db = openTimerDatabaseOrNull("schedule timer registration");
+    if (!db) return;
     await args.ensureRegistered(args.directory, db);
     const snapshot = getProjectEmbeddingSnapshot(args.projectIdentity);
     const dreamingEnabled = Boolean(
@@ -108,7 +128,7 @@ export async function startDreamScheduleTimer(
         // Timer is already running, but this is a brand-new project — give
         // it the same "no 15-minute wait" treatment by sweeping just this
         // project immediately. Existing projects keep their tick cadence.
-        void sweepProject(args, "startup");
+        void sweepProject(args, "startup", db);
     }
 
     return () => {
@@ -132,7 +152,8 @@ function runTick(origin: "startup" | "interval"): void {
     log(`[dreamer] timer tick (${origin}) — projects=${registeredProjects.size}`);
     void (async () => {
         try {
-            const db = openDatabase();
+            const db = openTimerDatabaseOrNull("maintenance tick");
+            if (!db) return;
             // Per-project work — git commit indexing, dream schedule check,
             // dream queue processing. We iterate all registered projects so
             // Desktop's "open all projects at once" workflow indexes every one,
@@ -173,7 +194,7 @@ function runTick(origin: "startup" | "interval"): void {
 async function sweepProject(
     reg: ProjectRegistration,
     origin: "startup" | "interval",
-    db: Database = openDatabase(),
+    db: Database,
     gitCommitEnabled = getProjectEmbeddingSnapshot(reg.projectIdentity)?.gitCommitEnabled === true,
 ): Promise<void> {
     const dreamingEnabled = Boolean(

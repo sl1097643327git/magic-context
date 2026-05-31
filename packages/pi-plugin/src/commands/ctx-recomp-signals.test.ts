@@ -37,10 +37,6 @@ describe("/ctx-recomp post-completion signal contract", () => {
 		expect(codeOnly).toContain("signalPiPendingMaterialization(sessionId)");
 	});
 
-	test("clears compressor state after successful recomp", () => {
-		expect(codeOnly).toContain("clearPiCompressorState(sessionId)");
-	});
-
 	test("signal block lives BEFORE the catch — failed recomps don't fire signals", () => {
 		// The order matters: we don't want a failed recomp to refresh
 		// `<session-history>` cache when nothing actually changed in
@@ -59,10 +55,5 @@ describe("/ctx-recomp post-completion signal contract", () => {
 		expect(signalCallIdx).toBeGreaterThan(tryStart);
 		expect(signalCallIdx).toBeLessThan(catchStart);
 		expect(signalCallIdx).toBeLessThan(finallyStart);
-	});
-
-	test("imports clearPiCompressorState from pi-compressor-runner", () => {
-		expect(SRC).toMatch(/from\s+"\.\.\/pi-compressor-runner"/);
-		expect(SRC).toContain("clearPiCompressorState");
 	});
 });

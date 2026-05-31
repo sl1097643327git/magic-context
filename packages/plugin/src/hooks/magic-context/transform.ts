@@ -235,13 +235,6 @@ export interface TransformDeps {
     /** When true, run a second editor pass after historian to clean U: lines.
      *  Enables the historian-editor agent. Controlled by `historian.two_pass` config. */
     historianTwoPass?: boolean;
-    /** Compressor floor ratio: floor = ceil(lastEndMessage / minCompartmentRatio).
-     *  Controlled by `compressor.min_compartment_ratio` config. */
-    compressorMinCompartmentRatio?: number;
-    /** Compressor max merge depth (1-5). Controlled by `compressor.max_merge_depth` config. */
-    compressorMaxMergeDepth?: number;
-    /** Compressor cooldown in milliseconds. Controlled by `compressor.cooldown_ms` config. */
-    compressorCooldownMs?: number;
     liveModelBySession?: LiveModelBySession;
     /**
      * Process-scoped cache of resolved session.directory values. When provided,
@@ -612,8 +605,6 @@ export function createTransform(deps: TransformDeps) {
                 experimentalUserMemories: deps.experimentalUserMemories,
                 experimentalTemporalAwareness: deps.experimentalTemporalAwareness,
                 historianTwoPass: deps.historianTwoPass,
-                compressorMinCompartmentRatio: deps.compressorMinCompartmentRatio,
-                compressorMaxMergeDepth: deps.compressorMaxMergeDepth,
                 // Issue #44: gate historian-driven memory promotion so users
                 // who disable the feature actually see no memories created.
                 memoryEnabled: deps.memoryConfig?.enabled,
@@ -694,7 +685,7 @@ export function createTransform(deps: TransformDeps) {
                 void sendIgnoredMessage(
                     deps.client,
                     sessionId,
-                    `## Historian recovery\n\nHistorian previously failed ${historianFailureState.failureCount} time(s), so magic-context is retrying compaction immediately after restart.`,
+                    `## Historian recovery\n\nHistorian previously failed ${historianFailureState.failureCount} time(s), so Magic Context is retrying history comparting immediately after restart.`,
                     notificationParams,
                 );
             }
@@ -1072,9 +1063,6 @@ export function createTransform(deps: TransformDeps) {
             experimentalUserMemories: deps.experimentalUserMemories,
             experimentalTemporalAwareness: deps.experimentalTemporalAwareness,
             historianTwoPass: deps.historianTwoPass,
-            compressorMinCompartmentRatio: deps.compressorMinCompartmentRatio,
-            compressorMaxMergeDepth: deps.compressorMaxMergeDepth,
-            compressorCooldownMs: deps.compressorCooldownMs,
             // Issue #44: forward memory gating so the normal historian path
             // (not just the recovery path above) honors memory.enabled and
             // memory.auto_promote.

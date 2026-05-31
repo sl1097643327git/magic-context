@@ -153,6 +153,9 @@ export function createChatMessageHook(args: {
     pendingMaterializationSessions: PendingMaterializationSessions;
     lastHeuristicsTurnId: LastHeuristicsTurnId;
     ctxReduceEnabled?: boolean;
+    /** E5 — one-time session upgrade reminder. Optional: only wired when the
+     *  historian can run (so an upgrade is actually possible). Self-gates. */
+    upgradeReminder?: (sessionId: string) => Promise<void>;
 }) {
     return async (input: {
         sessionID?: string;
@@ -162,6 +165,12 @@ export function createChatMessageHook(args: {
     }) => {
         const sessionId = input.sessionID;
         if (!sessionId) return;
+
+        // E5: fire-and-forget one-time upgrade reminder for legacy sessions.
+        // Self-gating + model-invisible, so it never affects the prompt prefix.
+        if (args.upgradeReminder) {
+            void args.upgradeReminder(sessionId);
+        }
 
         if (input.model?.providerID && input.model.modelID) {
             args.liveModelBySession.set(sessionId, {

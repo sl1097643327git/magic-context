@@ -257,7 +257,7 @@ export function injectSyntheticTodowriteForPi(args: {
 			// Snapshot unchanged AND persisted anchor still present —
 			// idempotent re-inject; backfill stateJson if it was empty
 			// (legacy row from a build that persisted callID without state).
-			// Mirrors the council Finding #1 v2 self-heal in the OpenCode path.
+			// Mirrors the same self-heal in the OpenCode todo-injection path.
 			if (persistedAnchor.stateJson.length === 0) {
 				setPersistedTodoSyntheticAnchor(
 					args.db,

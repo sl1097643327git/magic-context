@@ -137,6 +137,14 @@ export function clearSession(db: Database, sessionId: string): void {
         db.prepare("DELETE FROM recomp_compartments WHERE session_id = ?").run(sessionId);
         db.prepare("DELETE FROM recomp_facts WHERE session_id = ?").run(sessionId);
         db.prepare("DELETE FROM user_memory_candidates WHERE session_id = ?").run(sessionId);
+        // v2: m[0]/m[1] delta log + historian-extracted events are session-scoped
+        // and must be cleared on session deletion (both have session_id). Without
+        // this they leak orphaned rows when a session is deleted.
+        db.prepare("DELETE FROM m0_mutation_log WHERE session_id = ?").run(sessionId);
+        db.prepare("DELETE FROM compartment_events WHERE session_id = ?").run(sessionId);
+        db.prepare("DELETE FROM subagent_invocations WHERE session_id = ?").run(sessionId);
+        db.prepare("DELETE FROM historian_runs WHERE session_id = ?").run(sessionId);
+        db.prepare("DELETE FROM plugin_messages WHERE session_id = ?").run(sessionId);
         clearIndexedMessages(db, sessionId);
     })();
 }

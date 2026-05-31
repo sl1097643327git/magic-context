@@ -141,12 +141,6 @@ import {
 } from "./inject-compartments-pi";
 import { hasVisibleNoteReadCallPi } from "./note-visibility-pi";
 import { injectPiNudge } from "./nudge-injector";
-import {
-	clearPiCompressorState,
-	isPiCompressorOnCooldown,
-	markPiCompressorRun,
-	runPiCompressionPassIfNeeded,
-} from "./pi-compressor-runner";
 import { type PiHistorianDeps, runPiHistorian } from "./pi-historian-runner";
 import { injectSyntheticTodowriteForPi } from "./pi-todo-inject";
 import {
@@ -556,7 +550,10 @@ export interface PiHistorianOptions {
 	memoryEnabled?: boolean;
 	/** Automatic-promotion gate (`memory.auto_promote`). */
 	autoPromote?: boolean;
-	/** Notify UI/status surfaces after historian/compressor state changes. */
+	/** User-memory feature gate (`dreamer.user_memories.enabled`). Gates whether
+	 *  historian user observations are persisted as candidates. */
+	userMemoriesEnabled?: boolean;
+	/** Notify UI/status surfaces after historian state changes. */
 	onStatusChange?: (ctx: ExtensionContext, sessionId: string) => void;
 	/**
 	 * Execute-threshold percentage used by the trigger logic to compute
@@ -580,15 +577,6 @@ export interface PiHistorianOptions {
 	dropToolStructure?: boolean;
 	/** Fraction of executable context reserved for rendered <session-history>. */
 	historyBudgetPercentage?: number;
-	/** Compressor config loaded from magic-context.jsonc. */
-	compressor?: {
-		enabled: boolean;
-		minCompartmentRatio: number;
-		maxMergeDepth: number;
-		cooldownMs: number;
-		maxCompartmentsPerPass: number;
-		graceCompartments: number;
-	};
 }
 
 /**
@@ -1661,7 +1649,24 @@ export function registerPiContextHandler(
 				ctxReduceEnabled: options.ctxReduceEnabled,
 				protectedTags: options.protectedTags ?? 20,
 				heuristics: options.heuristics,
-				injection: options.injection,
+				injection: options.injection
+					? {
+							...options.injection,
+							// v2 decay rendering needs the HISTORY budget (~60K), not the
+							// memory injection budget (~4K). Compute it from live usage +
+							// historian config, mirroring OpenCode's decayPressure budget.
+							historyBudgetTokens: resolveHistoryBudgetTokensForPi({
+								historyBudgetPercentage:
+									options.historian?.historyBudgetPercentage,
+								usagePercentage,
+								usageInputTokens,
+								usageContextLimit,
+								executeThresholdPercentage:
+									options.historian?.executeThresholdPercentage,
+								modelKey: liveModelBySession.get(sessionId),
+							}),
+						}
+					: undefined,
 				entryIds,
 				schedulerDecision,
 				// 95% emergency forces drop-all-tools regardless of the
@@ -1696,17 +1701,6 @@ export function registerPiContextHandler(
 					isFirstContextPassForSession,
 					activeTags: result.activeTags,
 					rawMessageProvider,
-				});
-				maybeFireCompressor({
-					ctx,
-					sessionId,
-					db: options.db,
-					historian: options.historian,
-					isCacheBusting,
-					usagePercentage,
-					usageInputTokens,
-					usageContextLimit,
-					schedulerDecision,
 				});
 			}
 
@@ -1761,6 +1755,9 @@ export function registerPiContextHandler(
 					messages: outputMessages,
 					projectIdentity,
 					entryIds: strictEntryIds,
+					// Same signal OpenCode uses to gate sticky-anchor GC
+					// (isCacheBustingPass = history-refresh OR work executed).
+					isCacheBusting: isCacheBusting || result.executedWorkThisPass,
 				});
 			} catch (err) {
 				sessionLog(
@@ -1921,7 +1918,6 @@ export function registerPiContextHandler(
  * subprocess mid-run.
  */
 const inFlightHistorian = new Map<string, Promise<unknown>>();
-const inFlightCompressor = new Map<string, Promise<unknown>>();
 
 /**
  * Wait for all in-flight historian runs to complete. Called from the
@@ -1930,12 +1926,8 @@ const inFlightCompressor = new Map<string, Promise<unknown>>();
  * runs are in-flight.
  */
 export async function awaitInFlightHistorians(): Promise<void> {
-	if (inFlightHistorian.size === 0 && inFlightCompressor.size === 0) return;
-	const promises = [
-		...Array.from(inFlightHistorian.values()),
-		...Array.from(inFlightCompressor.values()),
-	];
-	await Promise.allSettled(promises);
+	if (inFlightHistorian.size === 0) return;
+	await Promise.allSettled(Array.from(inFlightHistorian.values()));
 }
 
 function splitModelKeyForPi(modelKey: string | undefined): {
@@ -2057,125 +2049,6 @@ function startPiCompartmentLeaseRenewal(
 	}, COMPARTMENT_LEASE_RENEWAL_MS);
 }
 
-function maybeFireCompressor(args: {
-	ctx: ExtensionContext;
-	sessionId: string;
-	db: ContextDatabase;
-	historian: PiHistorianOptions;
-	isCacheBusting: boolean;
-	usagePercentage: number;
-	usageInputTokens: number;
-	usageContextLimit: number | undefined;
-	schedulerDecision: "execute" | "defer";
-}): void {
-	const { ctx, sessionId, db, historian } = args;
-	const compressor = historian.compressor;
-	if (!compressor?.enabled) return;
-	if (!args.isCacheBusting && args.schedulerDecision !== "execute") return;
-	if (inFlightHistorian.has(sessionId) || inFlightCompressor.has(sessionId)) {
-		sessionLog(
-			sessionId,
-			"compressor trigger eval: in-flight historian/compressor, skipping",
-		);
-		return;
-	}
-	if (isPiCompressorOnCooldown(sessionId, compressor.cooldownMs)) {
-		sessionLog(sessionId, "compressor trigger eval: cooldown active, skipping");
-		return;
-	}
-
-	const historyBudgetTokens = resolveHistoryBudgetTokensForPi({
-		historyBudgetPercentage: historian.historyBudgetPercentage,
-		usagePercentage: args.usagePercentage,
-		usageInputTokens: args.usageInputTokens,
-		usageContextLimit: args.usageContextLimit,
-		executeThresholdPercentage: historian.executeThresholdPercentage,
-		modelKey: liveModelBySession.get(sessionId),
-	});
-	if (!historyBudgetTokens || historyBudgetTokens <= 0) return;
-
-	const holderId = crypto.randomUUID();
-	const runPromise = (async () => {
-		const lease = acquireCompartmentLease(db, sessionId, holderId);
-		if (!lease) {
-			sessionLog(
-				sessionId,
-				"compressor skipped: compartment lease held by another process",
-			);
-			return false;
-		}
-		const renewal = startPiCompartmentLeaseRenewal(db, sessionId, holderId);
-		try {
-			return await runPiCompressionPassIfNeeded({
-				db,
-				sessionId,
-				directory: ctx.cwd,
-				runner: historian.runner,
-				historianModel: historian.model,
-				fallbackModels: historian.fallbackModels,
-				historyBudgetTokens,
-				historianTimeoutMs: historian.timeoutMs,
-				thinkingLevel: historian.thinkingLevel,
-				minCompartmentRatio: compressor.minCompartmentRatio,
-				maxMergeDepth: compressor.maxMergeDepth,
-				maxCompartmentsPerPass: compressor.maxCompartmentsPerPass,
-				graceCompartments: compressor.graceCompartments,
-				compartmentLeaseHolderId: holderId,
-				onPublished: () => {
-					const sessionStillActive = isContextHandlerSessionActive(sessionId);
-					// Compressor publication invalidates the injection cache AND
-					// queues drops for the merged compartments. Mirrors OpenCode's
-					// onInjectionCacheCleared callback in transform.ts:502-505:
-					//   - signalPiHistoryRefresh: triggers ONE rebuild on the next
-					//     transform pass (drained immediately after rebuild).
-					//   - signalPiPendingMaterialization: queues the drops the
-					//     compressor published; persists until the next pipeline
-					//     pass actually materializes them. Without this signal,
-					//     drops sit in pending_ops and context climbs until the
-					//     85% force-materialization threshold — exactly the
-					//     "context kept going up after historian/compressor ran"
-					//     symptom users observed in Pi.
-					//
-					// We deliberately do NOT signal systemPromptRefresh — historian
-					// /compressor don't change disk-backed adjuncts (docs/profile/
-					// key-files), so re-reading them would burn IO for nothing.
-					signalPiDeferredHistoryRefresh(sessionId);
-					signalPiDeferredMaterialization(sessionId);
-					if (sessionStillActive) {
-						historian.onStatusChange?.(ctx, sessionId);
-					} else {
-						sessionLog(
-							sessionId,
-							"compressor publication recorded after session clear; status callback skipped",
-						);
-					}
-				},
-			});
-		} finally {
-			clearInterval(renewal);
-			releaseCompartmentLease(db, sessionId, holderId);
-		}
-	})()
-		.then((didPublish) => {
-			if (didPublish === true) {
-				markPiCompressorRun(sessionId);
-			}
-		})
-		.catch((err) => {
-			sessionLog(
-				sessionId,
-				`compressor failed in background: ${err instanceof Error ? err.message : String(err)}`,
-			);
-		})
-		.finally(() => {
-			inFlightCompressor.delete(sessionId);
-			if (isContextHandlerSessionActive(sessionId)) {
-				historian.onStatusChange?.(ctx, sessionId);
-			}
-		});
-	inFlightCompressor.set(sessionId, runPromise);
-}
-
 function hasEligiblePiCompartmentHistory(
 	db: ContextDatabase,
 	sessionId: string,
@@ -2252,6 +2125,7 @@ function spawnPiHistorianRun(args: {
 				thinkingLevel: historian.thinkingLevel,
 				memoryEnabled: historian.memoryEnabled,
 				autoPromote: historian.autoPromote,
+				userMemoriesEnabled: historian.userMemoriesEnabled,
 				compartmentLeaseHolderId: holderId,
 				onPublished: () => {
 					const sessionStillActive = isContextHandlerSessionActive(sessionId);
@@ -2467,7 +2341,7 @@ function maybeFireHistorian(args: {
 				);
 				sendPiIgnoredNotification(
 					ctx,
-					`## Historian recovery\n\nHistorian previously failed ${failureState.failureCount} time(s), so magic-context is retrying compaction immediately after restart.`,
+					`## Historian recovery\n\nHistorian previously failed ${failureState.failureCount} time(s), so Magic Context is retrying history comparting immediately after restart.`,
 				);
 				spawnPiHistorianRun({
 					ctx,
@@ -2558,6 +2432,9 @@ interface RunPipelineArgs {
 	/** Memory-injection config — when omitted, no <session-history> injection runs. */
 	injection?: {
 		injectionBudgetTokens: number;
+		/** v2 decay-render history budget (~60K), distinct from the memory
+		 *  injection budget. Drives compartment tier demotion in renderM0Pi. */
+		historyBudgetTokens?: number;
 		temporalAwareness?: boolean;
 		keyFilesEnabled?: boolean;
 		keyFilesTokenBudget?: number;
@@ -3118,9 +2995,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				clearM0M1PiCache(
 					args.db,
 					args.sessionId,
-					args.isCacheBusting
-						? "history refresh"
-						: "deferred history refresh",
+					args.isCacheBusting ? "history refresh" : "deferred history refresh",
 				);
 			}
 			injectionResult = injectM0M1Pi(
@@ -3129,6 +3004,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					projectIdentity: args.projectIdentity,
 					projectDirectory: args.projectDirectory,
 					injectionBudgetTokens: args.injection.injectionBudgetTokens,
+					historyBudgetTokens: args.injection.historyBudgetTokens,
 					keyFilesEnabled: args.injection.keyFilesEnabled,
 					keyFilesTokenBudget: args.injection.keyFilesTokenBudget,
 				},
@@ -3171,6 +3047,19 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		isCacheBusting: args.isCacheBusting,
 	});
 
+	// Drain predicate intentionally has two Pi-specific terms beyond OpenCode's
+	// `historyWasConsumedThisPass && deferredHistoryWasPendingAtPassStart &&
+	// !suppress`:
+	//   • `materializationSatisfiedThisPass` — Pi's m[0]/m[1] materialization is
+	//     a separate signal from history consumption; the deferred-history
+	//     one-shot must not drain until materialization actually landed this pass,
+	//     or the next pass would rebuild against a half-applied snapshot.
+	//   • `|| hasPendingMaterializeSignal` — Pi rebuilds a fresh AgentMessage[]
+	//     per `context` event (no persistent transform array), so a pending
+	//     materialize signal that arrived mid-pass is an equally valid drain
+	//     trigger as a pass-start-pending refresh.
+	// Net effect is signal-equivalent to OpenCode's model for the same
+	// scheduler/materialization input (Oracle Round 8 peek-then-drain).
 	const deferredHistoryDrainEligible =
 		historyWasConsumedThisPass &&
 		materializationSatisfiedThisPass &&
@@ -3436,6 +3325,14 @@ function applyNoteNudges(args: {
 	messages: PiAgentMessage[];
 	projectIdentity: string;
 	entryIds: readonly (string | undefined)[] | null;
+	/**
+	 * Whether THIS pass is cache-busting. Sticky-anchor pruning is storage-only
+	 * and must run ONLY on cache-busting passes (parity with OpenCode
+	 * transform-postprocess `args.fullFeatureMode && isCacheBustingPass`). On a
+	 * defer pass the persisted sticky state must not change, or future replay
+	 * bytes could shift and bust the prompt cache.
+	 */
+	isCacheBusting: boolean;
 }): PiAgentMessage[] {
 	const { sessionId, db, messages, projectIdentity, entryIds } = args;
 
@@ -3521,7 +3418,14 @@ function applyNoteNudges(args: {
 		}
 	}
 
-	if (entryIds !== null && !entryIds.includes(undefined)) {
+	// Storage-only GC of stale sticky anchors — gated on cache-busting passes
+	// ONLY (parity with OpenCode). Pruning on a defer pass would mutate persisted
+	// sticky-injection state and could shift future replay bytes.
+	if (
+		args.isCacheBusting &&
+		entryIds !== null &&
+		!entryIds.includes(undefined)
+	) {
 		const visibleIds = new Set(
 			entryIds.filter((id): id is string => typeof id === "string"),
 		);
@@ -3708,6 +3612,16 @@ function appendReminderToPiUserMessage(
  *     private to other files; they expose their own clear helpers
  *     called from where they live.
  */
+// IMPORTANT: this clears only IN-MEMORY, process-local maps — it must NOT call
+// the durable DB `clearSession(db, sessionId)`. The two callers are
+// `session_shutdown` and `session_before_switch`, NEITHER of which means the
+// session was deleted — the session still exists on disk and may be resumed.
+// Pi has no `session_deleted` event (OpenCode's event-handler is the only place
+// the durable DB clearSession fires). Calling DB clearSession here would DESTROY
+// live durable state (compartments, tags, memories) for a session the user
+// merely switched away from — a data-loss bug far worse than the bounded
+// orphan-row cost for sessions that are genuinely abandoned and never resumed.
+// Do not add DB clearSession here.
 export function clearContextHandlerSession(sessionId: string): void {
 	activeContextHandlerSessions.delete(sessionId);
 	clearAutoSearchForPiSession(sessionId);
@@ -3735,5 +3649,4 @@ export function clearContextHandlerSession(sessionId: string): void {
 		rawMessageProviderUnregistersBySession.delete(sessionId);
 	}
 	clearSessionTracking(sessionId);
-	clearPiCompressorState(sessionId);
 }

@@ -1,0 +1,168 @@
+import { afterEach, describe, expect, it, mock } from "bun:test";
+import { rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { appendCompartments } from "../../features/magic-context/compartment-storage";
+import { markMemoryMigrationDone } from "../../features/magic-context/memory/memory-migration";
+import { resolveProjectIdentity } from "../../features/magic-context/project-identity";
+import { closeDatabase, openDatabase } from "../../features/magic-context/storage-db";
+import type { LiveSessionState } from "./live-session-state";
+import {
+    contextualizeUpgradeReason,
+    extractRecompReason,
+    isRecompFailure,
+    type ManagedRecompContext,
+    runManagedUpgrade,
+} from "./recomp-orchestrator";
+
+const tempDirs: string[] = [];
+const originalXdg = process.env.XDG_DATA_HOME;
+
+function useTempDataHome(prefix: string): void {
+    const dir = join(tmpdir(), `${prefix}${Math.random().toString(36).slice(2)}`);
+    process.env.XDG_DATA_HOME = dir;
+    tempDirs.push(dir);
+}
+
+afterEach(() => {
+    closeDatabase();
+    process.env.XDG_DATA_HOME = originalXdg;
+    for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
+    tempDirs.length = 0;
+});
+
+function makeLiveSessionState(): LiveSessionState {
+    return {
+        liveModelBySession: new Map(),
+        sessionDirectoryBySession: new Map(),
+        historyRefreshSessions: new Set(),
+        pendingMaterializationSessions: new Set(),
+        deferredHistoryRefreshSessions: new Set(),
+        recompProgressBySession: new Map(),
+    } as unknown as LiveSessionState;
+}
+
+function makeCtx(
+    db: ReturnType<typeof openDatabase>,
+    directory: string,
+    overrides?: Partial<ManagedRecompContext>,
+): ManagedRecompContext {
+    return {
+        client: {} as ManagedRecompContext["client"],
+        db,
+        liveSessionState: makeLiveSessionState(),
+        directory,
+        historianChunkTokens: 10_000,
+        historianTimeoutMs: 60_000,
+        memoryEnabled: true,
+        autoPromote: false,
+        fallbackModels: [],
+        runMigration: true,
+        userMemoriesEnabled: false,
+        getNotificationParams: () => ({}),
+        ...overrides,
+    } as ManagedRecompContext;
+}
+
+describe("runManagedUpgrade — already-upgraded guard", () => {
+    it("is a no-op when there are no legacy compartments and migration is done", async () => {
+        useTempDataHome("recomp-orch-noop-");
+        const db = openDatabase();
+        const dir = "/tmp/recomp-orch-noop";
+
+        // Seed a v2 (legacy=0) compartment + mark this project's migration done.
+        appendCompartments(db, "ses-up", [
+            {
+                sequence: 0,
+                startMessage: 1,
+                endMessage: 2,
+                startMessageId: "m-1",
+                endMessageId: "m-2",
+                title: "v2 comp",
+                content: "body",
+                legacy: 0,
+                p1: "body",
+            },
+        ]);
+        markMemoryMigrationDone(db, resolveProjectIdentity(dir));
+
+        const ctx = makeCtx(db, dir);
+        const message = await runManagedUpgrade(ctx, "ses-up");
+
+        expect(message).toContain("Already Up To Date");
+        expect(isRecompFailure(message)).toBe(false);
+        // Progress terminal recorded as a (clearing) "done", not "failed".
+        const prog = ctx.liveSessionState.recompProgressBySession.get("ses-up");
+        // "done" auto-clears after a grace period; allow either still-present done
+        // or already-cleared — but it must never be "failed".
+        expect(prog?.phase === "done" || prog === undefined).toBe(true);
+    });
+
+    it("reports no history when the session has zero compartments and migration done", async () => {
+        useTempDataHome("recomp-orch-empty-");
+        const db = openDatabase();
+        const dir = "/tmp/recomp-orch-empty";
+        markMemoryMigrationDone(db, resolveProjectIdentity(dir));
+
+        const ctx = makeCtx(db, dir);
+        const message = await runManagedUpgrade(ctx, "ses-empty");
+
+        expect(message).toContain("Already Up To Date");
+        expect(message).toContain("no compartment history");
+    });
+});
+
+describe("recomp message helpers", () => {
+    it("isRecompFailure detects Failed/Skipped headings only", () => {
+        expect(isRecompFailure("## Magic Recomp — Failed\n\nreason")).toBe(true);
+        expect(isRecompFailure("## Session Upgrade — Skipped")).toBe(true);
+        expect(isRecompFailure("## Magic Recomp — Complete\n\nRebuilt 5")).toBe(false);
+        expect(isRecompFailure("## Session Upgrade — Already Up To Date")).toBe(false);
+    });
+
+    it("treats the lease/activeRuns skip messages as failures (— Skipped suffix)", () => {
+        // These no-op messages must NOT let the upgrade proceed to migration /
+        // declare "complete" — the recomp wrote nothing (dogfood 2026-05-30).
+        // Belt: the message heading now carries "— Skipped"; suspenders: the
+        // orchestrator also gates on the `published:false` flag.
+        expect(
+            isRecompFailure(
+                "## Magic Recomp — Skipped\n\nHistorian is already running for this session. Wait for it to finish, then try `/ctx-recomp` again.",
+            ),
+        ).toBe(true);
+        expect(
+            isRecompFailure(
+                "## Magic Recomp — Skipped\n\nAnother process is already mutating compartment state for this session. Wait for it to finish, then try `/ctx-recomp` again.",
+            ),
+        ).toBe(true);
+    });
+
+    it("extractRecompReason strips markdown headings and blank lines", () => {
+        expect(
+            extractRecompReason(
+                "## Magic Recomp — Failed\n\nHistorian returned no usable compartments.",
+            ),
+        ).toBe("Historian returned no usable compartments.");
+    });
+
+    it("contextualizeUpgradeReason rewrites /ctx-recomp -> /ctx-session-upgrade", () => {
+        // Bug (dogfood 2026-05-31): the upgrade flow surfaced the shared recomp
+        // skip text verbatim, telling the user to run `/ctx-recomp` — the wrong
+        // command for the upgrade flow.
+        const out = contextualizeUpgradeReason(
+            "Historian returned no usable compartments. Try `/ctx-recomp` again.",
+        );
+        expect(out).not.toContain("/ctx-recomp");
+        expect(out).toContain("/ctx-session-upgrade");
+    });
+
+    it("contextualizeUpgradeReason reframes the lease-busy skip as transient", () => {
+        const out = contextualizeUpgradeReason(
+            "Another process is already mutating compartment state for this session. Wait for it to finish, then try `/ctx-recomp` again.",
+        );
+        expect(out).toContain("/ctx-session-upgrade");
+        expect(out).not.toContain("/ctx-recomp`"); // no stray recomp command
+        expect(out.toLowerCase()).toMatch(/temporary|wait|comparter/);
+    });
+});

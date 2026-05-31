@@ -61,7 +61,6 @@ export function createSessionHooks(args: {
                 commit_cluster_trigger: pluginConfig.commit_cluster_trigger,
                 // Issue #53: per-agent system-prompt injection opt-out.
                 system_prompt_injection: pluginConfig.system_prompt_injection,
-                compressor: pluginConfig.compressor,
                 experimental: pluginConfig.experimental,
             },
         }),

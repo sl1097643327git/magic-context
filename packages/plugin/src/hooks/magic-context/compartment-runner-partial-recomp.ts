@@ -1,3 +1,4 @@
+import { embedAndStoreCompartments } from "../../features/magic-context/compartment-embedding";
 import type {
     Compartment,
     CompartmentInput,
@@ -13,7 +14,6 @@ import {
 } from "../../features/magic-context/compartment-storage";
 import { clearCompressionDepthRange } from "../../features/magic-context/compression-depth-storage";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
-import { getMemoriesByProject } from "../../features/magic-context/memory/storage-memory";
 import {
     clearPendingCompactionMarkerStateIf,
     getPendingCompactionMarkerState,
@@ -26,7 +26,6 @@ import { updateCompactionMarkerAfterPublication } from "./compaction-marker-mana
 import { buildCompartmentAgentPrompt } from "./compartment-prompt";
 import { runValidatedHistorianPass } from "./compartment-runner-historian";
 import { promoteRecompStagingWithM0Mutation } from "./compartment-runner-recomp";
-import { buildExistingStateXml } from "./compartment-runner-state-xml";
 import type { CandidateCompartment, CompartmentRunnerDeps } from "./compartment-runner-types";
 import {
     getReducedRecompTokenBudget,
@@ -35,6 +34,7 @@ import {
 } from "./compartment-runner-validation";
 import { clearInjectionCache } from "./inject-compartments";
 import { getProtectedTailStartOrdinal, readSessionChunk } from "./read-session-chunk";
+import { buildReferenceBlocks } from "./reference-retrieval";
 import { sendIgnoredMessage } from "./send-session-notification";
 
 export interface PartialRecompRange {
@@ -118,6 +118,15 @@ function compartmentToInput(c: Compartment, newSequence: number): CompartmentInp
         endMessageId: c.endMessageId,
         title: c.title,
         content: c.content,
+        // v2: preserve paraphrase tiers + scoring on prior/tail compartments that
+        // a partial recomp keeps UNCHANGED. Dropping these would re-write them as
+        // flat (NULL-tier, legacy=0) rows and break decay rendering.
+        p1: c.p1,
+        p2: c.p2,
+        p3: c.p3,
+        p4: c.p4,
+        importance: c.importance,
+        episodeType: c.episodeType,
     };
 }
 
@@ -208,12 +217,8 @@ export async function executePartialRecompInternal(
         );
         const sessionDirectory = parentSession?.directory ?? directory;
 
-        const projectPath = directory ? resolveProjectIdentity(directory) : undefined;
-        const memories = projectPath
-            ? getMemoriesByProject(db, projectPath, ["active", "permanent"])
-            : [];
-        const memoryBlockForExistingState = memories.length > 0 ? undefined : undefined; // unused in partial
-        void memoryBlockForExistingState; // linter — facts/memories rendering reused below
+        // v2: partial-recomp keeps existing facts untouched (no promote, no
+        // dedup block) — reference blocks (seeds + recency) carry calibration.
 
         // ── Resume state ───────────────────────────────────────────────────
         //
@@ -336,6 +341,28 @@ export async function executePartialRecompInternal(
             }
             deps.onCompartmentStatePublished?.(sessionId);
 
+            // v2 (E2): recompute P1 embeddings for the rebuilt compartments.
+            // Partial recomp deletes + reinserts compartments with fresh P1 text
+            // (the rebuilt range), so their embeddings must be regenerated or the
+            // rebuilt rows have NULL p1_embedding and vanish from ctx_search +
+            // dreamer cross-linking. Embedding is the search substrate (gated on
+            // memory-enabled), distinct from fact promotion (which recomp skips).
+            // Mirrors the full-recomp success path. Fire-and-forget, best-effort.
+            if (deps.memoryEnabled !== false) {
+                const projectIdentity = resolveProjectIdentity(sessionDirectory);
+                const liveCompartments = getCompartments(db, sessionId);
+                const toEmbed = liveCompartments
+                    .map((c) => ({ id: c.id, p1: c.p1 ?? c.content }))
+                    .filter((c) => typeof c.id === "number" && c.p1.length > 0);
+                // Register the embedding provider FIRST; embedTextForProject
+                // silently no-ops for unregistered projects, leaving NULL
+                // p1_embedding on the rebuilt rows. This block is sync, so chain
+                // register→embed as fire-and-forget (matches the prior void call).
+                void Promise.resolve(deps.ensureProjectRegistered?.(sessionDirectory, db)).then(
+                    () => embedAndStoreCompartments(db, sessionId, projectIdentity, toEmbed),
+                );
+            }
+
             const lastEnd = merged[merged.length - 1]?.endMessage ?? snapEnd;
             // Plan v6 §6: partial recomp is explicit (eager cache clear). Apply
             // the marker directly here AND CAS-clear any stale pending blob a
@@ -368,19 +395,24 @@ export async function executePartialRecompInternal(
                 return `## Magic Recomp — Failed\n\nPartial recomp stopped because the raw chunk could not be represented safely: ${chunkCoverageError}\n\nOriginal state preserved (staging kept for retry).`;
             }
 
-            // Build existing-state XML: prior-only + new-built-so-far, plus facts
-            // snapshot. Historian uses this to avoid re-emitting prior compartments
-            // and to dedup fact candidates against existing facts/memories.
-            const existingState = buildExistingStateXml(
-                candidateCompartments,
-                currentFacts,
-                undefined,
-            );
+            // v2 bounded reference model: 4 rotating seeds + last-6 recency
+            // (the compartments rebuilt so far in this partial-recomp run provide
+            // continuity). Structural rebuild → no <project-memory> dedup block.
+            const references = buildReferenceBlocks({
+                sessionId,
+                chunkStart: chunk.startIndex,
+                sessionCompartments: candidateCompartments,
+            });
 
-            const prompt = buildCompartmentAgentPrompt(
-                existingState,
-                `Messages ${chunk.startIndex}-${chunk.endIndex}:\n\n${chunk.text}`,
-            );
+            const prompt = buildCompartmentAgentPrompt({
+                seedExamples: references.seedExamples,
+                sessionReferences: references.sessionReferences,
+                projectMemory: "",
+                inputSource: `Messages ${chunk.startIndex}-${chunk.endIndex}:\n\n${chunk.text}`,
+                // Partial recomp is structural-only — never emit facts (locked
+                // rule: no re-promotion into the curated memory store).
+                memoryEnabled: false,
+            });
 
             await sendIgnoredMessage(
                 client,

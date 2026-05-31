@@ -576,7 +576,7 @@ describe("createMagicContextCommandHandler", () => {
             );
         });
 
-        it("dispatches /ctx-recomp --upgrade to the Wave 3 runner stub for legacy sessions", async () => {
+        it("points /ctx-recomp --upgrade at the new /ctx-session-upgrade command", async () => {
             insertLegacyCompartment(db, "ses-upgrade-legacy");
             const sendNotification = mock(async () => {});
             const executeRecomp = mock(async () => "## Magic Recomp\n\nRebuilt state.");
@@ -600,10 +600,82 @@ describe("createMagicContextCommandHandler", () => {
                 "__CONTEXT_MANAGEMENT_CTX-RECOMP_HANDLED__",
             );
 
+            // Deprecated flag does not run recomp itself; it redirects to the command.
             expect(executeRecomp).not.toHaveBeenCalled();
             expect(sendNotification).toHaveBeenCalledWith(
                 "ses-upgrade-legacy",
-                expect.stringContaining("Upgrade runner not yet implemented (Wave 3)"),
+                expect.stringContaining("/ctx-session-upgrade"),
+                {},
+            );
+        });
+    });
+
+    describe("ctx-session-upgrade", () => {
+        it("runs the managed upgrade (recomp + migration) and throws the sentinel", async () => {
+            insertLegacyCompartment(db, "ses-su-legacy");
+            const sendNotification = mock(async () => {});
+            // The command path now delegates to the unified `runUpgrade` (shared
+            // recomp-orchestrator: full recomp → once-per-project memory
+            // migration), so it gets the same fallback + progress as the RPC
+            // dialog path. The command handler just invokes it and reports.
+            const runUpgrade = mock(
+                async () => "## Session Upgrade — Complete\n\nRebuilt 1 compartment.",
+            );
+            const handler = createMagicContextCommandHandler({
+                db,
+                protectedTags: 3,
+                runUpgrade,
+                sendNotification,
+            });
+
+            await expectSentinel(
+                handler["command.execute.before"](
+                    {
+                        command: "ctx-session-upgrade",
+                        sessionID: "ses-su-legacy",
+                        arguments: "",
+                    },
+                    makeOutput(""),
+                    {},
+                ),
+                "__CONTEXT_MANAGEMENT_CTX-SESSION-UPGRADE_HANDLED__",
+            );
+
+            expect(runUpgrade).toHaveBeenCalledWith("ses-su-legacy");
+            expect(sendNotification).toHaveBeenCalledWith(
+                "ses-su-legacy",
+                expect.stringContaining("Session Upgrade"),
+                {},
+            );
+        });
+
+        it("reports a no-session message when the prompt has no session id", async () => {
+            const sendNotification = mock(async () => {});
+            const executeRecomp = mock(async () => "rebuilt");
+            const handler = createMagicContextCommandHandler({
+                db,
+                protectedTags: 3,
+                executeRecomp,
+                sendNotification,
+            });
+
+            await expectSentinel(
+                handler["command.execute.before"](
+                    {
+                        command: "ctx-session-upgrade",
+                        sessionID: "",
+                        arguments: "",
+                    },
+                    makeOutput(""),
+                    {},
+                ),
+                "__CONTEXT_MANAGEMENT_CTX-SESSION-UPGRADE_HANDLED__",
+            );
+
+            expect(executeRecomp).not.toHaveBeenCalled();
+            expect(sendNotification).toHaveBeenCalledWith(
+                "",
+                expect.stringContaining("not attached to a session"),
                 {},
             );
         });

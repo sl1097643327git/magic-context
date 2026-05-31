@@ -166,8 +166,12 @@ export async function executeContextRecompWithResult(
     const { sessionId } = deps;
     if (activeRuns.has(sessionId)) {
         return {
+            // "— Skipped" suffix so isRecompFailure() (string-based callers) treats
+            // this as a non-success and never proceeds to migration / "complete"
+            // on it (dogfood 2026-05-30). The `published:false` flag is the robust
+            // primary signal; this heading is defense-in-depth.
             message:
-                "## Magic Recomp\n\nHistorian is already running for this session. Wait for it to finish, then try `/ctx-recomp` again.",
+                "## Magic Recomp — Skipped\n\nHistorian is already running for this session. Wait for it to finish, then try `/ctx-recomp` again.",
             published: false,
         };
     }
@@ -178,7 +182,7 @@ export async function executeContextRecompWithResult(
         sessionLog(sessionId, "recomp skipped: compartment lease held by another process");
         return {
             message:
-                "## Magic Recomp\n\nAnother process is already mutating compartment state for this session. Wait for it to finish, then try `/ctx-recomp` again.",
+                "## Magic Recomp — Skipped\n\nAnother process is already mutating compartment state for this session. Wait for it to finish, then try `/ctx-recomp` again.",
             published: false,
         };
     }
@@ -195,9 +199,16 @@ export async function executeContextRecompWithResult(
     activeRuns.set(sessionId, { promise: wrappedPromise, published: false });
     try {
         const message = await promise;
+        // B1 (dogfood 2026-05-30): log EVERY recomp outcome here — this wraps all
+        // ~12 return paths in the runner, so a silently-non-publishing recomp is
+        // now always diagnosable from the log. The returned message carries the
+        // reason inline (e.g. "## Magic Recomp — Failed\n\n<reason>").
+        const published = activeRuns.get(sessionId)?.published === true;
+        const outcomeSummary = message.replace(/\s+/g, " ").trim().slice(0, 240);
+        sessionLog(sessionId, `recomp finished (published=${published}): ${outcomeSummary}`);
         return {
             message,
-            published: activeRuns.get(sessionId)?.published === true,
+            published,
         };
     } finally {
         clearInterval(renewal);

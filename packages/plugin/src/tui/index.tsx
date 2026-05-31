@@ -4,9 +4,9 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { createMemo } from "solid-js"
 import type { TuiPlugin, TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
-import { createSidebarContentSlot } from "./slots/sidebar-content"
+import { createSidebarContentSlot, kickRecompProgressRefresh } from "./slots/sidebar-content"
 import packageJson from "../../package.json"
-import { closeRpc, consumeTuiMessages, getAnnouncement, getCompartmentCount, initRpcClient, loadStatusDetail, markAnnounced, requestRecomp, type StatusDetail } from "./data/context-db"
+import { closeRpc, consumeTuiMessages, dismissUpgradeReminder, getAnnouncement, getCompartmentCount, initRpcClient, loadStatusDetail, markAnnounced, requestRecomp, requestUpgrade, type StatusDetail } from "./data/context-db"
 import { formatThresholdPercent } from "../shared/format-threshold"
 import { detectConflicts } from "../shared/conflict-detector"
 import { fixConflicts } from "../shared/conflict-fixer"
@@ -213,9 +213,11 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
     const COLORS = {
         // Cool / structured — injected by the plugin into message[0]
         system: "#c084fc",
+        docs: "#22d3ee",
         compartments: "#60a5fa",
         facts: "#fbbf24",
         memories: "#34d399",
+        profile: "#a3e635",
         // Warm / user-facing — chat and tool traffic
         conversation: "#f87171",
         toolCalls: "#fb923c",
@@ -229,6 +231,8 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
 
         if (d.systemPromptTokens > 0)
             segs.push({ label: "System", tokens: d.systemPromptTokens, color: COLORS.system })
+        if (d.docsTokens > 0)
+            segs.push({ label: "Docs", tokens: d.docsTokens, color: COLORS.docs })
         if (d.compartmentTokens > 0)
             segs.push({
                 label: "Compartments",
@@ -250,6 +254,8 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                 color: COLORS.memories,
                 detail: `(${d.memoryBlockCount})`,
             })
+        if (d.profileTokens > 0)
+            segs.push({ label: "User Profile", tokens: d.profileTokens, color: COLORS.profile })
 
         if (d.conversationTokens > 0)
             segs.push({ label: "Conversation", tokens: d.conversationTokens, color: COLORS.conversation })
@@ -315,6 +321,35 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                     )
                 })}
             </box>
+
+            {/* Recomp / session-upgrade live progress (full width, only while
+                running or just finished — dogfood 2026-05-30). */}
+            {s().recompProgress && (
+                <box marginTop={1} width="100%" flexDirection="column">
+                    <text fg={t().text}><b>Recomp / Upgrade</b></text>
+                    {(() => {
+                        const p = s().recompProgress!
+                        if (p.phase === "recomp") {
+                            const frac = p.totalMessages > 0 ? p.processedMessages / p.totalMessages : 0
+                            const width = 24
+                            const filled = Math.round(Math.max(0, Math.min(1, frac)) * width)
+                            const bar = p.totalMessages > 0
+                                ? `[${"█".repeat(filled)}${"░".repeat(width - filled)}]`
+                                : "(starting…)"
+                            return (
+                                <>
+                                    <R t={t()} l="upgrading" v={p.totalMessages > 0 ? `${bar} ${Math.round(frac * 100)}%` : bar} fg={t().warning} />
+                                    {p.note ? <R t={t()} l="Status" v={p.note} fg={t().textMuted} /> : null}
+                                    <R t={t()} l="Compartments" v={`${p.compartmentsCreated} (${p.passCount} pass${p.passCount === 1 ? "" : "es"})`} fg={t().textMuted} />
+                                </>
+                            )
+                        }
+                        if (p.phase === "migration") return <R t={t()} l="Status" v={p.note ?? "Migrating memories ⟳"} fg={t().warning} />
+                        if (p.phase === "done") return <R t={t()} l="Status" v="✓ Upgrade complete" fg={t().accent} />
+                        return <R t={t()} l="Status" v={`✗ Failed${p.message ? `: ${p.message}` : ""}`} fg={t().error} />
+                    })()}
+                </box>
+            )}
 
             {/* 2-column layout */}
             <box flexDirection="row" width="100%" marginTop={1} gap={4}>
@@ -427,6 +462,7 @@ function showRecompDialog(api: TuiPluginApi) {
                 ].join("\n")}
                 onConfirm={() => {
                     void requestRecomp(sessionId)
+                    kickRecompProgressRefresh()
                     api.ui.toast({ message: "Recomp requested — historian will start shortly", variant: "info", duration: 5000 })
                 }}
                 onCancel={() => {
@@ -435,6 +471,83 @@ function showRecompDialog(api: TuiPluginApi) {
             />
         ))
     })
+}
+
+function showUpgradeDialog(
+    api: TuiPluginApi,
+    resume?: { stagedCount: number; stagedThrough: number },
+) {
+    const sessionId = getSessionId(api)
+    if (!sessionId) {
+        // No active session — nothing to upgrade. Silently skip (the server only
+        // enqueues this for sessions with legacy compartments, but the TUI may
+        // have switched sessions before the poller fired).
+        return
+    }
+
+    const title = resume ? "🎆 Resume the interrupted upgrade?" : "🎆 Historian V2 is released!"
+    const message = resume
+        ? [
+              `An earlier upgrade to the new historian format was interrupted. ${resume.stagedCount} compartment${resume.stagedCount === 1 ? " was" : "s were"} already rebuilt (through message ${resume.stagedThrough}). Resuming continues from where it left off — nothing already rebuilt is reprocessed.`,
+              "",
+              "Resuming will:",
+              "• Rebuild the remaining compartments into the new layered format",
+              "• Re-organize this project's memories into the new taxonomy (once per project)",
+              "",
+              "The historian runs in the background and you can keep working. You can also resume via /ctx-session-upgrade later.",
+              "",
+              "Resume the upgrade now?",
+          ].join("\n")
+        : [
+              "This session's compartments are written by the old historian. The session is still usable with its old compartments, however it's strongly advised to upgrade them to the new format. This means every compartment needs to be reprocessed by the new historian, which might take a while depending on how big your session is.",
+              "",
+              "Running the upgrade will:",
+              "• Rebuild this session's compartments into the new layered format",
+              "• Re-organize this project's memories into the new taxonomy (once per project)",
+              "",
+              "The historian runs in the background and you can keep working while older compartments are reprocessed. You can also upgrade via /ctx-session-upgrade later.",
+              "",
+              "Run the upgrade now?",
+          ].join("\n")
+
+    api.ui.dialog.replace(
+        () => (
+            <api.ui.DialogConfirm
+                title={title}
+                message={message}
+                onConfirm={() => {
+                    // Explicit choice → dismiss the fresh reminder durably so it
+                    // won't re-show. (Resume prompts are staging-driven and still
+                    // fire if this run is later interrupted.)
+                    void dismissUpgradeReminder(sessionId)
+                    void requestUpgrade(sessionId)
+                    // Start the sidebar's recomp self-poll immediately — the RPC
+                    // call fires no message event, so without this the progress
+                    // bar wouldn't appear until the upgrade finished.
+                    kickRecompProgressRefresh()
+                    api.ui.toast({
+                        message: resume
+                            ? "Resuming session upgrade — running in the background"
+                            : "Session upgrade started — running in the background",
+                        variant: "info",
+                        duration: 5000,
+                    })
+                }}
+                onCancel={() => {
+                    // Explicit decline → set the durable stamp so we don't re-prompt
+                    // on every restart. The fix for stamp-on-display trapping a
+                    // never-upgraded session (dogfood 2026-05-30) relies on THIS
+                    // being the only place the TUI path stamps.
+                    void dismissUpgradeReminder(sessionId)
+                    api.ui.toast({
+                        message: "Upgrade skipped — run /ctx-session-upgrade anytime",
+                        variant: "info",
+                        duration: 4000,
+                    })
+                }}
+            />
+        ),
+    )
 }
 
 function showStatusDialog(api: TuiPluginApi) {
@@ -653,6 +766,15 @@ const tui: TuiPlugin = async (api, _options, meta) => {
                         showStatusDialog(api)
                     } else if (action === "show-recomp-dialog") {
                         showRecompDialog(api)
+                    } else if (action === "show-upgrade-dialog") {
+                        const resume =
+                            msg.payload?.resume === true
+                                ? {
+                                      stagedCount: Number(msg.payload?.stagedCount ?? 0),
+                                      stagedThrough: Number(msg.payload?.stagedThrough ?? 0),
+                                  }
+                                : undefined
+                        showUpgradeDialog(api, resume)
                     }
                 }
             }

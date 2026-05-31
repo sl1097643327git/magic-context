@@ -62,14 +62,15 @@ function extractOnPublishedBodies(src: string): string[] {
 	return bodies;
 }
 
-describe("historian + compressor onPublished signals", () => {
+describe("historian onPublished signals", () => {
 	const bodies = extractOnPublishedBodies(HANDLER_SRC);
 
-	test("found exactly two onPublished callbacks (historian + compressor)", () => {
-		// If this changes, the rest of the assertions below need
-		// re-validation — adding a third runner without signaling both
-		// sets would resurrect the bug.
-		expect(bodies.length).toBe(2);
+	test("found exactly one onPublished callback (historian)", () => {
+		// v2: the compressor was removed (decay-tier rendering replaces it), so
+		// historian is the only publisher. If this changes, the assertions below
+		// need re-validation — adding a runner without signaling both deferred
+		// sets would resurrect the cache-bust bug.
+		expect(bodies.length).toBe(1);
 	});
 
 	test("every onPublished signals deferred history refresh", () => {

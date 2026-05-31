@@ -6,7 +6,6 @@ import {
     escapeXmlAttr,
     escapeXmlContent,
     getCompartments,
-    getSessionFacts,
     type SessionFact,
 } from "../../features/magic-context/compartment-storage";
 import {
@@ -36,6 +35,7 @@ import {
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { sessionLog } from "../../shared/logger";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
+import { extractM0Block, renderCompartmentAtTier, renderDecayedCompartments } from "./decay-render";
 import { buildKeyFilesBlock, type KeyFilesConfigForRender } from "./key-files-block";
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
@@ -277,7 +277,11 @@ export function prepareCompartmentInjection(
     }
 
     const compartments = getCompartments(db, sessionId);
-    const facts = getSessionFacts(db, sessionId);
+    // v2 faithful facts: session_facts is retired as a render source. Facts are
+    // promoted to project memory and render via <project-memory>. We no longer
+    // read or render session_facts here (matching the runner's removed write
+    // side); legacy pre-v2 rows are left un-rendered until /ctx-session-upgrade.
+    const facts: SessionFact[] = [];
 
     let memoryBlock: string | undefined;
     let memoryCount = 0;
@@ -572,21 +576,26 @@ export class RenderM1InvalidMarkersError extends Error {
     }
 }
 
-type M0Compartment = Compartment & {
-    importance: number;
-    legacy: number;
-};
+// Compartment already carries p1..p4, importance, episodeType, legacy (v2 model B).
+// Alias retained for readability at render call sites.
+type M0Compartment = Compartment;
 
 const DEFAULT_HISTORY_BUDGET_TOKENS = 60_000;
-const DEFAULT_MEMORY_BUDGET_TOKENS = 8_000;
-const DEFAULT_USER_PROFILE_BUDGET_TOKENS = 4_000;
+export const DEFAULT_MEMORY_BUDGET_TOKENS = 8_000;
+
+/**
+ * Token cost of the `<project-memory>` … `</project-memory>` wrapper itself,
+ * seeded into the v2 trim accounting so the budget covers the whole injected
+ * block (wrapper + lines), not just the line bodies.
+ */
+const MEMORY_BLOCK_WRAPPER_TOKENS = 6;
+export const DEFAULT_USER_PROFILE_BUDGET_TOKENS = 4_000;
 const M0_EMPTY_BODY = "<session-history></session-history>";
 const M1_EMPTY_PLACEHOLDER =
     "<session-history-since>(no new content since last materialization)</session-history-since>";
 
 const maxCompartmentSeqStatements = new WeakMap<Database, PreparedStatement>();
 const maxMemoryIdStatements = new WeakMap<Database, PreparedStatement>();
-const sessionFactsVersionStatements = new WeakMap<Database, PreparedStatement>();
 const legacyCompartmentCountStatements = new WeakMap<Database, PreparedStatement>();
 const m0CompartmentStatements = new WeakMap<Database, PreparedStatement>();
 const newCompartmentStatements = new WeakMap<Database, PreparedStatement>();
@@ -629,18 +638,12 @@ function getMaxMemoryId(db: Database, projectPath: string | undefined): number {
     return numberFromRow(row, "max_id");
 }
 
-function getSessionFactsVersion(db: Database, sessionId: string): number {
-    try {
-        const row = cachedStatement(
-            sessionFactsVersionStatements,
-            db,
-            "SELECT COALESCE(session_facts_version, 0) AS version FROM session_meta WHERE session_id = ?",
-        ).get(sessionId);
-        return numberFromRow(row, "version");
-    } catch (error) {
-        if (String(error).includes("session_facts_version")) return 0;
-        throw error;
-    }
+// v2: session_facts is retired as a render source (facts = promoted memories).
+// The m[0] snapshot keeps a sessionFactsVersion field for shape stability, but
+// it is pinned to 0 so fact changes never drive m[0] re-materialization —
+// rendered bytes no longer depend on session_facts. (Avoids wasted rebuilds.)
+function getSessionFactsVersion(_db: Database, _sessionId: string): number {
+    return 0;
 }
 
 function getUpgradeState(db: Database, sessionId: string): string | null {
@@ -720,18 +723,22 @@ export function mustMaterialize(args: {
     if (args.state.cachedM0MaxCompartmentSeq !== current.maxCompartmentSeq) {
         return { value: true, reason: "max_compartment_seq" };
     }
-    if (args.state.cachedM0MaxMemoryId !== current.maxMemoryId) {
-        return { value: true, reason: "max_memory_id" };
-    }
+    // NOTE: maxMemoryId is deliberately NOT a materialization trigger. New
+    // memories are ADDITIVE and surface in m[1] via the maxMemoryId watermark
+    // (readNewMemoriesForM1 reads id > cachedM0MaxMemoryId). Triggering m[0]
+    // rematerialization on every memory write would bust the m[0] cache on
+    // routine additive writes — defeating the whole additive-stability design.
+    // Non-additive memory mutations (update/delete/archive/merge) bump
+    // project_memory_epoch instead, which IS a correct m[0] invalidation above.
     if (args.state.cachedM0MaxMutationId !== current.maxMutationId) {
         return { value: true, reason: "max_mutation_id" };
     }
     if ((args.state.cachedM0ProjectDocsHash ?? "") !== current.projectDocsHash) {
         return { value: true, reason: "project_docs_hash" };
     }
-    if (args.state.cachedM0SessionFactsVersion !== current.sessionFactsVersion) {
-        return { value: true, reason: "session_facts_version" };
-    }
+    // session_facts retired as a render source (v2): facts are promoted memories
+    // now, so a facts-version change never affects m[0] bytes. (getSessionFactsVersion
+    // is pinned to 0; this branch is kept inert-safe but never fires.)
     if ((args.state.cachedM0UpgradeState ?? null) !== current.upgradeState) {
         return { value: true, reason: "upgrade_state" };
     }
@@ -757,9 +764,16 @@ export function trimMemoriesToBudgetV2(
     });
 
     const selected: Memory[] = [];
-    let usedTokens = 0;
+    // Seed with the <project-memory> wrapper cost so the budget covers the whole
+    // injected block, not just the line bodies.
+    let usedTokens = MEMORY_BLOCK_WRAPPER_TOKENS;
     for (const memory of selectionOrder) {
-        const memoryTokens = estimateTokens(`- ${memory.content}`) + 6;
+        // Measure the EXACT v2 line that renderMemoryBlockV2 emits (with
+        // id/category/importance attributes). Using a lighter shape here
+        // under-counts and lets the rendered block overshoot the budget
+        // (e.g. a v1 "- content" estimate fit 202 memories at ~8K while the v2
+        // render actually injected ~11.3K against a 10K budget).
+        const memoryTokens = estimateTokens(renderMemoryLineV2(memory));
         if (usedTokens + memoryTokens > budgetTokens) continue;
         selected.push(memory);
         usedTokens += memoryTokens;
@@ -796,7 +810,10 @@ function safeGetActiveUserMemories(db: Database): UserMemory[] {
     }
 }
 
-function trimUserMemoriesToBudget(memories: UserMemory[], budgetTokens: number): UserMemory[] {
+export function trimUserMemoriesToBudget(
+    memories: UserMemory[],
+    budgetTokens: number,
+): UserMemory[] {
     const selected: UserMemory[] = [];
     let usedTokens = 0;
     for (const memory of memories) {
@@ -813,15 +830,24 @@ function readM0Compartments(db: Database, sessionId: string): M0Compartment[] {
         m0CompartmentStatements,
         db,
         `SELECT id, session_id, sequence, start_message, end_message, start_message_id,
-                end_message_id, title, content, created_at, importance, legacy
+                end_message_id, title, content, p1, p2, p3, p4, episode_type,
+                created_at, importance, legacy
            FROM compartments
           WHERE session_id = ?
           ORDER BY sequence ASC`,
     ).all(sessionId) as Array<Record<string, unknown>>;
 
-    return rows.map((row) => ({
+    return rows.map(rowToM0Compartment);
+}
+
+function nullableString(value: unknown): string | null {
+    return typeof value === "string" ? value : null;
+}
+
+function rowToM0Compartment(row: Record<string, unknown>): M0Compartment {
+    return {
         id: Number(row.id ?? 0),
-        sessionId: String(row.session_id ?? sessionId),
+        sessionId: String(row.session_id ?? ""),
         sequence: Number(row.sequence ?? 0),
         startMessage: Number(row.start_message ?? 0),
         endMessage: Number(row.end_message ?? 0),
@@ -829,10 +855,15 @@ function readM0Compartments(db: Database, sessionId: string): M0Compartment[] {
         endMessageId: String(row.end_message_id ?? ""),
         title: String(row.title ?? ""),
         content: String(row.content ?? ""),
-        createdAt: Number(row.created_at ?? 0),
+        p1: nullableString(row.p1),
+        p2: nullableString(row.p2),
+        p3: nullableString(row.p3),
+        p4: nullableString(row.p4),
         importance: Number(row.importance ?? 50),
+        episodeType: nullableString(row.episode_type),
         legacy: Number(row.legacy ?? 0),
-    }));
+        createdAt: Number(row.created_at ?? 0),
+    };
 }
 
 function readNewCompartments(
@@ -844,31 +875,26 @@ function readNewCompartments(
         newCompartmentStatements,
         db,
         `SELECT id, session_id, sequence, start_message, end_message, start_message_id,
-                end_message_id, title, content, created_at, importance, legacy
+                end_message_id, title, content, p1, p2, p3, p4, episode_type,
+                created_at, importance, legacy
            FROM compartments
           WHERE session_id = ? AND sequence > ?
           ORDER BY sequence ASC`,
     ).all(sessionId, afterSequence) as Array<Record<string, unknown>>;
-    return rows.map((row) => ({
-        id: Number(row.id ?? 0),
-        sessionId: String(row.session_id ?? sessionId),
-        sequence: Number(row.sequence ?? 0),
-        startMessage: Number(row.start_message ?? 0),
-        endMessage: Number(row.end_message ?? 0),
-        startMessageId: String(row.start_message_id ?? ""),
-        endMessageId: String(row.end_message_id ?? ""),
-        title: String(row.title ?? ""),
-        content: String(row.content ?? ""),
-        createdAt: Number(row.created_at ?? 0),
-        importance: Number(row.importance ?? 50),
-        legacy: Number(row.legacy ?? 0),
-    }));
+    return rows.map(rowToM0Compartment);
 }
 
 function readNewMemoriesForM1(
     db: Database,
     projectPath: string | undefined,
     afterId: number,
+    // Expiry cutoff is FROZEN to the m[0] materialization timestamp, NOT live
+    // Date.now(). Defer passes replay the same markers (same materializedAt), so
+    // the set of "not-yet-expired" memories rendered into m[1] stays byte-stable
+    // until the next materialization. Using live Date.now() here would let a
+    // memory crossing its expires_at between two defer passes silently change
+    // m[1] bytes with no DB mutation — a cache-stability (Anthropic prefix) bust.
+    expiryCutoff: number,
 ): Memory[] {
     if (!projectPath) return [];
     const rows = db
@@ -881,18 +907,28 @@ function readNewMemoriesForM1(
                 AND (expires_at IS NULL OR expires_at > ?)
               ORDER BY ${MEMORY_CATEGORY_ORDER_SQL}, id ASC`,
         )
-        .all(projectPath, afterId, Date.now())
+        .all(projectPath, afterId, expiryCutoff)
         .filter(isMemoryRow);
     return rows.map((row) => ({ ...row }));
 }
 
-function renderMemoryBlockV2(memories: Memory[], wrapper = "project-memory"): string {
+/**
+ * Render ONE memory's v2 line exactly as it lands in the <project-memory> block.
+ * Shared by renderMemoryBlockV2 (the wire render) and trimMemoriesToBudgetV2
+ * (the budget accounting) so the budget is measured against the SAME bytes that
+ * get injected — including the id/category/importance attributes. Measuring a
+ * lighter shape (e.g. "- content") under-counts and lets the injected block
+ * exceed the configured budget.
+ */
+export function renderMemoryLineV2(memory: Memory): string {
+    return `  <memory id="${memory.id}" category="${escapeXmlAttr(memory.category)}" importance="${memory.importance ?? 50}">${escapeXmlContent(memory.content)}</memory>`;
+}
+
+export function renderMemoryBlockV2(memories: Memory[], wrapper = "project-memory"): string {
     if (memories.length === 0) return "";
     const lines = [`<${wrapper}>`];
     for (const memory of memories) {
-        lines.push(
-            `  <memory id="${memory.id}" category="${escapeXmlAttr(memory.category)}" importance="${memory.importance ?? 50}">${escapeXmlContent(memory.content)}</memory>`,
-        );
+        lines.push(renderMemoryLineV2(memory));
     }
     lines.push(`</${wrapper}>`);
     return lines.join("\n");
@@ -908,94 +944,22 @@ function renderUserProfileBlock(memories: UserMemory[], wrapper = "user-profile"
     return lines.join("\n");
 }
 
-function renderFactsBlock(facts: SessionFact[], wrapper = "session_facts"): string {
-    if (facts.length === 0) return "";
-    const lines = [`<${wrapper}>`];
-    for (const fact of facts) {
-        lines.push(
-            `  <fact category="${escapeXmlAttr(fact.category)}">${escapeXmlContent(fact.content)}</fact>`,
-        );
-    }
-    lines.push(`</${wrapper}>`);
-    return lines.join("\n");
-}
-
-function bodyForTier(content: string, tier: number): string {
-    if (tier <= 1) return content;
-    if (tier === 2)
-        return content.length > 1_200 ? `${content.slice(0, 1_200).trimEnd()}…` : content;
-    return content.length > 420 ? `${content.slice(0, 420).trimEnd()}…` : content;
-}
-
-function legacyTier(compartment: M0Compartment): number {
-    return /^U:/m.test(compartment.content) ? 3 : 4;
-}
-
-function initialTier(
-    compartment: M0Compartment,
-    index: number,
-    total: number,
-    pressure: number,
-): number {
-    if (compartment.legacy === 1) return legacyTier(compartment);
-    const age = total - index - 1;
-    const importance = Math.max(1, Math.min(100, compartment.importance || 50));
-    const halfLife = 2 + importance / 20;
-    return Math.max(1, Math.min(4, 1 + Math.floor((age * pressure) / halfLife)));
-}
-
-function renderOneCompartment(compartment: M0Compartment, tier: number): string {
-    const baseAttrs = `start="${compartment.startMessage}" end="${compartment.endMessage}" title="${escapeXmlAttr(compartment.title)}"`;
-    if (tier >= 5) return "";
-    if (tier === 4) return `<compartment ${baseAttrs} />`;
-    return [
-        `<compartment ${baseAttrs}>`,
-        escapeXmlContent(bodyForTier(compartment.content, tier)),
-        "</compartment>",
-    ].join("\n");
-}
-
+/**
+ * v2 decayed session-history rendering delegates entirely to the shared
+ * `decay-render` module (which uses the validated `decay-curve` formula). This
+ * keeps OpenCode and Pi byte-identical and ensures the council-validated decay
+ * math is the single source of truth — no local approximation lives here.
+ *
+ * Facts are NOT a render input (v2 faithful: facts = promoted memories).
+ */
 function renderSessionHistoryWithDecay(args: {
     compartments: M0Compartment[];
-    facts: SessionFact[];
     historyBudgetTokens: number;
-    pressure: number;
 }): string {
-    const tiers = args.compartments.map((compartment, index) =>
-        initialTier(compartment, index, args.compartments.length, args.pressure),
-    );
-
-    const render = (): string => {
-        const parts: string[] = [];
-        for (let i = 0; i < args.compartments.length; i++) {
-            const rendered = renderOneCompartment(args.compartments[i], tiers[i]);
-            if (rendered.length > 0) parts.push(rendered);
-        }
-        const factsBlock = renderFactsBlock(args.facts);
-        if (factsBlock) parts.push(factsBlock);
-        return parts.join("\n\n");
-    };
-
-    let body = render();
-    let guard = args.compartments.length * 5;
-    while (
-        args.historyBudgetTokens > 0 &&
-        estimateTokens(body) > args.historyBudgetTokens &&
-        guard > 0
-    ) {
-        let demoted = false;
-        for (let i = 0; i < tiers.length; i++) {
-            if (tiers[i] < 5) {
-                tiers[i] += 1;
-                demoted = true;
-                break;
-            }
-        }
-        if (!demoted) break;
-        body = render();
-        guard -= 1;
-    }
-    return body;
+    return renderDecayedCompartments({
+        compartments: args.compartments,
+        historyBudgetTokens: args.historyBudgetTokens,
+    });
 }
 
 export function renderM0(args: {
@@ -1018,11 +982,14 @@ export function renderM0(args: {
     );
     if (userProfile) sections.push(userProfile);
 
+    // The +15% drift "pressure multiplier" maps to a proportionally tighter
+    // effective budget (lower budget → higher curve pressure → more demotion),
+    // keeping decay-curve.ts the single source of pressure math.
+    const baseBudget = args.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS;
+    const effectiveBudget = baseBudget / Math.max(1, args.decayPressureMultiplier ?? 1);
     const sessionHistory = renderSessionHistoryWithDecay({
         compartments: args.compartments,
-        facts: args.facts,
-        historyBudgetTokens: args.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS,
-        pressure: args.decayPressureMultiplier ?? 1,
+        historyBudgetTokens: effectiveBudget,
     });
     sections.push(
         sessionHistory.length > 0
@@ -1047,6 +1014,23 @@ function applyMarkersToState(state: M0M1State, m0Bytes: Buffer, markers: M0Snaps
     state.cachedM0SessionFactsVersion = markers.sessionFactsVersion;
     state.cachedM0UpgradeState = markers.upgradeState;
     state.snapshotMarkers = markers;
+}
+
+/**
+ * Real-tokenizer size of ONLY the <session-history> slice of a rendered m[0].
+ *
+ * The over-budget tightening loop must compare the history block against the
+ * history budget — NOT the whole m[0]. m[0] also carries <project-docs>,
+ * <user-profile>, and <project-memory>, each with its own budget; charging
+ * those fixed blocks against the history budget falsely inflates measured cost,
+ * over-tightens decay pressure, and starves session-history (e.g. project-docs
+ * ~20K eating into a 98K history budget collapsed the effective budget to ~73K,
+ * archiving ~157 extra compartments). Returns 0 when no session-history slice is
+ * present (empty-history placeholder), so the loop never fires on empty history.
+ */
+function historySliceTokens(m0Text: string): number {
+    const slice = extractM0Block(m0Text, "session-history");
+    return slice ? estimateTokens(slice) : 0;
 }
 
 export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
@@ -1075,7 +1059,11 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             : { renderedBlock: "", canonicalHash: "" };
         snapshotMarkers.projectDocsHash = docs.canonicalHash;
         compartments = readM0Compartments(options.db, options.sessionId);
-        facts = getSessionFacts(options.db, options.sessionId);
+        // v2 faithful facts: session_facts is retired as a render source (facts
+        // promote to project memory, rendered below via `memories`). Keep `facts`
+        // empty so renderSessionHistoryWithDecay never emits a <session_facts>
+        // block and no stale pre-v2 rows leak into m[0].
+        facts = [];
         memories = projectPath
             ? getMemoriesByProject(options.db, projectPath, ["active", "permanent"])
             : [];
@@ -1106,7 +1094,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
 
     let attempts = 0;
     const budget = options.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS;
-    while (budget > 0 && estimateTokens(m0Text) > budget * 1.05 && attempts < 3) {
+    while (budget > 0 && historySliceTokens(m0Text) > budget * 1.05 && attempts < 3) {
         decayPressureMultiplier *= 1.15;
         m0Text = renderM0({
             projectDocs: docs.renderedBlock,
@@ -1135,11 +1123,19 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             projectPath,
             projectDirectory,
         });
+        // NOTE: maxMemoryId is deliberately EXCLUDED from this stale-check.
+        // Additive memory writes (write/promote) do not bump projectMemoryEpoch
+        // and must NOT bust m[0] (they surface in m[1] via the persisted
+        // maxMemoryId watermark). A new memory landing between Phase 1 and Phase 3
+        // does not invalidate the rendered m[0] — m[0] correctly reflects the
+        // snapshot's memory set and the new one appears in m[1]. Non-additive
+        // mutations (update/delete/archive/merge) bump projectMemoryEpoch and ARE
+        // caught below. Including maxMemoryId here would convert every additive
+        // write into a spurious contention/re-materialize.
         const stale =
             current.projectMemoryEpoch !== snapshotMarkers.projectMemoryEpoch ||
             current.projectUserProfileVersion !== snapshotMarkers.projectUserProfileVersion ||
             current.maxCompartmentSeq !== snapshotMarkers.maxCompartmentSeq ||
-            current.maxMemoryId !== snapshotMarkers.maxMemoryId ||
             current.maxMutationId !== snapshotMarkers.maxMutationId ||
             current.projectDocsHash !== snapshotMarkers.projectDocsHash ||
             current.sessionFactsVersion !== snapshotMarkers.sessionFactsVersion ||
@@ -1161,6 +1157,23 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             sessionFactsVersion: snapshotMarkers.sessionFactsVersion,
             upgradeState: snapshotMarkers.upgradeState,
         });
+
+        // v2 path persists the rendered-memory identity itself. `memory_block_ids`
+        // / `memory_block_count` are otherwise written ONLY by the dead legacy v1
+        // render path, so without this they stay frozen at whatever the last legacy
+        // render wrote — wrong sidebar "Injected" count AND a stale ctx_search
+        // hide-already-visible filter after any memory change (e.g. the migration
+        // delete+reinserts memories with NEW ids; the old ids linger here).
+        // dogfood 2026-05-30: AFT showed "Injected 256" against 124 live memories,
+        // all 256 ids deleted. Same transaction as the m[0] snapshot so the cached
+        // bytes and their id manifest never diverge.
+        const renderedMemoryIds = trimmed.renderOrder.map((m) => m.id);
+        options.db
+            .prepare(
+                "UPDATE session_meta SET memory_block_count = ?, memory_block_ids = ? WHERE session_id = ?",
+            )
+            .run(renderedMemoryIds.length, JSON.stringify(renderedMemoryIds), options.sessionId);
+
         options.db.exec("COMMIT");
     } catch (error) {
         try {
@@ -1220,12 +1233,18 @@ export function renderM1(options: M0M1RenderOptions, markers: M0SnapshotMarkers)
     if (newCompartments.length > 0) {
         blocks.push(
             `<new-compartments>\n${newCompartments
-                .map((compartment) => renderOneCompartment(compartment, 1))
+                .map((compartment) => renderCompartmentAtTier(compartment, 1))
                 .join("\n\n")}\n</new-compartments>`,
         );
     }
 
-    const newMemories = readNewMemoriesForM1(options.db, options.projectPath, markers.maxMemoryId);
+    const newMemories = readNewMemoriesForM1(
+        options.db,
+        options.projectPath,
+        markers.maxMemoryId,
+        // Freeze expiry to the materialization timestamp for defer-pass byte stability.
+        markers.materializedAt,
+    );
     const trimmedNewMemories = trimMemoriesToBudgetV2(
         options.sessionId,
         newMemories,
@@ -1257,11 +1276,9 @@ export function renderM1(options: M0M1RenderOptions, markers: M0SnapshotMarkers)
         if (profileBlock) blocks.push(profileBlock);
     }
 
-    const currentFactsVersion = getSessionFactsVersion(options.db, options.sessionId);
-    if (currentFactsVersion !== markers.sessionFactsVersion) {
-        const factsBlock = renderFactsBlock(getSessionFacts(options.db, options.sessionId));
-        if (factsBlock) blocks.push(factsBlock);
-    }
+    // v2 faithful facts: session_facts is retired as a render source. Fresh
+    // facts reach the agent as promoted memories via the new-memories block
+    // above (maxMemoryId watermark), not via a <session_facts> delta here.
 
     if (blocks.length === 0) return M1_EMPTY_PLACEHOLDER;
     return `<session-history-since>\n${blocks.join("\n")}\n</session-history-since>`;
@@ -1288,6 +1305,86 @@ function prependM0M1Messages(
             parts: [{ type: "text", text: m1Text }],
         },
     );
+}
+
+/**
+ * Render a fresh m[0] from current DB state WITHOUT persisting it or taking the
+ * materialize lock. Last-resort fallback for injectM0M1 when materialization
+ * loses the lock (contention exhausted) AND there is no cached baseline to reuse
+ * — e.g. the cache was cleared this pass by a history refresh and then a sibling
+ * process held the lock. Dropping injection would send the model zero session
+ * history; rendering fresh (un-cached) keeps history present for this pass while
+ * the next pass re-materializes and persists. Mirrors Pi's renderM0Pi fallback.
+ * Uses a plain read (no BEGIN IMMEDIATE) since we are explicitly NOT persisting.
+ */
+function renderFreshM0NonPersisted(options: M0M1RenderOptions): {
+    m0Bytes: Buffer;
+    snapshotMarkers: M0SnapshotMarkers;
+} {
+    const projectPath = options.projectPath;
+    const projectDirectory = options.projectDirectory;
+    const snapshotMarkers = readCurrentM0SnapshotMarkers({
+        db: options.db,
+        sessionId: options.sessionId,
+        projectPath,
+        projectDirectory,
+    });
+    const docs = projectDirectory
+        ? readProjectDocsCanonical(projectDirectory)
+        : { renderedBlock: "", canonicalHash: "" };
+    snapshotMarkers.projectDocsHash = docs.canonicalHash;
+    // CACHE STABILITY: materializedAt feeds the m[1] memory-expiry cutoff
+    // (renderM1). It MUST be stable across consecutive fallback passes, or two
+    // defer passes that straddle a memory's expires_at would render different
+    // m[1] bytes with zero DB mutation. Never use live Date.now() here. Reuse
+    // the last persisted materialization timestamp; if none exists (cache fully
+    // cleared this pass), use 0 (stable: renders all memories with no expiry
+    // filtering, deterministic across passes — matches Pi fallback).
+    snapshotMarkers.materializedAt = options.state.cachedM0MaterializedAt ?? 0;
+    const compartments = readM0Compartments(options.db, options.sessionId);
+    // Use the SAME frozen cutoff for the baseline memory read as m[1] does, so a
+    // memory crossing expires_at between two fallback passes can't shift the m[0]
+    // baseline bytes either (live Date.now() default would reintroduce drift).
+    const memories = projectPath
+        ? getMemoriesByProject(
+              options.db,
+              projectPath,
+              ["active", "permanent"],
+              snapshotMarkers.materializedAt,
+          )
+        : [];
+    const userMemories = safeGetActiveUserMemories(options.db);
+    const memoryBudget = options.memoryInjectionBudgetTokens ?? DEFAULT_MEMORY_BUDGET_TOKENS;
+    const trimmed = trimMemoriesToBudgetV2(options.sessionId, memories, memoryBudget);
+    const budget = options.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS;
+    let decayPressureMultiplier = 1;
+    let m0Text = renderM0({
+        projectDocs: docs.renderedBlock,
+        userProfileBaseline: userMemories,
+        compartments,
+        memories: trimmed.renderOrder,
+        facts: [],
+        historyBudgetTokens: budget,
+        userProfileBudgetTokens: options.userProfileBudgetTokens,
+        decayPressureMultiplier,
+    });
+    let attempts = 0;
+    while (budget > 0 && historySliceTokens(m0Text) > budget * 1.05 && attempts < 3) {
+        decayPressureMultiplier *= 1.15;
+        m0Text = renderM0({
+            projectDocs: docs.renderedBlock,
+            userProfileBaseline: userMemories,
+            compartments,
+            memories: trimmed.renderOrder,
+            facts: [],
+            historyBudgetTokens: budget,
+            userProfileBudgetTokens: options.userProfileBudgetTokens,
+            decayPressureMultiplier,
+        });
+        attempts += 1;
+    }
+    if (m0Text.length === 0) m0Text = M0_EMPTY_BODY;
+    return { m0Bytes: Buffer.from(m0Text, "utf8"), snapshotMarkers };
 }
 
 export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
@@ -1317,7 +1414,11 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
             applyMarkersToState(options.state, materialized.m0Bytes, materialized.snapshotMarkers);
             rematerialized = true;
         } catch (error) {
-            if (error instanceof MaterializeContentionError && options.state.cachedM0Bytes) {
+            if (!(error instanceof MaterializeContentionError)) throw error;
+            if (options.state.cachedM0Bytes) {
+                // Preferred fallback: reuse the cached baseline. A sibling process
+                // mutated state mid-materialization; serving the slightly stale
+                // cached m[0] this pass is correct and the next pass retries.
                 contentionExhausted = true;
                 options.state.snapshotMarkers =
                     options.state.snapshotMarkers ?? snapshotMarkersFromCachedM0(options.state);
@@ -1326,7 +1427,20 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
                     `m[0] materialization contention exhausted after ${error.retries} retries; reusing cached m[0]`,
                 );
             } else {
-                throw error;
+                // No cached baseline to reuse — happens when the cache was cleared
+                // THIS pass (history refresh) and then hit contention. Dropping
+                // injection would send the model ZERO session history, so render a
+                // fresh non-persisted m[0] as a last resort (mirrors Pi
+                // injectM0M1Pi). Not cached because we couldn't win the lock; the
+                // next pass re-materializes and persists.
+                const fresh = renderFreshM0NonPersisted(options);
+                options.state.cachedM0Bytes = fresh.m0Bytes;
+                options.state.snapshotMarkers = fresh.snapshotMarkers;
+                contentionExhausted = true;
+                sessionLog(
+                    options.sessionId,
+                    `m[0] materialization contention exhausted after ${error.retries} retries with no cached fallback; rendered fresh non-persisted m[0]`,
+                );
             }
         }
     } else {
@@ -1338,8 +1452,39 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
         throw new RenderM1InvalidMarkersError(options.sessionId);
     }
 
-    const m0Text = decodeM0Bytes(options.state.cachedM0Bytes) ?? M0_EMPTY_BODY;
-    const m1Text = renderM1(options, options.state.snapshotMarkers);
+    let m0Text = decodeM0Bytes(options.state.cachedM0Bytes) ?? M0_EMPTY_BODY;
+    let m1Text = renderM1(options, options.state.snapshotMarkers);
+
+    // Forced +15% drift refold (spec ARCHITECTURE.md: "A forced refold also
+    // fires at +15% budget drift if no natural hard bust occurred"). When m[1]
+    // has drifted past 15% of m[0]'s size without a materialization this pass,
+    // fold the accumulated delta into a fresh m[0] baseline so the volatile
+    // block doesn't grow unbounded between hard busts. Skipped when contention
+    // exhausted (we're already reusing a cached m[0] and must not thrash).
+    if (
+        !rematerialized &&
+        !contentionExhausted &&
+        m0Text.length > 0 &&
+        // Only refold on GENUINE accumulated delta — never when m[1] is just the
+        // empty placeholder. Otherwise a tiny baseline (near-empty session) would
+        // see placeholder > m0*0.15 and refold every defer pass, breaking the
+        // byte-identical-defer cache invariant.
+        m1Text !== M1_EMPTY_PLACEHOLDER &&
+        m1Text.length > m0Text.length * 0.15
+    ) {
+        try {
+            const refolded = materializeWithRetry(options);
+            applyMarkersToState(options.state, refolded.m0Bytes, refolded.snapshotMarkers);
+            rematerialized = true;
+            m0Text = decodeM0Bytes(options.state.cachedM0Bytes) ?? M0_EMPTY_BODY;
+            m1Text = renderM1(options, options.state.snapshotMarkers);
+        } catch (error) {
+            // Contention during the drift refold is non-fatal: keep the current
+            // (un-refolded) m[0]/m[1]; the next pass retries the fold.
+            if (!(error instanceof MaterializeContentionError)) throw error;
+        }
+    }
+
     if (options.messages) {
         prependM0M1Messages(options.sessionId, options.messages, m0Text, m1Text);
     }

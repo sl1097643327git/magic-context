@@ -25,9 +25,22 @@ export interface SidebarSnapshot {
     factTokens: number;
     memoryTokens: number;
     /**
+     * Token estimate of the injected <project-docs> block (root ARCHITECTURE.md
+     * + STRUCTURE.md) that lives in m[0] in v2. Part of the message stream, not
+     * conversation. Display layer shows this as "Docs".
+     */
+    docsTokens: number;
+    /**
+     * Token estimate of the injected <user-profile> block (promoted user
+     * memories) that lives in m[0] in v2. Part of the message stream, not
+     * conversation. Display layer shows this as "Profile".
+     */
+    profileTokens: number;
+    /**
      * Token estimate of real user/assistant discussion (text + reasoning +
-     * image parts) inside messages, excluding injected <session-history>
-     * blocks. Display layer shows this as "Conversation".
+     * image parts) inside messages, excluding injected <session-history>,
+     * <project-docs>, and <user-profile> blocks. Display layer shows this as
+     * "Conversation".
      */
     conversationTokens: number;
     /**
@@ -57,6 +70,21 @@ export interface SidebarSnapshot {
     executeThreshold: number;
     newWorkTokens?: number | null;
     totalInputTokens?: number | null;
+    /**
+     * Live recomp / session-upgrade progress for this session, or null when no
+     * recomp is running (and no recent terminal state is being shown). Drives the
+     * sidebar "Recomp"/"Upgrade" progress bar and the /ctx-status dialog. Mirrors
+     * the runtime `RecompProgress` shape from compartment-runner-types.ts.
+     */
+    recompProgress?: {
+        phase: "recomp" | "migration" | "done" | "failed";
+        processedMessages: number;
+        totalMessages: number;
+        passCount: number;
+        compartmentsCreated: number;
+        message?: string;
+        note?: string;
+    } | null;
 }
 
 export interface StatusDetail extends SidebarSnapshot {

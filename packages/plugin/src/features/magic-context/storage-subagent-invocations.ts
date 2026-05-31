@@ -130,6 +130,29 @@ export function recordSubagentInvocation(db: Database, input: SubagentInvocation
     return Number(result.lastInsertRowid);
 }
 
+/**
+ * Newest `historian` invocation id for a session (or null if none yet).
+ *
+ * Used to FK-link a `historian_runs` row to the invocation that produced it:
+ * historian runs are serialized per session (compartmentInProgress lock), so the
+ * latest historian invocation recorded between a pre-run baseline and the run's
+ * end is the one for this run.
+ */
+export function getLatestHistorianInvocationId(db: Database, sessionId: string): number | null {
+    try {
+        const row = db
+            .prepare(
+                `SELECT id FROM subagent_invocations
+                 WHERE session_id = ? AND subagent = 'historian'
+                 ORDER BY id DESC LIMIT 1`,
+            )
+            .get(sessionId) as { id?: number } | undefined;
+        return typeof row?.id === "number" ? row.id : null;
+    } catch {
+        return null;
+    }
+}
+
 export function getSubagentInvocations(
     db: Database,
     sessionId: string,

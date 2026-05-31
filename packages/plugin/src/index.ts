@@ -21,7 +21,6 @@ import { createAutoUpdateCheckerHook } from "./hooks/auto-update-checker";
 import {
     COMPARTMENT_AGENT_SYSTEM_PROMPT,
     HISTORIAN_EDITOR_SYSTEM_PROMPT,
-    USER_OBSERVATIONS_APPENDIX,
 } from "./hooks/magic-context/compartment-prompt";
 import { createLiveSessionState } from "./hooks/magic-context/live-session-state";
 import { cleanupConflictWarnings, sendConflictWarning } from "./plugin/conflict-warning-hook";
@@ -474,9 +473,12 @@ const plugin: Plugin = async (ctx) => {
                 ),
                 [HISTORIAN_AGENT]: buildHiddenAgentConfig(
                     HISTORIAN_AGENT,
-                    isDreamerRunnable(pluginConfig) && pluginConfig.dreamer?.user_memories?.enabled
-                        ? COMPARTMENT_AGENT_SYSTEM_PROMPT + USER_OBSERVATIONS_APPENDIX
-                        : COMPARTMENT_AGENT_SYSTEM_PROMPT,
+                    // v2: the v8.7.3 historian prompt always describes the
+                    // <user_observations> output; observations are simply not
+                    // promoted to user-profile when user_memories is disabled
+                    // (gated in the runner). Keeping the system prompt constant
+                    // preserves prompt-cache byte stability.
+                    COMPARTMENT_AGENT_SYSTEM_PROMPT,
                     HISTORIAN_ALLOWED_TOOLS,
                     historianAgentOverrides,
                 ),

@@ -630,6 +630,9 @@ export async function runDream(args: {
             log(`[dreamer] starting task: ${taskName}`);
             const taskStartedAt = Date.now();
             let agentSessionId: string | null = null;
+            // Keep FAILED dreamer child sessions for debugging (the task's model
+            // output + error stay inspectable); delete only on success.
+            let taskFailed = false;
             const invocationStartedAt = Date.now();
             let invocationRecorded = false;
             const recordInvocation = (params: {
@@ -767,6 +770,7 @@ export async function runDream(args: {
                 lastErrorSignature = null;
                 consecutiveSameErrorFailures = 0;
             } catch (error) {
+                taskFailed = true;
                 recordInvocation({ status: lostLease ? "aborted" : "failed", error });
                 const durationMs = Date.now() - taskStartedAt;
                 const errorDescription = describeError(error);
@@ -811,7 +815,10 @@ export async function runDream(args: {
                 }
             } finally {
                 clearInterval(leaseRenewalInterval);
-                if (agentSessionId) {
+                // Delete the child session only on SUCCESS. Keep failed sessions so
+                // the task's prompt / model output / error can be inspected (the
+                // failure is already recorded in subagent_invocations).
+                if (agentSessionId && !taskFailed) {
                     await args.client.session
                         .delete({
                             path: { id: agentSessionId },
@@ -819,6 +826,10 @@ export async function runDream(args: {
                         .catch((error: unknown) => {
                             log("[dreamer] failed to delete child session:", error);
                         });
+                } else if (agentSessionId && taskFailed) {
+                    log(
+                        `[dreamer] KEEPING failed child session ${agentSessionId} for task ${taskName} (debugging)`,
+                    );
                 }
             }
 

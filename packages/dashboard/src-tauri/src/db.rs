@@ -299,11 +299,21 @@ pub struct Compartment {
     pub start_time: Option<i64>,
     /// Resolved from OpenCode DB using end_message_id
     pub end_time: Option<i64>,
-    /// Compression depth (max across the compartment's ordinal range).
-    /// 0 = uncompressed by the compressor, 1 = merged, 2 = caveman-lite,
-    /// 3 = caveman-full, 4 = caveman-ultra, 5 = title-only collapse.
-    /// Falls back to 0 when no `compression_depth` rows cover this range.
-    pub compression_depth: i64,
+    /// v2 decay-rate score (1–100). Higher = decays into lower render tiers
+    /// more slowly. Default 50.
+    pub importance: i64,
+    /// v2 episode classification — may be comma-joined (e.g. "design,bug").
+    /// `None` for legacy rows.
+    pub episode_type: Option<String>,
+    /// v2 paraphrase tiers (P1 verbose → P4 anchor-only). `None`/empty for
+    /// legacy rows that predate the tiered format.
+    pub p1: Option<String>,
+    pub p2: Option<String>,
+    pub p3: Option<String>,
+    pub p4: Option<String>,
+    /// 1 = legacy pre-v2 compartment (renders degraded, no real tiers);
+    /// 0 = v2 tiered compartment.
+    pub legacy: i64,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -511,6 +521,18 @@ fn estimate_tokens(chars: i64) -> i64 {
 /// XML overhead for compartments (approximate: <compartment title="...">...</compartment>)
 const COMPARTMENT_XML_OVERHEAD: i64 = 50;
 
+/// Extract the `<session-history>…</session-history>` block (inclusive of the
+/// tags) from a rendered m[0] snapshot. Returns `None` if the block is absent
+/// (e.g. a snapshot that predates materialization). This is the real on-wire
+/// decayed compartment render, used to size the Compartments token bucket.
+fn extract_session_history_slice(m0_text: &str) -> Option<String> {
+    const OPEN: &str = "<session-history>";
+    const CLOSE: &str = "</session-history>";
+    let start = m0_text.find(OPEN)?;
+    let end = m0_text[start..].find(CLOSE)? + start + CLOSE.len();
+    Some(m0_text[start..end].to_string())
+}
+
 pub fn get_context_token_breakdown(
     conn: &Connection,
     session_id: &str,
@@ -529,25 +551,58 @@ pub fn get_context_token_breakdown(
         return Ok(None);
     }
 
-    // Get compartment content length and count
-    let (compartment_chars, compartment_count): (i64, i64) = conn
+    // Compartment count (for display) — always the real row count.
+    let compartment_count: i64 = conn
         .query_row(
-            "SELECT COALESCE(SUM(LENGTH(title) + LENGTH(content) + ?2), 0), COUNT(*) 
-             FROM compartments WHERE session_id = ?1",
-            rusqlite::params![session_id, COMPARTMENT_XML_OVERHEAD],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .unwrap_or((0, 0));
-
-    // Get fact content length and count
-    let (fact_chars, fact_count): (i64, i64) = conn
-        .query_row(
-            "SELECT COALESCE(SUM(LENGTH(category) + LENGTH(content) + 20), 0), COUNT(*) 
-             FROM session_facts WHERE session_id = ?1",
+            "SELECT COUNT(*) FROM compartments WHERE session_id = ?1",
             [session_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| r.get(0),
         )
-        .unwrap_or((0, 0));
+        .unwrap_or(0);
+
+    // v2: compartments are DECAY-RENDERED — most render at a lower tier
+    // (p2/p3/p4) or drop past the archive boundary, so the actual injected
+    // <session-history> is far smaller than Σ(full p1 content). The true
+    // on-wire size is the <session-history> slice of the persisted m[0]
+    // snapshot (cached_m0_bytes). Measuring Σp1 instead overcounts the
+    // Compartments bucket AND starves Conversation toward 0. Mirrors the
+    // plugin sidebar fix (rpc-handlers.ts).
+    let m0_bytes: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT cached_m0_bytes FROM session_meta WHERE session_id = ?1",
+            [session_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(None);
+    let compartment_chars: i64 = m0_bytes
+        .as_ref()
+        .and_then(|b| String::from_utf8(b.clone()).ok())
+        .and_then(|text| extract_session_history_slice(&text))
+        .map(|slice| slice.len() as i64)
+        .unwrap_or_else(|| {
+            // No materialized m[0] yet (brand-new / pre-first-materialization).
+            // Fall back to the Σp1 estimate so the bucket isn't blank on a cold
+            // session; it self-corrects to the decayed size on first render.
+            conn.query_row(
+                "SELECT COALESCE(SUM(LENGTH(title) + LENGTH(content) + ?2), 0)
+                 FROM compartments WHERE session_id = ?1",
+                rusqlite::params![session_id, COMPARTMENT_XML_OVERHEAD],
+                |r| r.get(0),
+            )
+            .unwrap_or(0)
+        });
+
+    // v2: facts are retired as a render source (promoted to memories), so they
+    // contribute 0 render tokens. fact_count stays available for display from
+    // the vestigial session_facts table, but fact_chars is 0.
+    let fact_chars: i64 = 0;
+    let fact_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM session_facts WHERE session_id = ?1",
+            [session_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
 
     // Get memory block cache (rendered XML) and count from session_meta
     let (memory_cache_str, memory_count): (Option<String>, i64) = conn
@@ -3070,21 +3125,14 @@ pub fn get_compartments(
     conn: &Connection,
     session_id: &str,
 ) -> Result<Vec<Compartment>, rusqlite::Error> {
-    // Correlated subquery picks the MAX depth across the compartment's
-    // raw-ordinal range. In production the compressor updates depths in
-    // contiguous ranges, so MIN/MAX/AVG usually agree, but if any future
-    // partial-recomp leaves a mixed range the MAX is the right summary
-    // (it's the most heavily compressed slice the user should be aware of).
-    // COALESCE(..., 0) handles compartments that haven't been touched by
-    // the compressor at all — those have no `compression_depth` rows.
+    // v2 tiered compartments: read the paraphrase tiers (p1–p4), the
+    // decay-rate `importance`, and `episode_type` directly off the row.
+    // `legacy=1` rows predate the tiered format (p1–p4 NULL) and render
+    // degraded on the frontend. `content` mirrors p1 for v2 rows.
     let mut stmt = conn.prepare(
         "SELECT c.id, c.session_id, c.sequence, c.start_message, c.end_message,
                 c.start_message_id, c.end_message_id, c.title, c.content, c.created_at,
-                COALESCE((
-                  SELECT MAX(cd.depth) FROM compression_depth cd
-                  WHERE cd.session_id = c.session_id
-                    AND cd.message_ordinal BETWEEN c.start_message AND c.end_message
-                ), 0) AS compression_depth
+                c.importance, c.episode_type, c.p1, c.p2, c.p3, c.p4, c.legacy
          FROM compartments c
          WHERE c.session_id = ?1
          ORDER BY c.sequence DESC",
@@ -3104,7 +3152,13 @@ pub fn get_compartments(
                 created_at: row.get(9)?,
                 start_time: None,
                 end_time: None,
-                compression_depth: row.get(10)?,
+                importance: row.get::<_, Option<i64>>(10)?.unwrap_or(50),
+                episode_type: row.get(11)?,
+                p1: row.get(12)?,
+                p2: row.get(13)?,
+                p3: row.get(14)?,
+                p4: row.get(15)?,
+                legacy: row.get::<_, Option<i64>>(16)?.unwrap_or(0),
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -3757,6 +3811,36 @@ pub fn get_db_health(db_path: &PathBuf) -> DbHealth {
         size_bytes,
         wal_size_bytes,
         table_counts,
+    }
+}
+
+#[cfg(test)]
+mod session_history_slice_tests {
+    use super::extract_session_history_slice;
+
+    #[test]
+    fn extracts_inclusive_block() {
+        let m0 = "<project-docs>x</project-docs>\n<session-history>\n<compartment>hi</compartment>\n</session-history>\n<user-profile>y</user-profile>";
+        let slice = extract_session_history_slice(m0).expect("slice present");
+        assert!(slice.starts_with("<session-history>"));
+        assert!(slice.ends_with("</session-history>"));
+        assert!(slice.contains("<compartment>hi</compartment>"));
+        // Must NOT bleed into neighboring blocks.
+        assert!(!slice.contains("project-docs"));
+        assert!(!slice.contains("user-profile"));
+    }
+
+    #[test]
+    fn returns_none_when_absent() {
+        // Pre-materialization snapshot or a snapshot without compartments.
+        assert!(extract_session_history_slice("<project-docs>only</project-docs>").is_none());
+        assert!(extract_session_history_slice("").is_none());
+    }
+
+    #[test]
+    fn returns_none_on_unclosed_block() {
+        // Defensive: an open tag with no close must not panic or over-read.
+        assert!(extract_session_history_slice("<session-history>oops no close").is_none());
     }
 }
 

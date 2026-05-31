@@ -66,14 +66,6 @@ describe("MagicContextConfigSchema", () => {
                     enabled: true,
                     skip_signatures: ["<!-- magic-context: skip -->"],
                 },
-                compressor: {
-                    enabled: true,
-                    min_compartment_ratio: 1000,
-                    max_merge_depth: 5,
-                    cooldown_ms: 600_000,
-                    max_compartments_per_pass: 15,
-                    grace_compartments: 10,
-                },
                 experimental: {
                     temporal_awareness: false,
                     git_commit_indexing: {

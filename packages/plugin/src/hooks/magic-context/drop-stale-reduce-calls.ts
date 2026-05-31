@@ -47,8 +47,8 @@ function hasAnyMeaningfulPart(parts: unknown[]): boolean {
 export function dropStaleReduceCalls(messages: MessageLike[], protectedCount: number = 0): boolean {
     let didDrop = false;
     const protectedStart = messages.length - protectedCount;
-    // Sentinel-based replacement (council Finding #1) — preserve message and
-    // part array length so proxy providers that hash the serialized body see
+    // Sentinel-based replacement — preserve message and part array length so
+    // proxy providers that hash the serialized body see
     // a stable prefix. Each stripped ctx_reduce tool part becomes an empty-
     // text sentinel; messages left with no meaningful content become
     // single-sentinel-part shells.

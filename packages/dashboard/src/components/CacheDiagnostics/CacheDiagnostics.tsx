@@ -352,6 +352,14 @@ export default function CacheDiagnostics() {
   };
   const severityRank = (severity: string): number => SEVERITY_RANK[severity] ?? 0;
 
+  // Per-step events for the Cache Hit Timeline bars, oldest→newest so the
+  // chart reads left-to-right chronologically. One bar per API round-trip
+  // (step) so mid-turn busts are individually visible instead of being
+  // absorbed into a turn's final-step hit ratio.
+  const timelineEvents = createMemo(() =>
+    [...filteredEvents()].sort((a, b) => a.timestamp - b.timestamp),
+  );
+
   const cacheTurns = createMemo(() => {
     const turns: CacheTurn[] = [];
     const map = new Map<string, CacheTurn>();
@@ -594,25 +602,23 @@ export default function CacheDiagnostics() {
               }}
             >
               <span>Cache Hit Timeline</span>
-              <span>{cacheTurns().length} turns</span>
+              <span>{timelineEvents().length} steps</span>
             </div>
+            {/* Per-STEP bars (one bar per API round-trip), not per-turn. Turn
+                aggregation hid mid-turn busts inside a turn's final-step hit
+                ratio — a bust step in an otherwise-cached turn became visually
+                invisible. One bar per step surfaces every bust directly. The
+                expandable turn rows below still group steps for readability. */}
             <div class="chart-bars">
-              <For each={cacheTurns()}>
-                {(turn) => {
-                  // Parent represents the turn's FINAL state — the last step's
-                  // prompt is what actually got sent at the end of the turn.
-                  // Aggregating prompts/tokens across steps double-counts the
-                  // bust child and produces nonsense totals.
-                  const last = turn.events[turn.events.length - 1];
-                  const totalPrompt = last.cache_read + last.cache_write + last.input_tokens;
-                  const turnHitRatio =
-                    totalPrompt > 0 ? last.cache_read / totalPrompt : last.hit_ratio;
-                  const stepLabel = turn.events.length > 1 ? `\n${turn.events.length} steps` : "";
+              <For each={timelineEvents()}>
+                {(event) => {
+                  const totalPrompt = event.cache_read + event.cache_write + event.input_tokens;
+                  const hitRatio = totalPrompt > 0 ? event.cache_read / totalPrompt : event.hit_ratio;
                   return (
                     <div
-                      class={`chart-bar ${turnHitRatio === 0 ? "black" : severityBarClass(turnHitRatio)}`}
-                      style={{ height: `${Math.max(3, turnHitRatio * 100)}%` }}
-                      title={`${formatDateTime(turn.startTime)}${stepLabel}\nHit: ${(turnHitRatio * 100).toFixed(1)}%\nPrompt: ${totalPrompt.toLocaleString()}\nCached: ${last.cache_read.toLocaleString()}\nNew (last step): ${last.cache_write.toLocaleString()}\nUncached: ${last.input_tokens.toLocaleString()}${last.cause ? `\nCause: ${last.cause}` : ""}`}
+                      class={`chart-bar ${hitRatio === 0 ? "black" : severityBarClass(hitRatio)}`}
+                      style={{ height: `${Math.max(3, hitRatio * 100)}%` }}
+                      title={`${formatDateTime(event.timestamp)}\nHit: ${(hitRatio * 100).toFixed(1)}%\nPrompt: ${totalPrompt.toLocaleString()}\nCached: ${event.cache_read.toLocaleString()}\nNew: ${event.cache_write.toLocaleString()}\nUncached: ${event.input_tokens.toLocaleString()}${event.cause ? `\nCause: ${event.cause}` : ""}`}
                     />
                   );
                 }}

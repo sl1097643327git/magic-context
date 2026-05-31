@@ -271,7 +271,9 @@ describe("dreamer", () => {
                 );
                 expect(result.tasks[4]?.error).toContain("Skipped post-task phases");
                 expect(createdSessionIds).toEqual(["dream-1", "dream-2", "dream-3"]);
-                expect(deletedSessionIds).toEqual(["dream-1", "dream-2", "dream-3"]);
+                // Failed dreamer child sessions are now KEPT for debugging (only
+                // successful tasks delete their child session).
+                expect(deletedSessionIds).toEqual([]);
                 expect(getDreamState(db, "last_dream_at")).toBeNull();
 
                 const runs = getDreamRuns(db, "/repo/project");

@@ -1,0 +1,199 @@
+/**
+ * Shared deterministic decay renderer (v2). Used by BOTH OpenCode
+ * (inject-compartments.ts) and Pi (inject-compartments-pi.ts) so the two
+ * harnesses render compartment history byte-identically from the same validated
+ * decay curve. This is the single render-side implementation of the curve in
+ * `decay-curve.ts`; neither harness may keep a private/approximate copy.
+ *
+ * Responsibilities:
+ *  - Pick a tier per compartment from age + importance + budget pressure
+ *    (decay-curve.ts), with budget pressure computed ONCE per pass.
+ *  - Render the chosen paraphrase tier (P1..P4); P5 = archived (omitted).
+ *  - Legacy (pre-v2, flat-content) compartments: no paraphrase columns, so the
+ *    initial tier is P3 when the body has a `U:` line else P4, and the body is
+ *    truncated `content`.
+ *  - Demote oldest-first under a hard token budget (the curve already fits the
+ *    budget, but this guards against estimate drift / very tight budgets).
+ *
+ * v2 faithful facts: this renderer NEVER emits a <session_facts> block. Facts
+ * are promoted to project memory and render via <project-memory>. Callers pass
+ * the memory block separately; session facts are not a render input.
+ */
+
+import { computeBudgetPressure, renderedTier, TIER_COST, type Tier } from "./decay-curve";
+
+/** Default history budget when a caller doesn't supply one. */
+export const DEFAULT_HISTORY_BUDGET_TOKENS = 60_000;
+
+/** Minimal compartment shape the renderer needs (subset of Compartment). */
+export interface DecayRenderCompartment {
+    startMessage: number;
+    endMessage: number;
+    title: string;
+    content: string;
+    p1?: string | null;
+    p2?: string | null;
+    p3?: string | null;
+    p4?: string | null;
+    importance?: number | null;
+    legacy?: number | null;
+}
+
+function escapeXmlAttr(s: string): string {
+    return s
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+}
+
+function escapeXmlContent(s: string): string {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/** v2 paraphrase tier body with denser-tier and content fallbacks. */
+function tierBody(c: DecayRenderCompartment, tier: number): string {
+    const tiers = [c.p1, c.p2, c.p3, c.p4];
+    const requested = tiers[tier - 1];
+    if (typeof requested === "string") return requested.trim();
+    for (let i = tier - 2; i >= 0; i--) {
+        const t = tiers[i];
+        if (typeof t === "string" && t.length > 0) return t.trim();
+    }
+    return (c.content ?? "").trim();
+}
+
+/** Legacy flat-content tier rendering (no paraphrase columns). */
+function legacyBodyForTier(content: string, tier: number): string {
+    if (tier <= 1) return content;
+    if (tier === 2)
+        return content.length > 1_200 ? `${content.slice(0, 1_200).trimEnd()}…` : content;
+    return content.length > 420 ? `${content.slice(0, 420).trimEnd()}…` : content;
+}
+
+/** Legacy compartments start at P3 (has a `U:` line) or P4 (otherwise). */
+function legacyTier(c: DecayRenderCompartment): Tier {
+    return /^U:/m.test(c.content) ? 3 : 4;
+}
+
+/**
+ * Render a single compartment at an explicit tier. Exposed for the m[1]
+ * "new compartments" block, which always renders newest compartments at P1
+ * (full fidelity — no decay applies to brand-new deltas).
+ */
+export function renderCompartmentAtTier(c: DecayRenderCompartment, tier: number): string {
+    return renderOneCompartment(c, tier);
+}
+
+function renderOneCompartment(c: DecayRenderCompartment, tier: number): string {
+    const baseAttrs = `start="${c.startMessage}" end="${c.endMessage}" title="${escapeXmlAttr(c.title)}"`;
+    if (tier >= 5) return ""; // archived
+
+    if (c.legacy === 1) {
+        if (tier >= 4) return `<compartment ${baseAttrs} />`;
+        return [
+            `<compartment ${baseAttrs}>`,
+            escapeXmlContent(legacyBodyForTier(c.content, tier)),
+            "</compartment>",
+        ].join("\n");
+    }
+
+    const body = tierBody(c, tier);
+    if (body.length === 0) return `<compartment ${baseAttrs} />`;
+    return [`<compartment ${baseAttrs}>`, escapeXmlContent(body), "</compartment>"].join("\n");
+}
+
+/**
+ * Estimate-free coarse token count for the budget-demotion guard. Mirrors the
+ * project's char/3.5 proxy so OpenCode and Pi agree without importing a tokenizer.
+ */
+function approxTokens(s: string): number {
+    return Math.ceil(s.length / 3.5);
+}
+
+/**
+ * Compute the rendered tier for each compartment, given budget pressure derived
+ * once from the whole set. `compartments` are in chronological order (oldest
+ * first); the decay curve indexes from newest (1 = newest).
+ */
+function computeTiers(
+    compartments: DecayRenderCompartment[],
+    historyBudgetTokens: number,
+): number[] {
+    const total = compartments.length;
+    // Legacy rows have no importance signal; treat them at their legacy tier and
+    // exclude from the pressure model (they use truncation, not the curve).
+    const curveInputs = compartments.map((c, index) => ({
+        index: total - index, // 1-based from newest
+        importance: Math.max(1, Math.min(100, c.importance ?? 50)),
+    }));
+    const pressure =
+        historyBudgetTokens > 0 ? computeBudgetPressure(curveInputs, historyBudgetTokens) : 1;
+
+    return compartments.map((c, index) => {
+        if (c.legacy === 1) return legacyTier(c);
+        return renderedTier(total - index, c.importance ?? 50, pressure, 0);
+    });
+}
+
+/**
+ * Render the decayed compartment history block. Optionally prefixes a memory
+ * block. Never renders session facts (v2 faithful). Returns the joined body
+ * (no <session-history> wrapper — callers add their own framing).
+ */
+export function renderDecayedCompartments(args: {
+    compartments: DecayRenderCompartment[];
+    historyBudgetTokens: number;
+}): string {
+    const { compartments, historyBudgetTokens } = args;
+    if (compartments.length === 0) return "";
+
+    const tiers = computeTiers(compartments, historyBudgetTokens);
+
+    const render = (): string => {
+        const parts: string[] = [];
+        for (let i = 0; i < compartments.length; i++) {
+            const rendered = renderOneCompartment(compartments[i], tiers[i]);
+            if (rendered.length > 0) parts.push(rendered);
+        }
+        return parts.join("\n\n");
+    };
+
+    let body = render();
+    // Budget guard: the curve already targets the budget, but estimate drift or
+    // a very tight budget can overshoot. Demote oldest-first until it fits.
+    let guard = compartments.length * 5;
+    while (historyBudgetTokens > 0 && approxTokens(body) > historyBudgetTokens && guard > 0) {
+        let demoted = false;
+        for (let i = 0; i < tiers.length; i++) {
+            if (tiers[i] < 5) {
+                tiers[i] += 1;
+                demoted = true;
+                break;
+            }
+        }
+        if (!demoted) break;
+        body = render();
+        guard -= 1;
+    }
+    return body;
+}
+
+/**
+ * Extract a top-level m[0] block slice (e.g. "session-history", "project-docs",
+ * "user-profile") for budget measurement and token attribution. Returns the
+ * full `<tag>…</tag>` slice or null. `tag` must be a literal block name (the
+ * caller controls it), so the constructed RegExp is safe.
+ *
+ * Shared so the materialize tightening loop measures ONLY the session-history
+ * slice against the history budget (not the whole m[0], which also carries
+ * project-docs / user-profile / project-memory — those have their own budgets),
+ * and so the sidebar/status token attribution reads the same slices both
+ * harnesses actually render.
+ */
+export function extractM0Block(m0Text: string, tag: string): string | null {
+    const m = m0Text.match(new RegExp(`<${tag}>[\\s\\S]*?</${tag}>`));
+    return m ? m[0] : null;
+}
+
+export { TIER_COST };

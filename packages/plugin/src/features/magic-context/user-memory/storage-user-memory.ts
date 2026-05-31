@@ -96,7 +96,10 @@ export function insertUserMemory(
 export function getActiveUserMemories(db: Database): UserMemory[] {
     const rows = db
         .prepare(
-            "SELECT id, content, status, promoted_at, source_candidate_ids, created_at, updated_at FROM user_memories WHERE status = 'active' ORDER BY promoted_at ASC",
+            // id ASC tiebreaker: promoted_at can tie at millisecond granularity;
+            // without a stable secondary sort the <user-profile> render order is
+            // non-deterministic across passes, drifting m[0]/m[1] bytes.
+            "SELECT id, content, status, promoted_at, source_candidate_ids, created_at, updated_at FROM user_memories WHERE status = 'active' ORDER BY promoted_at ASC, id ASC",
         )
         .all() as Array<{
         id: number;

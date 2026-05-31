@@ -2,7 +2,7 @@ import {
     DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE,
     DEFAULT_NUDGE_INTERVAL_TOKENS,
 } from "../../config/schema/magic-context";
-import { getCompartments, getSessionFacts } from "../../features/magic-context/compartment-storage";
+import { getCompartments } from "../../features/magic-context/compartment-storage";
 import { parseCacheTtl } from "../../features/magic-context/scheduler";
 import { getPendingOps } from "../../features/magic-context/storage";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage-meta";
@@ -159,17 +159,17 @@ export function executeStatus(
             );
         }
 
-        // History Compression section — show current block size vs budget
+        // History Compression section — show current block size vs budget.
+        // v2: facts are retired as a render source (they are promoted memories
+        // now), so they are NOT counted into the history block or shown as a
+        // separate count — doing so would mislead operators into thinking facts
+        // still render in <session-history>.
         const compartments = getCompartments(db, sessionId);
-        const facts = getSessionFacts(db, sessionId);
         let historyBlockTokens = 0;
         for (const c of compartments) {
             historyBlockTokens += estimateTokens(
                 `<compartment start="${c.startMessage}" end="${c.endMessage}" title="${c.title}">\n${c.content}\n</compartment>\n`,
             );
-        }
-        for (const f of facts) {
-            historyBlockTokens += estimateTokens(`* ${f.content}\n`);
         }
 
         const budgetTokens =
@@ -188,14 +188,13 @@ export function executeStatus(
             "",
             "### History Compression",
             `- Compartments: ${compartments.length}`,
-            `- Facts: ${facts.length}`,
             `- History block: ~${historyBlockTokens.toLocaleString()} tokens`,
             ...(budgetTokens
                 ? [
-                      `- Compression budget: ~${budgetTokens.toLocaleString()} tokens (${budgetUsage}% used)`,
-                      `- Compressor fires: when history block exceeds budget after historian run`,
+                      `- History budget: ~${budgetTokens.toLocaleString()} tokens (${budgetUsage}% used)`,
+                      `- Older compartments demote tiers automatically at render time to fit the budget`,
                   ]
-                : [`- Compression budget: not configured (history_budget_percentage not set)`]),
+                : [`- History budget: not configured (history_budget_percentage not set)`]),
         );
 
         if (pendingOps.length > 0) {

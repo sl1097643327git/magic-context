@@ -1,23 +1,12 @@
-import { DEFAULT_COMPRESSOR_COOLDOWN_MS } from "../../config/schema/magic-context";
-import {
-    acquireCompartmentLease,
-    COMPARTMENT_LEASE_RENEWAL_MS,
-    releaseCompartmentLease,
-    renewCompartmentLease,
-} from "../../features/magic-context/compartment-lease";
 import { getLastCompartmentEndMessage } from "../../features/magic-context/compartment-storage";
 import { type ContextDatabase, updateSessionMeta } from "../../features/magic-context/storage";
 import type { PluginContext } from "../../plugin/types";
-import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
 import {
     type ActiveCompartmentRun,
     getActiveCompartmentRun,
-    markActiveCompartmentRunPublished,
-    registerActiveCompartmentRun,
     startCompartmentAgent,
 } from "./compartment-runner";
-import { runCompressionPassIfNeeded } from "./compartment-runner-compressor";
 import { BLOCK_UNTIL_DONE_PERCENTAGE } from "./compartment-trigger";
 import {
     type PreparedCompartmentInjection,
@@ -26,22 +15,6 @@ import {
 import { getProtectedTailStartOrdinal, getRawSessionMessageCount } from "./read-session-chunk";
 import { sendIgnoredMessage } from "./send-session-notification";
 import type { MessageLike } from "./transform-operations";
-
-const lastCompressorRunBySession = new Map<string, number>();
-
-function isCompressorOnCooldown(sessionId: string, cooldownMs: number): boolean {
-    const lastRun = lastCompressorRunBySession.get(sessionId);
-    if (!lastRun) return false;
-    return Date.now() - lastRun < cooldownMs;
-}
-
-function markCompressorRun(sessionId: string): void {
-    lastCompressorRunBySession.set(sessionId, Date.now());
-}
-
-export function clearCompressorCooldown(sessionId: string): void {
-    lastCompressorRunBySession.delete(sessionId);
-}
 
 interface RunCompartmentPhaseArgs {
     canRunCompartments: boolean;
@@ -77,12 +50,6 @@ interface RunCompartmentPhaseArgs {
     experimentalTemporalAwareness?: boolean;
     /** When true, run a second editor pass after historian to clean U: lines. */
     historianTwoPass?: boolean;
-    /** Compressor floor ratio: floor = ceil(lastEndMessage / minCompartmentRatio). */
-    compressorMinCompartmentRatio?: number;
-    /** Compressor max merge depth (1-5). Compartments at or above this depth are skipped. */
-    compressorMaxMergeDepth?: number;
-    /** Compressor cooldown in milliseconds between background runs. */
-    compressorCooldownMs?: number;
     /** Cross-session memory feature gate (`memory.enabled`). Issue #44. */
     memoryEnabled?: boolean;
     /** Auto-promotion gate (`memory.auto_promote`). Issue #44. */
@@ -211,8 +178,6 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
                 getNotificationParams: args.getNotificationParams,
                 experimentalUserMemories: args.experimentalUserMemories,
                 historianTwoPass: args.historianTwoPass,
-                compressorMinCompartmentRatio: args.compressorMinCompartmentRatio,
-                compressorMaxMergeDepth: args.compressorMaxMergeDepth,
                 memoryEnabled: args.memoryEnabled,
                 autoPromote: args.autoPromote,
                 onCompartmentStatePublished: args.onCompartmentStatePublished,
@@ -255,8 +220,6 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
                 getNotificationParams: args.getNotificationParams,
                 experimentalUserMemories: args.experimentalUserMemories,
                 historianTwoPass: args.historianTwoPass,
-                compressorMinCompartmentRatio: args.compressorMinCompartmentRatio,
-                compressorMaxMergeDepth: args.compressorMaxMergeDepth,
                 memoryEnabled: args.memoryEnabled,
                 autoPromote: args.autoPromote,
                 onCompartmentStatePublished: args.onCompartmentStatePublished,
@@ -291,7 +254,7 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
                 void sendIgnoredMessage(
                     args.client,
                     args.sessionId,
-                    `⏳ Context at ${args.contextUsage.percentage.toFixed(0)}% — Magic Context is compacting history before continuing. This may take up to 2 minutes.`,
+                    `⏳ Context at ${args.contextUsage.percentage.toFixed(0)}% — Magic Context is comparting history before continuing. This may take up to 2 minutes.`,
                     notifParams,
                 );
             }
@@ -315,100 +278,8 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
         }
     }
 
-    // ── Independent compressor check (non-blocking) ─────────────────────
-    // The compressor normally runs after a successful historian publication.
-    // But if historian hasn't fired (e.g., usage stayed low due to aggressive
-    // heuristic cleanup from system-prompt flushes), the history block can
-    // exceed the budget indefinitely. Fire the compressor in the background
-    // (not awaited) so it never blocks the transform. The compressed result
-    // lands on the next cache-busting pass via clearInjectionCache.
-    //
-    // Conditions:
-    //   - cache is already busting (flush or scheduler execute)
-    //   - budget is configured
-    //   - client is available (compressor creates child sessions)
-    //   - no historian is currently running
-    //   - no historian ran this pass (compressor already fires post-historian)
-    //   - cooldown: at least 10 minutes since last independent compressor run
-    if (
-        historianRunnable &&
-        args.safeForBackgroundCompression &&
-        args.historyBudgetTokens &&
-        args.historyBudgetTokens > 0 &&
-        args.client &&
-        !compartmentInProgress &&
-        !awaitedCompartmentRun &&
-        !isCompressorOnCooldown(
-            args.sessionId,
-            args.compressorCooldownMs ?? DEFAULT_COMPRESSOR_COOLDOWN_MS,
-        )
-    ) {
-        // Fire-and-forget: compressor runs in background, results land on next
-        // cache-busting pass. Register the promise with activeRuns so a later
-        // pass that wants to start a historian sees it via
-        // getActiveCompartmentRun() and skips starting, preventing concurrent
-        // writes to compartments/session_facts tables.
-        const client = args.client;
-        const historyBudgetTokens = args.historyBudgetTokens;
-        const holderId = crypto.randomUUID();
-        const compressorPromise = (async () => {
-            const lease = acquireCompartmentLease(args.db, args.sessionId, holderId);
-            if (!lease) {
-                sessionLog(
-                    args.sessionId,
-                    "independent compressor skipped: compartment lease held by another process",
-                );
-                return false;
-            }
-            markCompressorRun(args.sessionId);
-            const renewal = setInterval(() => {
-                if (!renewCompartmentLease(args.db, args.sessionId, holderId)) {
-                    sessionLog(
-                        args.sessionId,
-                        "independent compressor lease renewal failed; publish will be skipped if holder is stale",
-                    );
-                }
-            }, COMPARTMENT_LEASE_RENEWAL_MS);
-            try {
-                return await runCompressionPassIfNeeded({
-                    client,
-                    db: args.db,
-                    sessionId: args.sessionId,
-                    directory: args.compartmentDirectory,
-                    historyBudgetTokens,
-                    historianTimeoutMs: args.historianTimeoutMs,
-                    fallbackModels: args.fallbackModels,
-                    minCompartmentRatio: args.compressorMinCompartmentRatio,
-                    maxMergeDepth: args.compressorMaxMergeDepth,
-                    historianRunnable,
-                    compartmentLeaseHolderId: holderId,
-                });
-            } finally {
-                clearInterval(renewal);
-                releaseCompartmentLease(args.db, args.sessionId, holderId);
-            }
-        })()
-            .then((compressed) => {
-                if (compressed) {
-                    markActiveCompartmentRunPublished(args.sessionId);
-                    published = true;
-                    args.deferredHistoryRefreshSessions.add(args.sessionId);
-                    sessionLog(
-                        args.sessionId,
-                        "independent compressor completed in background — compressed history will appear on next cache-busting pass",
-                    );
-                }
-            })
-            .catch((error: unknown) => {
-                sessionLog(
-                    args.sessionId,
-                    "independent compressor failed in background:",
-                    getErrorMessage(error),
-                );
-            });
-        registerActiveCompartmentRun(args.sessionId, compressorPromise);
-    }
-
+    // v2: no independent compressor — deterministic decay-tier rendering keeps
+    // the history block within budget at render time, with no LLM pass.
     return {
         pendingCompartmentInjection,
         awaitedCompartmentRun,

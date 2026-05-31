@@ -56,12 +56,13 @@ describe("HISTORIAN_ALLOWED_TOOLS", () => {
         expect(HISTORIAN_ALLOWED_TOOLS).toContain("read");
     });
 
-    it("includes `aft_outline` and `aft_zoom` for token-efficient repo navigation", () => {
-        // Read-only AFT navigation tools let historian/compressor verify
-        // a symbol or skim file structure when writing accurate
-        // compartment summaries without dragging in whole files.
+    it("includes `aft_outline`, `aft_zoom`, `aft_search` for token-efficient repo navigation/search", () => {
+        // Read-only AFT navigation + search tools let historian/compressor
+        // find or verify a symbol or skim file structure when writing
+        // accurate compartment summaries without dragging in whole files.
         expect(HISTORIAN_ALLOWED_TOOLS).toContain("aft_outline");
         expect(HISTORIAN_ALLOWED_TOOLS).toContain("aft_zoom");
+        expect(HISTORIAN_ALLOWED_TOOLS).toContain("aft_search");
     });
 
     it("does NOT include `task` (the bug we're fixing — preventing subagent fanout)", () => {
@@ -105,15 +106,21 @@ describe("DREAMER_ALLOWED_TOOLS", () => {
         expect(DREAMER_ALLOWED_TOOLS).toContain("ctx_note");
     });
 
-    it("does NOT include `task` (no subagent fanout from dreamer)", () => {
-        expect(DREAMER_ALLOWED_TOOLS).not.toContain("task");
+    it("includes `write` + `edit` for the maintain-docs task", () => {
+        // The maintain-docs task prompt explicitly instructs the model to
+        // "Write or update using the Write tool" to keep ARCHITECTURE.md /
+        // STRUCTURE.md synchronized. Without these the dreamer was forced to
+        // emit docs through bash heredocs/sed.
+        expect(DREAMER_ALLOWED_TOOLS).toContain("write");
+        expect(DREAMER_ALLOWED_TOOLS).toContain("edit");
     });
 
-    it("does NOT include `edit` or `write` (no project-file mutations)", () => {
-        // Dreamer task prompt explicitly says "Do not commit changes" —
-        // memory consolidation must not alter project source files.
-        expect(DREAMER_ALLOWED_TOOLS).not.toContain("edit");
-        expect(DREAMER_ALLOWED_TOOLS).not.toContain("write");
+    it("includes `aft_search` for code search across verify/improve/maintain-docs", () => {
+        expect(DREAMER_ALLOWED_TOOLS).toContain("aft_search");
+    });
+
+    it("does NOT include `task` (no subagent fanout from dreamer)", () => {
+        expect(DREAMER_ALLOWED_TOOLS).not.toContain("task");
     });
 
     it("does NOT include `webfetch` or `websearch` (use bash + curl instead)", () => {
@@ -156,17 +163,18 @@ describe("SIDEKICK_ALLOWED_TOOLS", () => {
 });
 
 describe("integration: full hidden-agent permission shape", () => {
-    it("historian permission object: `*` denied + read + aft_outline + aft_zoom allowed", () => {
+    it("historian permission object: `*` denied + read + aft_outline + aft_zoom + aft_search allowed", () => {
         const perm = buildAllowOnlyPermission(HISTORIAN_ALLOWED_TOOLS);
         expect(perm).toEqual({
             "*": "deny",
             read: "allow",
             aft_outline: "allow",
             aft_zoom: "allow",
+            aft_search: "allow",
         });
     });
 
-    it("dreamer permission object: `*` denied + repo-exploration + ctx_* + aft_* allowed", () => {
+    it("dreamer permission object: `*` denied + repo-exploration + write/edit + ctx_* + aft_* allowed", () => {
         const perm = buildAllowOnlyPermission(DREAMER_ALLOWED_TOOLS);
         expect(perm).toEqual({
             "*": "deny",
@@ -174,8 +182,11 @@ describe("integration: full hidden-agent permission shape", () => {
             grep: "allow",
             glob: "allow",
             bash: "allow",
+            write: "allow",
+            edit: "allow",
             aft_outline: "allow",
             aft_zoom: "allow",
+            aft_search: "allow",
             ctx_memory: "allow",
             ctx_search: "allow",
             ctx_note: "allow",

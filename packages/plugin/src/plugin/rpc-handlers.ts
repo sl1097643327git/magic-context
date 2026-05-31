@@ -13,12 +13,13 @@ import {
 } from "../hooks/magic-context/event-resolvers";
 import { getLiveNotificationParams } from "../hooks/magic-context/hook-handlers";
 import {
-    renderMemoryBlock,
-    trimMemoriesToBudget,
+    renderMemoryBlockV2,
+    trimMemoriesToBudgetV2,
 } from "../hooks/magic-context/inject-compartments";
 import type { LiveSessionState } from "../hooks/magic-context/live-session-state";
 import { findLastAssistantModelFromOpenCodeDb } from "../hooks/magic-context/read-session-db";
 import { estimateTokens } from "../hooks/magic-context/read-session-formatting";
+import type { ManagedRecompContext } from "../hooks/magic-context/recomp-orchestrator";
 import {
     calibrateBuckets,
     resolveModelCalibration,
@@ -117,6 +118,8 @@ export function buildSidebarSnapshot(
         compartmentTokens: 0,
         factTokens: 0,
         memoryTokens: 0,
+        docsTokens: 0,
+        profileTokens: 0,
         conversationTokens: 0,
         toolCallTokens: 0,
         toolDefinitionTokens: 0,
@@ -160,12 +163,11 @@ export function buildSidebarSnapshot(
             .get(sessionId);
         const compartmentCount = compartmentRow?.count ?? 0;
 
-        const factRow = db
-            .prepare<[string], { count: number }>(
-                "SELECT COUNT(*) as count FROM session_facts WHERE session_id = ?",
-            )
-            .get(sessionId);
-        const factCount = factRow?.count ?? 0;
+        // v2: facts are retired as a render source (promoted to memories), so the
+        // sidebar reports 0 facts rather than counting the vestigial session_facts
+        // table — a non-zero count would mislead operators into thinking facts
+        // still render in <session-history>.
+        const factCount = 0;
 
         let memoryCount = 0;
         if (projectIdentity) {
@@ -217,65 +219,94 @@ export function buildSidebarSnapshot(
 
         // Token estimates via real Claude tokenizer (ai-tokenizer).
         let compartmentTokens = 0;
-        let factTokens = 0;
+        const factTokens = 0;
         let memoryTokens = 0;
-        try {
-            const compRows = db
-                .prepare<
-                    [string],
-                    { content: string; title: string; start_message: number; end_message: number }
-                >(
-                    "SELECT content, title, start_message, end_message FROM compartments WHERE session_id = ?",
-                )
-                .all(sessionId);
-            for (const c of compRows) {
-                compartmentTokens += estimateTokens(
-                    `<compartment start="${c.start_message}" end="${c.end_message}" title="${c.title}">\n${c.content}\n</compartment>\n`,
-                );
-            }
-        } catch {
-            /* compartments table may not exist */
+        // v2: compartments are DECAY-RENDERED — most render at a lower tier
+        // (p2/p3/p4) or drop past the archive boundary, so the actual injected
+        // <session-history> is far smaller than Σ(full p1 content). The true
+        // on-wire size is the <session-history> slice of the persisted m[0]
+        // snapshot (cached_m0_bytes). Measuring Σp1 instead overcounts the
+        // Compartments bucket AND starves Conversation to 0 via the
+        // `max(0, messagesBlockTokens − compartmentTokens)` clamp below
+        // (dogfood 2026-05-30, AFT: 545 compartments → Σp1 157K > 135K stream).
+        const m0Bytes = meta?.cached_m0_bytes;
+        const m0Text =
+            m0Bytes instanceof Uint8Array
+                ? Buffer.from(m0Bytes).toString("utf8")
+                : typeof m0Bytes === "string"
+                  ? (m0Bytes as string)
+                  : "";
+        // <project-docs> and <user-profile> also live in m[0] (stable
+        // scaffolding moved out of the system prompt in v2). They are part of
+        // messagesBlockTokens but are NOT conversation — surface them as their
+        // own buckets so they don't silently inflate Conversation.
+        let docsTokens = 0;
+        let profileTokens = 0;
+        const docsMatch = m0Text.match(/<project-docs>([\s\S]*?)<\/project-docs>/);
+        if (docsMatch) docsTokens = estimateTokens(docsMatch[0]);
+        const profileMatch = m0Text.match(/<user-profile>([\s\S]*?)<\/user-profile>/);
+        if (profileMatch) profileTokens = estimateTokens(profileMatch[0]);
+        // Memory bucket: measure the ACTUAL <project-memory> slice in m[0] (the v2
+        // wire render with id/category/importance attributes), not the legacy
+        // memory_block_cache (v1 "- content" shape, which under-counts the real
+        // injected cost). Falls back below to an on-demand v2 render when m[0]
+        // has no slice yet (cold start / pre-first-materialization).
+        let memoryFromM0 = false;
+        const memMatch = m0Text.match(/<project-memory>([\s\S]*?)<\/project-memory>/);
+        if (memMatch) {
+            memoryTokens = estimateTokens(memMatch[0]);
+            memoryFromM0 = true;
         }
-        try {
-            const factRows = db
-                .prepare<[string], { content: string }>(
-                    "SELECT content FROM session_facts WHERE session_id = ?",
-                )
-                .all(sessionId);
-            for (const f of factRows) {
-                factTokens += estimateTokens(`* ${f.content}\n`);
-            }
-        } catch {
-            /* session_facts table may not exist */
-        }
-        if (meta) {
-            const cached = meta.memory_block_cache;
-            if (typeof cached === "string" && cached.length > 0) {
-                memoryTokens = estimateTokens(cached);
-            } else if (memoryBlockCount > 0 && projectIdentity) {
-                // Cache was cleared (e.g. by replaceAllCompartmentState /
-                // replaceSessionFacts / clearMemoryBlockCacheForSession) but
-                // memory_block_count is intentionally preserved so the
-                // dashboard still reports the count between cache busts.
-                // Render the memory block on-demand here using the same logic
-                // as inject-compartments.ts so the sidebar's token reading
-                // stays accurate. Read-only path — DO NOT write back to
-                // memory_block_cache; the empty cache state is a
-                // cache-stability signal that must be preserved.
-                try {
-                    let memories = getMemoriesByProject(db, projectIdentity, [
-                        "active",
-                        "permanent",
-                    ]);
-                    if (injectionBudgetTokens && memories.length > 0) {
-                        memories = trimMemoriesToBudget(sessionId, memories, injectionBudgetTokens);
-                    }
-                    const block = renderMemoryBlock(memories);
-                    memoryTokens = block ? estimateTokens(block) : 0;
-                } catch {
-                    // Defensive: memory tables may not exist yet on a brand-new DB.
-                    memoryTokens = 0;
+        const histMatch = m0Text.match(/<session-history>([\s\S]*?)<\/session-history>/);
+        if (histMatch) {
+            // Real decayed render — count exactly what's on the wire.
+            compartmentTokens = estimateTokens(histMatch[0]);
+        } else {
+            // No materialized m[0] yet (brand-new / pre-first-materialization).
+            // Fall back to the Σp1 estimate so the bucket isn't blank on a cold
+            // session; it self-corrects to the decayed size on first render.
+            try {
+                const compRows = db
+                    .prepare<
+                        [string],
+                        {
+                            content: string;
+                            title: string;
+                            start_message: number;
+                            end_message: number;
+                        }
+                    >(
+                        "SELECT content, title, start_message, end_message FROM compartments WHERE session_id = ?",
+                    )
+                    .all(sessionId);
+                for (const c of compRows) {
+                    compartmentTokens += estimateTokens(
+                        `<compartment start="${c.start_message}" end="${c.end_message}" title="${c.title}">\n${c.content}\n</compartment>\n`,
+                    );
                 }
+            } catch {
+                /* compartments table may not exist */
+            }
+        }
+        // v2: facts are retired as a render source (promoted to memories), so
+        // they contribute 0 render tokens. factTokens stays 0 — kept in the
+        // breakdown shape for dashboard back-compat, not recomputed from the
+        // vestigial session_facts table.
+        // Fallback when m[0] has no <project-memory> slice yet (cold start /
+        // pre-first-materialization). Render on-demand with the SAME v2 path the
+        // injection uses (renderMemoryBlockV2 + trimMemoriesToBudgetV2) so the
+        // sidebar reading matches what WILL be injected, not the legacy v1 shape.
+        if (!memoryFromM0 && memoryBlockCount > 0 && projectIdentity) {
+            try {
+                const memories = getMemoriesByProject(db, projectIdentity, ["active", "permanent"]);
+                const selected = injectionBudgetTokens
+                    ? trimMemoriesToBudgetV2(sessionId, memories, injectionBudgetTokens).renderOrder
+                    : memories;
+                const block = renderMemoryBlockV2(selected);
+                memoryTokens = block ? estimateTokens(block) : 0;
+            } catch {
+                // Defensive: memory tables may not exist yet on a brand-new DB.
+                memoryTokens = 0;
             }
         }
 
@@ -310,7 +341,8 @@ export function buildSidebarSnapshot(
         // <session-history> block (compartments + facts + memories live in
         // message[0]). Subtract those so "conversationLocal" reflects real
         // user/assistant dialog only.
-        const injectedInMessages = compartmentTokens + factTokens + memoryTokens;
+        const injectedInMessages =
+            compartmentTokens + factTokens + memoryTokens + docsTokens + profileTokens;
         const conversationLocal = Math.max(0, messagesBlockTokens - injectedInMessages);
         const toolCallsLocal = Math.max(0, toolCallTokensRaw);
 
@@ -392,6 +424,8 @@ export function buildSidebarSnapshot(
             compartmentsLocal: compartmentTokens,
             factsLocal: factTokens,
             memoriesLocal: memoryTokens,
+            docsLocal: docsTokens,
+            profileLocal: profileTokens,
             conversationLocal,
             toolCallsLocal,
             calibration,
@@ -418,12 +452,27 @@ export function buildSidebarSnapshot(
             compartmentTokens: calibrated.compartmentTokens,
             factTokens: calibrated.factTokens,
             memoryTokens: calibrated.memoryTokens,
+            docsTokens: calibrated.docsTokens,
+            profileTokens: calibrated.profileTokens,
             conversationTokens: calibrated.conversationTokens,
             toolCallTokens: calibrated.toolCallTokens,
             toolDefinitionTokens: calibrated.toolDefinitionTokens,
             executeThreshold,
             newWorkTokens,
             totalInputTokens,
+            recompProgress: (() => {
+                const p = liveSessionState?.recompProgressBySession.get(sessionId);
+                if (!p) return null;
+                return {
+                    phase: p.phase,
+                    processedMessages: p.processedMessages,
+                    totalMessages: p.totalMessages,
+                    passCount: p.passCount,
+                    compartmentsCreated: p.compartmentsCreated,
+                    message: p.message,
+                    note: p.note,
+                };
+            })(),
         };
         // Defensive sticky cache: if `inputTokens` briefly drops to 0 mid-turn
         // (intermittent — possibly streaming events with empty token shape, or
@@ -432,7 +481,25 @@ export function buildSidebarSnapshot(
         return applyStickySnapshotCache(sessionId, fresh);
     } catch (err) {
         log("[rpc] sidebar-snapshot error:", err);
-        return empty;
+        // Preserve live recomp/upgrade progress even when the full snapshot build
+        // throws (e.g. a concurrent BEGIN-IMMEDIATE publish makes a DB read hit
+        // SQLITE_BUSY mid-recomp). Without this, a transient build failure emits a
+        // progress-less snapshot and the TUI's recomp poll would lose the bar
+        // (dogfood 2026-05-30).
+        const p = liveSessionState?.recompProgressBySession.get(sessionId);
+        if (!p) return empty;
+        return {
+            ...empty,
+            recompProgress: {
+                phase: p.phase,
+                processedMessages: p.processedMessages,
+                totalMessages: p.totalMessages,
+                passCount: p.passCount,
+                compartmentsCreated: p.compartmentsCreated,
+                message: p.message,
+                note: p.note,
+            },
+        };
     }
 }
 
@@ -687,70 +754,123 @@ export function registerRpcHandlers(
         }
     });
 
-    rpcServer.handle("recomp", async (params) => {
-        const sessionId = String(params.sessionId ?? "");
-        if (!sessionId) return { ok: false, error: "no session" };
-
-        const { executeContextRecomp } = await import("../hooks/magic-context/compartment-runner");
-        const { sendIgnoredMessage } = await import(
-            "../hooks/magic-context/send-session-notification"
-        );
+    // ── Recomp / session-upgrade: delegate to the shared orchestrator ───────
+    // The RPC dialog paths ("/ctx-recomp" + "Run upgrade now") run through the
+    // SAME runManagedRecomp/runManagedUpgrade as the /ctx-* command paths, so
+    // they get identical model fallback, live progress, terminal state, and
+    // clean messaging. Dogfood 2026-05-30: the old RPC upgrade handler lacked
+    // model fallback (failed when the primary historian model returned empty,
+    // while /ctx-session-upgrade succeeded via fallback) and the command path
+    // lacked progress (left the sidebar stuck on a stale "failed"). One runner
+    // closes both gaps permanently.
+    const buildManagedCtx = async (
+        sessionId: string,
+        db: NonNullable<ReturnType<typeof getDb>>,
+    ): Promise<ManagedRecompContext> => {
         const { deriveHistorianChunkTokens, resolveHistorianContextLimit } = await import(
             "../hooks/magic-context/derive-budgets"
         );
+        const { resolveFallbackChain } = await import("../shared/resolve-fallbacks");
+        const { HISTORIAN_AGENT } = await import("../agents/historian");
+        const DEFAULT_HISTORIAN_TIMEOUT_MS = 10 * 60 * 1000;
+        return {
+            client: args.client as ManagedRecompContext["client"],
+            db,
+            liveSessionState,
+            directory,
+            historianChunkTokens: deriveHistorianChunkTokens(
+                resolveHistorianContextLimit(config.historian?.model),
+            ),
+            historianTimeoutMs: config.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
+            memoryEnabled: config.memory?.enabled ?? true,
+            autoPromote: config.memory?.auto_promote ?? true,
+            fallbackModels: resolveFallbackChain(
+                HISTORIAN_AGENT,
+                config.historian?.fallback_models,
+            ),
+            runMigration: config.memory?.enabled !== false && !!config.historian?.model,
+            userMemoriesEnabled: config.dreamer?.user_memories?.enabled === true,
+            historianTwoPass: config.historian?.two_pass === true,
+            getNotificationParams,
+        };
+    };
 
+    rpcServer.handle("recomp", async (params) => {
+        const sessionId = String(params.sessionId ?? "");
+        if (!sessionId) return { ok: false, error: "no session" };
         const db = getDb();
         if (!db) return { ok: false, error: "db unavailable" };
 
-        const DEFAULT_HISTORIAN_TIMEOUT_MS = 10 * 60 * 1000;
-
-        const historianChunkTokens = deriveHistorianChunkTokens(
-            resolveHistorianContextLimit(config.historian?.model),
+        const { runManagedRecomp } = await import("../hooks/magic-context/recomp-orchestrator");
+        const { sendIgnoredMessage } = await import(
+            "../hooks/magic-context/send-session-notification"
         );
-
         log(`[rpc] recomp requested for session ${sessionId}`);
-
-        // Fire-and-forget: start recomp in background
-        void executeContextRecomp({
-            client: args.client as never,
-            db,
-            sessionId,
-            historianChunkTokens,
-            historianTimeoutMs: config.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
-            directory,
-            // Issue #44: TUI-triggered recomp must respect memory feature gates
-            // exactly the same way as server-triggered /ctx-recomp does.
-            memoryEnabled: config.memory?.enabled,
-            autoPromote: config.memory?.auto_promote ?? true,
-            getNotificationParams: () => getNotificationParams(sessionId),
-            // Recomp publication invalidates the injection cache and queues
-            // drop ops. Signal the same two sets the hook-side recomp
-            // signals (history rebuild + pending materialization) so the
-            // next transform pass rebuilds `<session-history>` and
-            // materializes the new drops. NOT systemPromptRefresh — recomp
-            // doesn't change disk-backed adjuncts.
-            //
-            // Without these signals the TUI recomp would silently leave
-            // injection cache stale, causing defer passes to render an
-            // outdated history block until the next natural cache bust.
-            onCompartmentStatePublished: (sid) => {
-                liveSessionState.historyRefreshSessions.add(sid);
-                liveSessionState.pendingMaterializationSessions.add(sid);
-            },
-        })
-            .then((result: string) => {
+        const ctx = await buildManagedCtx(sessionId, db);
+        // Fire-and-forget; outcome is force-persisted so a multi-minute recomp's
+        // result stays visible in scrollback instead of a 5s toast.
+        void runManagedRecomp(ctx, sessionId)
+            .then((message) => {
                 void sendIgnoredMessage(
                     args.client,
                     sessionId,
-                    result,
+                    message,
                     getNotificationParams(sessionId),
+                    true,
                 ).catch(() => {});
             })
-            .catch((error: unknown) => {
-                log("[rpc] recomp failed:", error);
-            });
-
+            .catch((error: unknown) => log("[rpc] recomp failed:", error));
         return { ok: true };
+    });
+
+    // TUI-triggered `/ctx-session-upgrade`: full recomp + once-per-project memory
+    // migration. Fired from the upgrade dialog's "Run upgrade now" action.
+    rpcServer.handle("upgrade", async (params) => {
+        const sessionId = String(params.sessionId ?? "");
+        if (!sessionId) return { ok: false, error: "no session" };
+        const db = getDb();
+        if (!db) return { ok: false, error: "db unavailable" };
+
+        const { runManagedUpgrade } = await import("../hooks/magic-context/recomp-orchestrator");
+        const { sendIgnoredMessage } = await import(
+            "../hooks/magic-context/send-session-notification"
+        );
+        log(`[rpc] session-upgrade requested for session ${sessionId}`);
+        const ctx = await buildManagedCtx(sessionId, db);
+        void runManagedUpgrade(ctx, sessionId)
+            .then((message) => {
+                void sendIgnoredMessage(
+                    args.client,
+                    sessionId,
+                    message,
+                    getNotificationParams(sessionId),
+                    true, // force-persist: a multi-minute upgrade's outcome must stay visible
+                ).catch(() => {});
+            })
+            .catch((error: unknown) => log("[rpc] session-upgrade failed:", error));
+        return { ok: true };
+    });
+
+    // The user made an explicit choice on the upgrade dialog (Confirm or Cancel).
+    // Set the durable stamp so the FRESH reminder won't re-show. We deliberately
+    // do NOT stamp when the dialog is merely displayed — a display that the user
+    // closed/ctrl-c'd before acting must re-show on the next process (dogfood
+    // 2026-05-30). Resume prompts are staging-driven and unaffected by this stamp.
+    rpcServer.handle("dismiss-upgrade-reminder", async (params) => {
+        const sessionId = String(params.sessionId ?? "");
+        if (!sessionId) return { ok: false, error: "no session" };
+        const db = getDb();
+        if (!db) return { ok: false, error: "db unavailable" };
+        try {
+            const { updateSessionMeta } = await import(
+                "../features/magic-context/storage-meta-session"
+            );
+            updateSessionMeta(db, sessionId, { upgradeRemindedAt: Date.now() });
+            return { ok: true };
+        } catch (error) {
+            log("[rpc] dismiss-upgrade-reminder failed:", error);
+            return { ok: false, error: String(error) };
+        }
     });
 
     rpcServer.handle("pending-notifications", async (params) => {

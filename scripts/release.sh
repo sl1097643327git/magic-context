@@ -143,6 +143,11 @@ echo "→ Generating JSON Schema..."
 bun packages/plugin/scripts/build-schema.ts || { echo "Error: Schema generation failed"; exit 1; }
 echo ""
 
+# Step 3b: Regenerate reference-seed corpus from source XML
+echo "→ Generating historian reference seeds..."
+bun packages/plugin/scripts/build-reference-seeds.ts || { echo "Error: Reference-seed generation failed"; exit 1; }
+echo ""
+
 # Step 4: Sync version
 echo "→ Syncing version to $VERSION..."
 bun scripts/version-sync.mjs "$VERSION"

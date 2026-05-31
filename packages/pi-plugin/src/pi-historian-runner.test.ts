@@ -41,7 +41,7 @@ function rawMessages(count = 12) {
 }
 
 function successXml(fact = "Pi historian facts can promote to memory.") {
-	return `<compartment start="1" end="2" title="Initial Pi slice">Summarized the first Pi turn.</compartment>\n<WORKFLOW_RULES>\n* ${fact}\n</WORKFLOW_RULES>`;
+	return `<compartment start="1" end="2" title="Initial Pi slice">Summarized the first Pi turn.</compartment>\n<PROJECT_RULES>\n* ${fact}\n</PROJECT_RULES>`;
 }
 
 function successXmlWithUserObservation(observation: string) {
@@ -60,6 +60,7 @@ async function runHistorianWith(args: {
 	outputs: string[];
 	memoryEnabled?: boolean;
 	autoPromote?: boolean;
+	userMemoriesEnabled?: boolean;
 	twoPass?: boolean;
 	onPublished?: () => void;
 	appendCompaction?: Parameters<typeof runPiHistorian>[0]["appendCompaction"];
@@ -80,6 +81,7 @@ async function runHistorianWith(args: {
 		twoPass: args.twoPass,
 		memoryEnabled: args.memoryEnabled,
 		autoPromote: args.autoPromote,
+		userMemoriesEnabled: args.userMemoriesEnabled,
 		onPublished: args.onPublished,
 		appendCompaction: args.appendCompaction,
 		readBranchEntries: args.readBranchEntries,
@@ -158,9 +160,10 @@ describe("runPiHistorian", () => {
 		}
 	});
 
-	it("stores userObservations as user memory candidates in the publish transaction", async () => {
+	it("stores userObservations as candidates (post-commit) when user memories are enabled", async () => {
 		const { db } = await runHistorianWith({
 			outputs: [successXmlWithUserObservation("User prefers concise answers.")],
+			userMemoriesEnabled: true,
 		});
 		try {
 			expect(getUserMemoryCandidates(db)).toEqual([
@@ -171,6 +174,17 @@ describe("runPiHistorian", () => {
 					sourceCompartmentEnd: 2,
 				}),
 			]);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+	it("does NOT store userObservations when user memories are disabled (privacy gate)", async () => {
+		const { db } = await runHistorianWith({
+			outputs: [successXmlWithUserObservation("User prefers concise answers.")],
+			userMemoriesEnabled: false,
+		});
+		try {
+			expect(getUserMemoryCandidates(db)).toEqual([]);
 		} finally {
 			closeQuietly(db);
 		}
@@ -187,12 +201,13 @@ describe("runPiHistorian", () => {
 					title: "Initial Pi slice",
 				}),
 			]);
-			expect(getSessionFacts(db, "ses-historian")).toEqual([
-				expect.objectContaining({
-					category: "WORKFLOW_RULES",
-					content: "Pi historian facts can promote to memory.",
-				}),
-			]);
+			// v2 faithful fact lifecycle: facts are NOT written to session_facts
+			// (no REPLACE). They flow to project memory via promotion.
+			expect(getSessionFacts(db, "ses-historian")).toEqual([]);
+			const projectPath = resolveProjectIdentity(process.cwd());
+			expect(
+				getMemoriesByProject(db, projectPath).map((m) => m.content),
+			).toContain("Pi historian facts can promote to memory.");
 		} finally {
 			closeQuietly(db);
 		}
@@ -213,18 +228,20 @@ describe("runPiHistorian", () => {
 		}
 	});
 
-	it("writes Pi harness attribution on published compartments and facts", async () => {
+	it("writes Pi harness attribution on published compartments", async () => {
 		const { db } = await runHistorianWith({ outputs: [successXml()] });
 		try {
 			const compartmentHarness = db
 				.prepare("SELECT harness FROM compartments WHERE session_id = ?")
 				.get("ses-historian") as { harness: string };
-			const factHarness = db
-				.prepare("SELECT harness FROM session_facts WHERE session_id = ?")
-				.get("ses-historian") as { harness: string };
 
 			expect(compartmentHarness.harness).toBe("pi");
-			expect(factHarness.harness).toBe("pi");
+			// v2 faithful facts: no session_facts rows are written anymore;
+			// facts are promoted to project memory instead.
+			const factRow = db
+				.prepare("SELECT harness FROM session_facts WHERE session_id = ?")
+				.get("ses-historian");
+			expect(factRow).toBeNull();
 		} finally {
 			closeQuietly(db);
 		}
@@ -331,12 +348,11 @@ describe("runPiHistorian", () => {
 					2,
 					expect.not.objectContaining({ fallbackModels: expect.anything() }),
 				);
-				// Editor output won — the persisted fact is from the editor.
-				expect(getSessionFacts(db, "ses-historian")).toEqual([
-					expect.objectContaining({
-						content: "Edited fact replaced the draft.",
-					}),
-				]);
+				// Editor output won — the promoted fact is from the editor.
+				const projectPath = resolveProjectIdentity(process.cwd());
+				expect(
+					getMemoriesByProject(db, projectPath).map((m) => m.content),
+				).toContain("Edited fact replaced the draft.");
 			} finally {
 				closeQuietly(db);
 			}
@@ -351,10 +367,11 @@ describe("runPiHistorian", () => {
 			});
 			try {
 				expect(runner.run).toHaveBeenCalledTimes(2);
-				// Draft fact is published despite editor failure (no data loss).
-				expect(getSessionFacts(db, "ses-historian")).toEqual([
-					expect.objectContaining({ content: "Original draft fact." }),
-				]);
+				// Draft fact is promoted despite editor failure (no data loss).
+				const projectPath = resolveProjectIdentity(process.cwd());
+				expect(
+					getMemoriesByProject(db, projectPath).map((m) => m.content),
+				).toContain("Original draft fact.");
 				// Compartments still persisted.
 				expect(getCompartments(db, "ses-historian")).toEqual([
 					expect.objectContaining({ title: "Initial Pi slice" }),

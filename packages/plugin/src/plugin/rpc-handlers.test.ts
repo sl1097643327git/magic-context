@@ -7,6 +7,7 @@ import { resolveProjectIdentity } from "../features/magic-context/memory/project
 import { runMigrations } from "../features/magic-context/migrations";
 import { initializeDatabase } from "../features/magic-context/storage-db";
 import { createLiveSessionState } from "../hooks/magic-context/live-session-state";
+import { estimateTokens } from "../hooks/magic-context/read-session-formatting";
 import { clearModelsDevCache, refreshModelLimitsFromApi } from "../shared/models-dev-cache";
 import { Database } from "../shared/sqlite";
 import { closeQuietly } from "../shared/sqlite-helpers";
@@ -102,25 +103,37 @@ describe("buildSidebarSnapshot — memory tokens fallback (bug #1)", () => {
         }
     });
 
-    test("uses cached memory_block_cache when present (no on-demand render needed)", () => {
+    test("memory bucket measures the <project-memory> slice ACTUALLY in m[0] (v2 wire), not memory_block_cache", () => {
         const db = createTestDb();
         try {
             const sessionId = "ses-test-3";
             const directory = process.cwd();
-            const cached =
-                "<project-memory>\n<USER_DIRECTIVES>\n- foo\n</USER_DIRECTIVES>\n</project-memory>";
+            // m[0] carries the real v2 render (id/category/importance attributes).
+            const m0 =
+                "<session-history>\n</session-history>\n\n" +
+                '<project-memory>\n  <memory id="1" category="ARCHITECTURE" importance="50">a durable architectural fact about the system</memory>\n</project-memory>';
+            // memory_block_cache holds the LEGACY v1 shape — must be IGNORED for
+            // the token bucket now (it under-counts the real injected cost).
+            const v1Cache = "<project-memory>\n- a durable architectural fact\n</project-memory>";
 
             db.prepare(
                 `INSERT INTO session_meta (
                     session_id, last_input_tokens, last_context_percentage,
-                    system_prompt_tokens, memory_block_cache, memory_block_count
-                ) VALUES (?, 50000, 25, 5000, ?, 1)`,
-            ).run(sessionId, cached);
+                    system_prompt_tokens, memory_block_cache, memory_block_count, cached_m0_bytes
+                ) VALUES (?, 50000, 25, 5000, ?, 1, ?)`,
+            ).run(sessionId, v1Cache, Buffer.from(m0, "utf8"));
 
             const snapshot = buildSidebarSnapshot(db, sessionId, directory, undefined, 4000);
             expect(snapshot.memoryBlockCount).toBe(1);
-            // Tokens come from estimating the cached block string directly.
-            expect(snapshot.memoryTokens).toBeGreaterThan(0);
+            // Tokens come from the m[0] v2 slice, which is heavier than the v1
+            // cache shape (has id/category/importance attributes).
+            const v2SliceTokens = snapshot.memoryTokens;
+            expect(v2SliceTokens).toBeGreaterThan(0);
+            // The v2 slice is strictly larger than the v1 cache shape would yield.
+            expect(
+                estimateTokens(m0.match(/<project-memory>[\s\S]*?<\/project-memory>/)?.[0] ?? ""),
+            ).toBe(v2SliceTokens);
+            expect(v2SliceTokens).toBeGreaterThan(estimateTokens(v1Cache));
         } finally {
             closeQuietly(db);
         }
@@ -171,7 +184,7 @@ describe("buildSidebarSnapshot — context limit", () => {
 });
 
 describe("buildStatusDetail — history token reuse (council audit bg_51106601 #1)", () => {
-    test("sets historyBlockTokens from sidebar compartmentTokens + factTokens", () => {
+    test("sets historyBlockTokens from compartmentTokens only (facts retired in v2)", () => {
         const db = createTestDb();
         try {
             const sessionId = "ses-status-history-tokens";
@@ -214,9 +227,12 @@ describe("buildStatusDetail — history token reuse (council audit bg_51106601 #
 
             const detail = buildStatusDetail(db, sessionId, directory);
 
+            // v2: facts are retired as a render source (promoted to memories), so
+            // factTokens is 0 and the history block is compartments only — facts
+            // no longer contribute to rendered <session-history> bytes.
             expect(detail.compartmentTokens).toBeGreaterThan(0);
-            expect(detail.factTokens).toBeGreaterThan(0);
-            expect(detail.historyBlockTokens).toBe(detail.compartmentTokens + detail.factTokens);
+            expect(detail.factTokens).toBe(0);
+            expect(detail.historyBlockTokens).toBe(detail.compartmentTokens);
         } finally {
             closeQuietly(db);
         }

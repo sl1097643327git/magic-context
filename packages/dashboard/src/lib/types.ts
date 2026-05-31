@@ -177,12 +177,17 @@ export interface Compartment {
   start_time?: number;
   /** Resolved from OpenCode DB — epoch ms */
   end_time?: number;
-  /**
-   * Compression depth (max across the compartment's ordinal range):
-   * 0 = uncompressed, 1 = merged, 2 = caveman-lite, 3 = caveman-full,
-   * 4 = caveman-ultra, 5 = title-only collapse.
-   */
-  compression_depth: number;
+  /** v2 decay-rate score (1–100). Higher decays into lower tiers slower. */
+  importance: number;
+  /** v2 episode classification — may be comma-joined (e.g. "design,bug"). */
+  episode_type?: string;
+  /** v2 paraphrase tiers (P1 verbose → P4 anchor-only). Null/empty for legacy rows. */
+  p1?: string;
+  p2?: string;
+  p3?: string;
+  p4?: string;
+  /** 1 = legacy pre-v2 compartment (no real tiers); 0 = v2 tiered. */
+  legacy: number;
 }
 
 export interface SessionFact {

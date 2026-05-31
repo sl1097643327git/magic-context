@@ -1,14 +1,14 @@
+import { embedAndStoreCompartments } from "../../features/magic-context/compartment-embedding";
+import { insertCompartmentEvents } from "../../features/magic-context/compartment-events";
 import {
     appendCompartments,
     getCompartments,
-    getSessionFacts,
-    replaceSessionFacts,
 } from "../../features/magic-context/compartment-storage";
 // Re-export the historian-state-file helpers so existing callers
 // (compartment-runner-recomp.ts, compartment-runner.ts, tests) keep working
 // unchanged. The implementation moved to ./historian-state-file.ts so Pi
 // can import it without pulling in the full incremental runner.
-import { cleanupHistorianStateFile, maybeWriteHistorianStateFile } from "./historian-state-file";
+import { cleanupHistorianStateFile } from "./historian-state-file";
 
 export {
     cleanupHistorianStateFile,
@@ -21,28 +21,34 @@ import { promoteSessionFactsToMemory } from "../../features/magic-context/memory
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import { getMemoriesByProject } from "../../features/magic-context/memory/storage-memory";
 import {
-    bumpSessionFactsVersion,
     clearEmergencyRecovery,
     clearHistorianFailureState,
+    getOverflowState,
     incrementHistorianFailure,
     setPendingCompactionMarkerState,
 } from "../../features/magic-context/storage";
+import {
+    type HistorianRunInput,
+    recordHistorianRun,
+    summarizeImportance,
+    tallyFactsByCategory,
+} from "../../features/magic-context/storage-historian-runs";
 import { updateSessionMeta } from "../../features/magic-context/storage-meta";
+import { getLatestHistorianInvocationId } from "../../features/magic-context/storage-subagent-invocations";
 import { insertUserMemoryCandidates } from "../../features/magic-context/user-memory/storage-user-memory";
 import { normalizeSDKResponse } from "../../shared";
 import { describeError } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
 import { updateCompactionMarkerAfterPublication } from "./compaction-marker-manager";
 import { buildCompartmentAgentPrompt } from "./compartment-prompt";
-import { runCompressionPassIfNeeded } from "./compartment-runner-compressor";
 import { queueDropsForCompartmentalizedMessages } from "./compartment-runner-drop-queue";
 import { runValidatedHistorianPass } from "./compartment-runner-historian";
-import { buildExistingStateXml } from "./compartment-runner-state-xml";
 import type { CompartmentRunnerDeps } from "./compartment-runner-types";
 import { validateChunkCoverage, validateStoredCompartments } from "./compartment-runner-validation";
 import { clearInjectionCache, renderMemoryBlock } from "./inject-compartments";
 import { onNoteTrigger } from "./note-nudger";
 import { getProtectedTailStartOrdinal, readSessionChunk } from "./read-session-chunk";
+import { buildReferenceBlocks } from "./reference-retrieval";
 import { sendIgnoredMessage } from "./send-session-notification";
 
 /** Suppress repeated historian failure notifications — at most once per 60 seconds per session */
@@ -77,6 +83,48 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
     let issueNotified = false;
     let stateFilePath: string | undefined;
 
+    // historian_runs telemetry (migration v24). Captured across the run and
+    // recorded ONCE in `finally` so every exit path (no-op, failure, success) is
+    // logged. Best-effort: recordHistorianRun never throws into this path.
+    const runStartedAt = Date.now();
+    const invocationBaseline = getLatestHistorianInvocationId(db, sessionId);
+    const telemetry: Partial<HistorianRunInput> = {
+        runKind: "incremental",
+        status: "failed", // pessimistic default; overwritten on no-op/success
+    };
+    const recordTelemetry = (): void => {
+        // Link the FK only when a NEW historian invocation was recorded during
+        // this run (serialized per session, so the newest > baseline is ours).
+        const latest = getLatestHistorianInvocationId(db, sessionId);
+        const invocationId =
+            latest != null && (invocationBaseline == null || latest > invocationBaseline)
+                ? latest
+                : null;
+        recordHistorianRun(db, {
+            sessionId,
+            harness: "opencode",
+            subagentInvocationId: invocationId,
+            runKind: telemetry.runKind ?? "incremental",
+            status: telemetry.status ?? "failed",
+            failureReason: telemetry.failureReason ?? null,
+            chunkStartOrdinal: telemetry.chunkStartOrdinal ?? null,
+            chunkEndOrdinal: telemetry.chunkEndOrdinal ?? null,
+            unprocessedFrom: telemetry.unprocessedFrom ?? null,
+            compartmentsProduced: telemetry.compartmentsProduced ?? 0,
+            compartmentIdMin: telemetry.compartmentIdMin ?? null,
+            compartmentIdMax: telemetry.compartmentIdMax ?? null,
+            factsEmitted: telemetry.factsEmitted ?? 0,
+            factsByCategory: telemetry.factsByCategory ?? null,
+            eventsEmitted: telemetry.eventsEmitted ?? 0,
+            importanceMin: telemetry.importanceMin ?? null,
+            importanceMax: telemetry.importanceMax ?? null,
+            importanceAvg: telemetry.importanceAvg ?? null,
+            discardedLast: telemetry.discardedLast ?? false,
+            legacy: telemetry.legacy ?? false,
+        });
+        void runStartedAt; // (kept for future duration column; timing lives on the FK row)
+    };
+
     const notifyHistorianIssue = async (message: string): Promise<void> => {
         issueNotified = true;
         if (shouldSuppressHistorianAlert(sessionId)) {
@@ -89,11 +137,9 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
     updateSessionMeta(db, sessionId, { compartmentInProgress: true });
 
     try {
-        const existingCompartments = getCompartments(db, sessionId);
-        const existingFacts = getSessionFacts(db, sessionId);
-
-        const priorCompartments = existingCompartments;
-        const priorFacts = existingFacts;
+        const priorCompartments = getCompartments(db, sessionId);
+        // v2: session facts are no longer read here — the unbounded existing_state
+        // dump is gone. Facts dedup against <project-memory> in the prompt instead.
 
         const existingValidationError = validateStoredCompartments(priorCompartments);
         if (existingValidationError) {
@@ -104,6 +150,7 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             // This is a real failure (stored compartments are corrupt) — record
             // it so `doctor --issue` and the >=95% abort path can see it.
             incrementHistorianFailure(db, sessionId, existingValidationError);
+            telemetry.failureReason = `existing-validation: ${existingValidationError}`;
             await notifyHistorianIssue(
                 `## Historian alert\n\nHistorian skipped this session because existing stored compartments are invalid: ${existingValidationError}\n\nNo new compartments or facts were written. Rebuild or clear the broken compartments before continuing.`,
             );
@@ -131,10 +178,14 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
                 `historian no-op: protectedTailStart=${protectedTailStart} <= offset=${offset} — nothing to compact`,
             );
             clearEmergencyRecovery(db, sessionId);
+            telemetry.status = "noop";
+            telemetry.failureReason = "nothing to compact before protected tail";
             return;
         }
 
         const chunk = readSessionChunk(sessionId, historianChunkTokens, offset, protectedTailStart);
+        telemetry.chunkStartOrdinal = chunk.startIndex;
+        telemetry.chunkEndOrdinal = chunk.endIndex;
         if (!chunk.text || chunk.messageCount === 0) {
             // Same logic as above: there are eligible raw messages by
             // ordinal, but every one of them was filtered as noise (ignored
@@ -147,11 +198,14 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
                 `historian no-op: chunk empty after filtering (messageCount=${chunk.messageCount}, textLen=${chunk.text?.length ?? 0}) range=${offset}-${protectedTailStart - 1}`,
             );
             clearEmergencyRecovery(db, sessionId);
+            telemetry.status = "noop";
+            telemetry.failureReason = "chunk empty after filtering";
             return;
         }
 
         const chunkCoverageError = validateChunkCoverage(chunk);
         if (chunkCoverageError) {
+            telemetry.failureReason = `chunk-coverage: ${chunkCoverageError}`;
             sessionLog(
                 sessionId,
                 `historian failure: source=chunk-coverage reason="${chunkCoverageError}" chunkRange=${chunk.startIndex}-${chunk.endIndex}`,
@@ -167,39 +221,30 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             return;
         }
 
-        // Render project memories as read-only reference so historian can dedup facts against them
+        // v2 bounded reference model (replaces the unbounded existing_state dump):
+        //   - 4 rotating cross-project seeds + last-6 recency compartments (no
+        //     embedding at historian time), built from this session's prior
+        //     compartments.
+        //   - <project-memory> for fact dedup (consolidation-bounded).
+        // No temp-file offload needed — the bounded blocks stay well within
+        // serialization limits.
         const projectPath = resolveProjectIdentity(directory ?? process.cwd());
         const memories = getMemoriesByProject(db, projectPath, ["active", "permanent"]);
-        const memoryBlock = renderMemoryBlock(memories) ?? undefined;
+        const projectMemory = renderMemoryBlock(memories) ?? "";
 
-        const existingState =
-            priorCompartments.length > 0 || priorFacts.length > 0
-                ? buildExistingStateXml(priorCompartments, priorFacts, memoryBlock)
-                : memoryBlock
-                  ? `${memoryBlock}\n\nThis is your first run. No existing compartments or facts.`
-                  : "This is your first run. No existing state.";
+        const references = buildReferenceBlocks({
+            sessionId,
+            chunkStart: chunk.startIndex,
+            sessionCompartments: priorCompartments,
+        });
 
-        // Write large existing state to a project-local temp file so the
-        // prompt body stays within HTTP/SDK serialization limits. The file
-        // lives under <project>/.opencode/magic-context/historian/ so OpenCode's
-        // permission system treats it as project-internal and historian's Read
-        // tool call never triggers an `external_directory` prompt. Deleted in
-        // finally{}. The session directory is resolved a few lines below; we
-        // need to pass `directory` here because `sessionDirectory` isn't bound
-        // yet at this point in the flow.
-        stateFilePath = maybeWriteHistorianStateFile(sessionId, existingState, directory);
-        if (stateFilePath) {
-            sessionLog(
-                sessionId,
-                `historian: existing state offloaded to file (${existingState.length} chars) → ${stateFilePath}`,
-            );
-        }
-
-        const prompt = buildCompartmentAgentPrompt(
-            existingState,
-            `Messages ${chunk.startIndex}-${chunk.endIndex}:\n\n${chunk.text}`,
-            { stateFilePath },
-        );
+        const prompt = buildCompartmentAgentPrompt({
+            seedExamples: references.seedExamples,
+            sessionReferences: references.sessionReferences,
+            projectMemory,
+            inputSource: `Messages ${chunk.startIndex}-${chunk.endIndex}:\n\n${chunk.text}`,
+            memoryEnabled: deps.memoryEnabled !== false,
+        });
 
         // Intentional: session.get failure is non-fatal — we fall back to deps.directory
         const parentSessionResponse = await client.session
@@ -247,16 +292,50 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
                 `historian failure: source=validation reason="${validatedPass.error}" chunkRange=${chunk.startIndex}-${chunk.endIndex} fallbackModel=${deps.fallbackModelId ?? "<none>"} twoPass=${deps.historianTwoPass ? "true" : "false"}`,
             );
             incrementHistorianFailure(db, sessionId, validatedPass.error);
+            telemetry.failureReason = `validation: ${validatedPass.error}`;
             await notifyHistorianIssue(
                 `## Historian alert\n\n${validatedPass.error}\n\nNo new compartments or facts were written. Check the historian model/output and try again.`,
             );
             return;
         }
 
-        const newCompartments = validatedPass.compartments;
+        const emittedCompartments = validatedPass.compartments;
+
+        // Discard-last boundary healing: the LAST compartment of a greedy-consume
+        // run was decided WITHOUT lookahead (historian can't see past the chunk),
+        // so its boundary is structurally unreliable — unlike every earlier
+        // compartment, which the messages that followed it validated. If historian
+        // consumed ~the whole chunk (≤ BOUNDARY_HEALING_SLACK messages of lookahead
+        // past the last compartment), drop that provisional last compartment so it
+        // is re-derived next run with real following context. The existing
+        // `offset = lastCompartment.end + 1` logic then re-reads its range at the
+        // head — zero extra plumbing. Guards:
+        //   - k >= 2: never drop the only compartment (would make zero progress).
+        //   - not emergency: at ≥95% recovery we need maximum relief NOW, so keep
+        //     all k and accept the boundary risk (correctness > quality).
+        // Self-healing: a wrong discard re-derives the same compartment next run
+        // (now non-last → persisted), so erring toward more slack is safe.
+        const BOUNDARY_HEALING_SLACK = 2;
+        const inEmergency = getOverflowState(db, sessionId).needsEmergencyRecovery;
+        let persistedCompartments = emittedCompartments;
+        if (!inEmergency && emittedCompartments.length >= 2) {
+            const lastEmitted = emittedCompartments[emittedCompartments.length - 1];
+            const lookaheadMargin = chunk.endIndex - lastEmitted.endMessage;
+            if (lookaheadMargin <= BOUNDARY_HEALING_SLACK) {
+                persistedCompartments = emittedCompartments.slice(0, -1);
+                telemetry.discardedLast = true;
+                sessionLog(
+                    sessionId,
+                    `historian discard-last: dropped provisional compartment ${lastEmitted.startMessage}-${lastEmitted.endMessage} (lookaheadMargin=${lookaheadMargin} <= ${BOUNDARY_HEALING_SLACK}); will re-derive from raw next run`,
+                );
+            }
+        }
+
+        const newCompartments = persistedCompartments;
 
         const lastNewEnd = newCompartments[newCompartments.length - 1]?.endMessage ?? 0;
         if (lastNewEnd + 1 <= offset) {
+            telemetry.failureReason = `no forward progress beyond raw message ${offset - 1}`;
             sessionLog(
                 sessionId,
                 `historian failure: source=no-progress reason="historian returned compartments that did not advance past raw message ${offset - 1}" newCompartmentCount=${newCompartments.length} lastNewEnd=${lastNewEnd} priorEnd=${offset - 1}`,
@@ -307,9 +386,14 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
                 );
                 return;
             }
-            appendCompartments(db, sessionId, newCompartments);
-            replaceSessionFacts(db, sessionId, validatedPass.facts ?? []);
-            bumpSessionFactsVersion(db, sessionId);
+            appendCompartments(db, sessionId, persistedCompartments);
+            // v2 faithful fact lifecycle: facts are NOT a REPLACE-the-whole-list
+            // store anymore. The historian emits only THIS chunk's facts (deduped
+            // against <project-memory> in the prompt); they flow to project memory
+            // via promoteSessionFactsToMemory below. session_facts is no longer
+            // written/bumped — promoted facts reach the agent through the
+            // renderer's m[1] new-memories watermark. (No replaceSessionFacts /
+            // bumpSessionFactsVersion.)
             clearHistorianFailureState(db, sessionId);
             // Successful historian publication means the overflow recovery is
             // complete for this session. Clear the flag so we don't keep
@@ -343,18 +427,91 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             clearInjectionCache(sessionId);
         }
         deps.onCompartmentStatePublished?.(sessionId);
+
+        // Use the RESOLVED session directory for memory project identity, not
+        // raw deps.directory. deps.directory can be empty even
+        // when the session has a valid directory (resolved via session.get
+        // above); using it directly made promotion + embedding silently no-op.
+        const promotionDirectory = sessionDirectory || deps.directory;
+
+        // discard-last: when the provisional last compartment was dropped, its
+        // facts/events are NOT durable yet — they will be re-derived
+        // next run with real following context. Facts are unanchored, so we
+        // cannot distinguish persisted-range facts from discarded-tail facts;
+        // the safe choice is to SKIP fact promotion entirely on a discard-last
+        // run. (Dedup would catch exact re-emissions next run, but reworded
+        // facts could double up.) Events ARE anchored, so we filter them by
+        // persisted range below instead of skipping wholesale.
+        const discardedLast = persistedCompartments.length < emittedCompartments.length;
+
         // Issue #44: gate promotion behind both `memory.enabled` and
         // `memory.auto_promote`. Without this, historian unconditionally
         // wrote project memories (with embeddings) even for users who
         // explicitly disabled the memory feature in config.
-        if (deps.directory && deps.memoryEnabled !== false && deps.autoPromote !== false) {
-            await deps.ensureProjectRegistered?.(deps.directory, db);
+        // Two distinct gates:
+        //  - embeddingActive: embeddings + project registration fire whenever the
+        //    memory FEATURE is enabled. They are the substrate for ctx_search +
+        //    future dreamer cross-linking and must NOT depend on auto_promote.
+        //  - promotionActive: writing facts as project memories additionally
+        //    requires auto_promote (a user who disabled auto-promotion still wants
+        //    search/embedding, just not auto-written memories).
+        const embeddingActive = !!promotionDirectory && deps.memoryEnabled !== false;
+        const promotionActive = embeddingActive && deps.autoPromote !== false;
+
+        // Register the project ONCE up front (not inside the promotion block):
+        // embeddings below run even on a discard-last pass that skips promotion,
+        // and embedTextForProject() silently no-ops without a registration.
+        if (embeddingActive) {
+            await deps.ensureProjectRegistered?.(promotionDirectory, db);
+        }
+
+        // discard-last: skip fact promotion for the discarded provisional
+        // compartment (it re-emits next run). Registration already happened above.
+        if (promotionActive && !discardedLast) {
             promoteSessionFactsToMemory(
                 db,
                 sessionId,
-                resolveProjectIdentity(deps.directory),
+                resolveProjectIdentity(promotionDirectory),
                 validatedPass.facts ?? [],
             );
+        }
+
+        // v2 (E2): resolve durable ids for the compartments we just appended.
+        // They are the last `persistedCompartments.length` rows by sequence
+        // (appendCompartments inserts at the tail). Used for events anchoring +
+        // embedding. Pure DB read — cheap, no message mutation.
+        const persistedIds = getCompartments(db, sessionId)
+            .slice(-persistedCompartments.length)
+            .map((c) => c.id);
+
+        // v2 (E2): persist historian-extracted events (stored, NOT rendered).
+        // Independent of memory flags — events are a separate corpus for a future
+        // dreamer aggregation feature, not project memory. Best-effort.
+        // discard-last: drop events anchored to the discarded provisional
+        // compartment (atCompartment is a 1-based index into the EMITTED list;
+        // anything > persistedCompartments.length pointed at the dropped tail).
+        // They re-emit next run anchored to the persisted range.
+        const publishableEvents = (validatedPass.events ?? []).filter(
+            (e) => e.atCompartment == null || e.atCompartment <= persistedCompartments.length,
+        );
+        if (publishableEvents.length > 0) {
+            try {
+                insertCompartmentEvents(db, sessionId, publishableEvents, persistedIds);
+                sessionLog(sessionId, `stored ${publishableEvents.length} compartment event(s)`);
+            } catch (error) {
+                sessionLog(sessionId, "failed to store compartment events:", error);
+            }
+        }
+
+        // v2 (E2): compute + store P1 embeddings (LOCKED substrate for ctx_search
+        // + future dreamer cross-linking). Fire-and-forget, best-effort, gated by
+        // memory flags so a memory-off user never hits the embedding endpoint.
+        if (embeddingActive) {
+            const projectIdentity = resolveProjectIdentity(promotionDirectory);
+            const toEmbed = persistedCompartments
+                .map((c, i) => ({ id: persistedIds[i], p1: c.p1 ?? c.content }))
+                .filter((c) => typeof c.id === "number" && c.p1.length > 0);
+            void embedAndStoreCompartments(db, sessionId, projectIdentity, toEmbed);
         }
 
         queueDropsForCompartmentalizedMessages(db, sessionId, lastCompartmentEnd);
@@ -374,29 +531,42 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             );
         }
 
-        // Run compression pass if history block exceeds budget
-        if (deps.historyBudgetTokens && deps.historyBudgetTokens > 0) {
-            await runCompressionPassIfNeeded({
-                client,
-                db,
-                sessionId,
-                directory: sessionDirectory,
-                historyBudgetTokens: deps.historyBudgetTokens,
-                historianTimeoutMs,
-                fallbackModels: deps.fallbackModels,
-                minCompartmentRatio: deps.compressorMinCompartmentRatio,
-                maxMergeDepth: deps.compressorMaxMergeDepth,
-            });
-            // No marker update needed after compression — marker uses static placeholder text.
-            // Compressor changes compartment content but not the boundary ordinal.
-        }
-
+        // v2: the LLM compressor is gone — deterministic decay-tier rendering
+        // (decay-render.ts) replaces it. Older compartments demote tiers at
+        // render time with no LLM pass.
         updateSessionMeta(db, sessionId, { compartmentInProgress: false });
         completedSuccessfully = true;
+
+        // historian_runs telemetry — full success metrics (recorded in finally).
+        {
+            const facts = validatedPass.facts ?? [];
+            const validIds = persistedIds.filter((id): id is number => typeof id === "number");
+            const imp = summarizeImportance(persistedCompartments.map((c) => c.importance ?? 50));
+            telemetry.status = "success";
+            telemetry.failureReason = null;
+            telemetry.unprocessedFrom = lastCompartmentEnd + 1;
+            telemetry.compartmentsProduced = persistedCompartments.length;
+            telemetry.compartmentIdMin = validIds.length > 0 ? Math.min(...validIds) : null;
+            telemetry.compartmentIdMax = validIds.length > 0 ? Math.max(...validIds) : null;
+            telemetry.factsEmitted = facts.length;
+            telemetry.factsByCategory = facts.length > 0 ? tallyFactsByCategory(facts) : null;
+            telemetry.eventsEmitted = publishableEvents.length;
+            telemetry.importanceMin = imp.min;
+            telemetry.importanceMax = imp.max;
+            telemetry.importanceAvg = imp.avg;
+            // legacy stays false — incremental publish always produces v2 rows.
+        }
+
         onNoteTrigger(db, sessionId, "historian_complete");
 
-        // Store user behavior observations as candidates if user memories are enabled
-        if (validatedPass.userObservations && validatedPass.userObservations.length > 0) {
+        // Store user behavior observations as candidates ONLY when the user-memory
+        // feature is enabled. Without this gate we'd persist behavioral candidates
+        // for users who opted out of user memories entirely (privacy).
+        if (
+            deps.experimentalUserMemories === true &&
+            validatedPass.userObservations &&
+            validatedPass.userObservations.length > 0
+        ) {
             try {
                 const lastNew = newCompartments[newCompartments.length - 1];
                 insertUserMemoryCandidates(
@@ -419,6 +589,7 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
     } catch (error: unknown) {
         // Historian runs are fail-closed because they update durable compartment state.
         const desc = describeError(error);
+        telemetry.failureReason = `exception: ${desc.brief}`;
         sessionLog(
             sessionId,
             `historian failure: source=exception ${desc.brief}${desc.stackHead ? ` stackHead="${desc.stackHead}"` : ""}`,
@@ -433,6 +604,8 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
         if (!completedSuccessfully) {
             updateSessionMeta(db, sessionId, { compartmentInProgress: false });
         }
+        // Record one historian_runs row for this attempt (every exit path).
+        recordTelemetry();
         cleanupHistorianStateFile(stateFilePath);
     }
 }

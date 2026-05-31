@@ -197,14 +197,6 @@ describe("source contract: peek-then-drain in runPipeline (history)", () => {
 		expect(code).toContain("clearedReasoningThroughTag: combinedWatermark");
 	});
 
-	test("compressor runs on scheduler execute and stamps cooldown only on publish", () => {
-		expect(code).toContain('args.schedulerDecision !== "execute"');
-		const markIdx = code.indexOf("markPiCompressorRun(sessionId)");
-		const thenIdx = code.indexOf(".then((didPublish) =>");
-		expect(thenIdx).toBeGreaterThan(0);
-		expect(markIdx).toBeGreaterThan(thenIdx);
-	});
-
 	test("model switch reset clears usage, reasoning, failure, limit, and recovery state", () => {
 		expect(code).toContain("clearedReasoningThroughTag: 0");
 		expect(code).toContain("clearHistorianFailureState(options.db, sessionId)");

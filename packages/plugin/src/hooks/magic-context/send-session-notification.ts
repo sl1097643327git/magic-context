@@ -63,11 +63,17 @@ export async function sendIgnoredMessage(
     sessionId: string,
     text: string,
     params: NotificationParams,
+    // When true, ALWAYS persist as an ignored message (skip the TUI toast path)
+    // so the content survives in scrollback. Used for outcomes of long-running
+    // background work (e.g. session-upgrade result) where a transient 5s toast
+    // is too easy to miss — dogfood 2026-05-30.
+    forcePersist = false,
 ): Promise<void> {
-    // In TUI mode, show as toast via RPC instead of ignored message.
+    // In TUI mode, show as toast via RPC instead of ignored message — UNLESS the
+    // caller asked to force-persist (long-running outcome must stay in scrollback).
     // Cannot use process.env.OPENCODE_CLIENT — it's undefined in the server plugin process.
     const { isTuiConnected: checkTui } = await import("../../shared/rpc-notifications");
-    if (checkTui()) {
+    if (!forcePersist && checkTui()) {
         try {
             const c = client as Record<string, unknown>;
             const tui = c?.tui as Record<string, unknown> | undefined;

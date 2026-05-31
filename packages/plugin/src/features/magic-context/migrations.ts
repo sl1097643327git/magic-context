@@ -741,11 +741,33 @@ const MIGRATIONS: Migration[] = [
             }
 
             if (hasCompartmentsTable) {
+                // v2 paraphrase tiers (model B: dedicated columns, not XML-in-content).
+                // Deviation from plan §3.4 (tiers-in-content) — see .alfonso/audits/v2-completeness/AUDIT.md.
+                ensureColumn(db, "compartments", "p1", "TEXT");
+                ensureColumn(db, "compartments", "p2", "TEXT");
+                ensureColumn(db, "compartments", "p3", "TEXT");
+                ensureColumn(db, "compartments", "p4", "TEXT");
                 ensureColumn(db, "compartments", "importance", "INTEGER NOT NULL DEFAULT 50");
                 ensureColumn(db, "compartments", "episode_type", "TEXT");
                 ensureColumn(db, "compartments", "p1_embedding", "BLOB");
                 ensureColumn(db, "compartments", "p1_embedding_model_id", "TEXT");
                 ensureColumn(db, "compartments", "legacy", "INTEGER NOT NULL DEFAULT 0");
+            }
+
+            const hasRecompCompartmentsTable = tableExists(db, "recomp_compartments");
+            if (hasRecompCompartmentsTable) {
+                // Tiers must round-trip through recomp staging or /ctx-recomp re-degrades v2 compartments to v1.
+                ensureColumn(db, "recomp_compartments", "p1", "TEXT");
+                ensureColumn(db, "recomp_compartments", "p2", "TEXT");
+                ensureColumn(db, "recomp_compartments", "p3", "TEXT");
+                ensureColumn(db, "recomp_compartments", "p4", "TEXT");
+                ensureColumn(
+                    db,
+                    "recomp_compartments",
+                    "importance",
+                    "INTEGER NOT NULL DEFAULT 50",
+                );
+                ensureColumn(db, "recomp_compartments", "episode_type", "TEXT");
             }
 
             if (hasMemoriesTable) {
@@ -829,6 +851,71 @@ const MIGRATIONS: Migration[] = [
             db.prepare(
                 "INSERT OR IGNORE INTO schema_migrations_meta (key, value) VALUES ('v22_legacy_memory_backfill', 'pending')",
             ).run();
+        },
+    },
+    {
+        version: 23,
+        description: "v2 compartment events storage (causal_incident / trajectory_correction)",
+        up: (db: Database) => {
+            // Historian-extracted events. Stored, not rendered, in v2.0 — a corpus
+            // for a future dreamer cross-session aggregation/steering feature.
+            // Parsed kind-agnostically: `kind` = element name, `fields_json` =
+            // child elements as JSON, so new event kinds/fields need no migration.
+            db.exec(`
+                CREATE TABLE IF NOT EXISTS compartment_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    compartment_id INTEGER,
+                    kind TEXT NOT NULL,
+                    at_compartment INTEGER,
+                    fields_json TEXT NOT NULL DEFAULT '{}',
+                    created_at INTEGER NOT NULL,
+                    harness TEXT NOT NULL DEFAULT 'opencode'
+                );
+                CREATE INDEX IF NOT EXISTS idx_compartment_events_session
+                    ON compartment_events(session_id);
+            `);
+        },
+    },
+    {
+        version: 24,
+        description: "historian_runs metrics (per-run quality/cost telemetry)",
+        up: (db: Database) => {
+            // Per historian invocation: input chunk range, output shape
+            // (compartments / facts / events / importance), run kind, and
+            // success/failure — for debugging, quality analysis, and the
+            // productization/training-data roadmap. Tokens + model come from the
+            // FK-linked subagent_invocations row (subagent_invocation_id).
+            db.exec(`
+                CREATE TABLE IF NOT EXISTS historian_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    harness TEXT NOT NULL DEFAULT 'opencode',
+                    subagent_invocation_id INTEGER,
+                    run_kind TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    failure_reason TEXT,
+                    chunk_start_ordinal INTEGER,
+                    chunk_end_ordinal INTEGER,
+                    unprocessed_from INTEGER,
+                    compartments_produced INTEGER NOT NULL DEFAULT 0,
+                    compartment_id_min INTEGER,
+                    compartment_id_max INTEGER,
+                    facts_emitted INTEGER NOT NULL DEFAULT 0,
+                    facts_by_category_json TEXT,
+                    events_emitted INTEGER NOT NULL DEFAULT 0,
+                    importance_min INTEGER,
+                    importance_max INTEGER,
+                    importance_avg REAL,
+                    discarded_last INTEGER NOT NULL DEFAULT 0,
+                    legacy INTEGER NOT NULL DEFAULT 0,
+                    created_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_historian_runs_session
+                    ON historian_runs(session_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_historian_runs_status
+                    ON historian_runs(status, created_at DESC);
+            `);
         },
     },
 ];

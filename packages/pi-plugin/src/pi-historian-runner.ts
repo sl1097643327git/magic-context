@@ -37,12 +37,12 @@
  * see Pi runs in the same `[magic-context][ses_xxx]` format.
  */
 
+import { embedAndStoreCompartments } from "@magic-context/core/features/magic-context/compartment-embedding";
+import { insertCompartmentEvents } from "@magic-context/core/features/magic-context/compartment-events";
 import { isCompartmentLeaseHeld } from "@magic-context/core/features/magic-context/compartment-lease";
 import {
 	appendCompartments,
 	getCompartments,
-	getSessionFacts,
-	replaceSessionFacts,
 } from "@magic-context/core/features/magic-context/compartment-storage";
 import { promoteSessionFactsToMemory } from "@magic-context/core/features/magic-context/memory";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
@@ -50,10 +50,18 @@ import { getMemoriesByProject } from "@magic-context/core/features/magic-context
 import {
 	clearEmergencyRecovery,
 	clearHistorianFailureState,
+	getOverflowState,
 	incrementHistorianFailure,
 	setPendingPiCompactionMarkerState,
 } from "@magic-context/core/features/magic-context/storage";
+import {
+	type HistorianRunInput,
+	recordHistorianRun,
+	summarizeImportance,
+	tallyFactsByCategory,
+} from "@magic-context/core/features/magic-context/storage-historian-runs";
 import { updateSessionMeta } from "@magic-context/core/features/magic-context/storage-meta";
+import { getLatestHistorianInvocationId } from "@magic-context/core/features/magic-context/storage-subagent-invocations";
 import { insertUserMemoryCandidates } from "@magic-context/core/features/magic-context/user-memory/storage-user-memory";
 import {
 	buildCompartmentAgentPrompt,
@@ -62,17 +70,13 @@ import {
 	HISTORIAN_EDITOR_SYSTEM_PROMPT,
 } from "@magic-context/core/hooks/magic-context/compartment-prompt";
 import { queueDropsForCompartmentalizedMessages } from "@magic-context/core/hooks/magic-context/compartment-runner-drop-queue";
-import { buildExistingStateXml } from "@magic-context/core/hooks/magic-context/compartment-runner-state-xml";
 import {
 	buildHistorianRepairPrompt,
 	validateChunkCoverage,
 	validateHistorianOutput,
 	validateStoredCompartments,
 } from "@magic-context/core/hooks/magic-context/compartment-runner-validation";
-import {
-	cleanupHistorianStateFile,
-	maybeWriteHistorianStateFile,
-} from "@magic-context/core/hooks/magic-context/historian-state-file";
+import { cleanupHistorianStateFile } from "@magic-context/core/hooks/magic-context/historian-state-file";
 import { renderMemoryBlock } from "@magic-context/core/hooks/magic-context/inject-compartments";
 import { onNoteTrigger } from "@magic-context/core/hooks/magic-context/note-nudger";
 import {
@@ -81,6 +85,7 @@ import {
 	readSessionChunk,
 	withRawMessageProvider,
 } from "@magic-context/core/hooks/magic-context/read-session-chunk";
+import { buildReferenceBlocks } from "@magic-context/core/hooks/magic-context/reference-retrieval";
 import { describeError } from "@magic-context/core/shared/error-message";
 import { sessionLog } from "@magic-context/core/shared/logger";
 import type { Database } from "@magic-context/core/shared/sqlite";
@@ -89,6 +94,7 @@ import type {
 	SubagentRunner,
 	SubagentRunResult,
 } from "@magic-context/core/shared/subagent-runner";
+import { ensureProjectRegisteredFromPiDirectory } from "./embedding-bootstrap";
 import { convertEntriesToRawMessages } from "./read-session-pi";
 
 const HISTORIAN_AGENT_NAME = "magic-context-historian";
@@ -142,6 +148,9 @@ export interface PiHistorianDeps {
 	memoryEnabled?: boolean;
 	/** Automatic-promotion gate (`memory.auto_promote`). */
 	autoPromote?: boolean;
+	/** User-memory feature gate (`dreamer.user_memories.enabled`). Gates whether
+	 *  historian-extracted user observations are persisted as candidates. */
+	userMemoriesEnabled?: boolean;
 	/** Optional callback invoked on successful publication for cache-bust signaling. */
 	onPublished?: () => void;
 	/** Holder id for the DB-backed compartment-state lease guarding publish paths. */
@@ -175,6 +184,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 		thinkingLevel,
 		memoryEnabled,
 		autoPromote,
+		userMemoriesEnabled,
 		onPublished,
 		compartmentLeaseHolderId,
 		readBranchEntries,
@@ -199,13 +209,20 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 	let completedSuccessfully = false;
 	let stateFilePath: string | undefined;
 
+	// historian_runs telemetry (migration v24) — recorded ONCE in finally so every
+	// exit path is logged. Best-effort. Mirrors the OpenCode incremental runner.
+	const invocationBaseline = getLatestHistorianInvocationId(db, sessionId);
+	const telemetry: Partial<HistorianRunInput> = {
+		runKind: "incremental",
+		status: "failed",
+	};
+
 	try {
 		// All session-data reads in the historian path go through the shared
 		// helpers, which consult our RawMessageProvider for this sessionId.
 		// The withRawMessageProvider scope ensures we unregister even on throw.
 		await withRawMessageProvider(sessionId, provider, async () => {
 			const priorCompartments = getCompartments(db, sessionId);
-			const priorFacts = getSessionFacts(db, sessionId);
 
 			// Sanity-check existing stored state before touching anything.
 			const existingValidationError =
@@ -277,43 +294,27 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			]);
 			const memoryBlock = renderMemoryBlock(memories) ?? undefined;
 
-			const existingState =
-				priorCompartments.length > 0 || priorFacts.length > 0
-					? buildExistingStateXml(priorCompartments, priorFacts, memoryBlock)
-					: memoryBlock
-						? `${memoryBlock}\n\nThis is your first run. No existing compartments or facts.`
-						: "This is your first run. No existing state.";
-
-			// Offload large existing-state XML to a temp file so the inline
-			// prompt body stays small. Long sessions accumulate hundreds of
-			// compartments + memory + facts; passing 100K+ chars inline can
-			// stall the model on certain provider/API combinations
-			// (notably github-copilot/gpt-5.4 via the openai-responses API,
-			// which buffers the full reasoning trace before emitting any
-			// output). The historian agent has access to Pi's built-in Read
-			// tool and the prompt instructs it to read the file before
-			// processing the new chunk. The file lives under
-			// <project>/.opencode/magic-context/historian/ so it stays
-			// inside the project boundary on the OpenCode side and remains a
-			// stable, user-debuggable location for Pi as well. Cleaned up in
-			// finally{}.
-			stateFilePath = maybeWriteHistorianStateFile(
+			// v2 (E6 parity): bounded reference blocks replace the unbounded
+			// existing-state dump. The historian no longer sees ALL prior
+			// compartments — it gets 4 rotating cross-project seed examples
+			// (importance-band calibration) + the last 6 same-session
+			// compartments (continuity) + <project-memory> for fact dedup.
+			// Bounded forever regardless of session age, so no temp-file
+			// offload is needed. Mirrors the OpenCode incremental runner.
+			const projectMemory = memoryBlock ?? "";
+			const references = buildReferenceBlocks({
 				sessionId,
-				existingState,
-				directory,
-			);
-			if (stateFilePath) {
-				sessionLog(
-					sessionId,
-					`historian: existing state offloaded to file (${existingState.length} chars) → ${stateFilePath}`,
-				);
-			}
+				chunkStart: chunk.startIndex,
+				sessionCompartments: priorCompartments,
+			});
 
-			const prompt = buildCompartmentAgentPrompt(
-				existingState,
-				`Messages ${chunk.startIndex}-${chunk.endIndex}:\n\n${chunk.text}`,
-				{ stateFilePath },
-			);
+			const prompt = buildCompartmentAgentPrompt({
+				seedExamples: references.seedExamples,
+				sessionReferences: references.sessionReferences,
+				projectMemory,
+				inputSource: `Messages ${chunk.startIndex}-${chunk.endIndex}:\n\n${chunk.text}`,
+				memoryEnabled: memoryEnabled !== false,
+			});
 
 			// Defensive: use MAX(sequence) + 1 over .length to survive any old
 			// recomp gaps. Same logic as OpenCode runner.
@@ -467,6 +468,58 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				}
 			}
 
+			// Escalate through the configured fallback chain on empty/invalid
+			// output. `runner.run({ fallbackModels })` only iterates the chain on
+			// HARD subagent failures (spawn/non-zero/truncated); a model that
+			// returns ok-but-empty (e.g. a misconfigured primary that emits
+			// nothing) or replies conversationally instead of emitting
+			// compartments passes that gate and lands here as no-output /
+			// validation-failed WITHOUT the chain ever being validated. Mirrors
+			// OpenCode's `runFallbackHistorianPass`: try each configured fallback
+			// model in order, validating output, before bailing. Pi has no
+			// live-session-model last resort (no interactive session model in the
+			// print-mode subagent context), so the chain is just `fallbackModels`.
+			if (validatedPass.kind !== "ok" && (fallbackModels?.length ?? 0) > 0) {
+				const seen = new Set<string>(
+					[historianModel].filter(Boolean) as string[],
+				);
+				for (const candidate of fallbackModels ?? []) {
+					if (!candidate || seen.has(candidate)) continue;
+					seen.add(candidate);
+					sessionLog(
+						sessionId,
+						`historian: escalating to configured fallback model ${candidate}`,
+					);
+					const fbResult = await runner.run({
+						agent: HISTORIAN_AGENT_NAME,
+						systemPrompt: COMPARTMENT_AGENT_SYSTEM_PROMPT,
+						userMessage: prompt,
+						model: candidate,
+						// We drive the iteration here (validating each), so don't let
+						// the runner re-iterate its own throw-only chain.
+						fallbackModels: undefined,
+						timeoutMs: historianTimeoutMs,
+						cwd: directory,
+						thinkingLevel,
+						onProgress: buildProgressLogger("fallback"),
+						accountingSessionId: sessionId,
+						accountingSubagent: "historian",
+					});
+					const fbPass = await validateHistorianResult(
+						fbResult,
+						sessionId,
+						chunk,
+						priorCompartments,
+						sequenceOffset,
+					);
+					if (fbPass.kind === "ok") {
+						validatedPass = fbPass;
+						if (fbResult.ok) validatedDraftText = fbResult.assistantText;
+						break;
+					}
+				}
+			}
+
 			if (validatedPass.kind !== "ok") {
 				const errorMsg =
 					validatedPass.kind === "validation-failed"
@@ -539,7 +592,33 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				}
 			}
 
-			const newCompartments = validatedPass.compartments;
+			// Discard-last boundary healing (E6 parity with OpenCode): the LAST
+			// compartment of a greedy-consume run was decided WITHOUT lookahead,
+			// so its boundary is structurally unreliable. If historian consumed
+			// ~the whole chunk (≤ SLACK messages of lookahead past the last
+			// compartment), drop that provisional compartment so it's re-derived
+			// next run with real following context (offset re-reads its range).
+			// Guards: k >= 2 (never zero-progress), not emergency (keep all for
+			// max relief at ≥95%). Self-healing — a wrong discard re-derives the
+			// same compartment next run.
+			const BOUNDARY_HEALING_SLACK = 2;
+			const inEmergency = getOverflowState(
+				db,
+				sessionId,
+			).needsEmergencyRecovery;
+			const emittedCompartments = validatedPass.compartments;
+			let newCompartments = emittedCompartments;
+			if (!inEmergency && emittedCompartments.length >= 2) {
+				const lastEmitted = emittedCompartments[emittedCompartments.length - 1];
+				const lookaheadMargin = chunk.endIndex - lastEmitted.endMessage;
+				if (lookaheadMargin <= BOUNDARY_HEALING_SLACK) {
+					newCompartments = emittedCompartments.slice(0, -1);
+					sessionLog(
+						sessionId,
+						`historian discard-last: dropped provisional compartment ${lastEmitted.startMessage}-${lastEmitted.endMessage} (lookaheadMargin=${lookaheadMargin} <= ${BOUNDARY_HEALING_SLACK}); will re-derive next run`,
+					);
+				}
+			}
 			const lastNewEnd =
 				newCompartments[newCompartments.length - 1]?.endMessage ?? 0;
 			if (lastNewEnd + 1 <= offset) {
@@ -601,20 +680,18 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					return;
 				}
 				appendCompartments(db, sessionId, newCompartments);
-				replaceSessionFacts(db, sessionId, validatedPass.facts ?? []);
+				// v2 faithful fact lifecycle (E6 parity): facts are no longer a
+				// REPLACE-the-whole-list store. The historian emits only THIS
+				// chunk's facts (deduped against <project-memory> in the prompt);
+				// they flow to project memory via promoteSessionFactsToMemory
+				// (gated, below). No replaceSessionFacts — promoted facts reach
+				// the agent through the renderer's m[1] new-memories watermark.
 				clearHistorianFailureState(db, sessionId);
 				clearEmergencyRecovery(db, sessionId);
-				if (validatedPass.userObservations?.length) {
-					insertUserMemoryCandidates(
-						db,
-						validatedPass.userObservations.map((obs) => ({
-							content: obs,
-							sessionId,
-							sourceCompartmentStart: newCompartments[0]?.startMessage,
-							sourceCompartmentEnd: lastNewEnd,
-						})),
-					);
-				}
+				// userObservations are inserted POST-COMMIT
+				// (best-effort, below), not inside this publish transaction. An
+				// auxiliary user_memory_candidates failure must never roll back
+				// compartment publication. Mirrors OpenCode.
 				if (firstKeptEntryId && lastNewEndMessageId) {
 					setPendingPiCompactionMarkerState(db, sessionId, {
 						firstKeptEntryId,
@@ -645,9 +722,57 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 
 			onPublished?.();
 
-			// Cross-harness memory promotion — facts written by Pi historian
-			// show up alongside facts written by OpenCode historian.
-			if (memoryEnabled !== false && autoPromote !== false) {
+			// user observations are inserted POST-COMMIT,
+			// best-effort, so an auxiliary failure never rolls back the publish.
+			// Gated on the user-memory feature so opted-out users never have
+			// behavioral candidates persisted (privacy parity with OpenCode).
+			if (
+				userMemoriesEnabled === true &&
+				validatedPass.userObservations?.length
+			) {
+				try {
+					insertUserMemoryCandidates(
+						db,
+						validatedPass.userObservations.map((obs) => ({
+							content: obs,
+							sessionId,
+							sourceCompartmentStart: newCompartments[0]?.startMessage,
+							sourceCompartmentEnd: lastNewEnd,
+						})),
+					);
+					sessionLog(
+						sessionId,
+						`stored ${validatedPass.userObservations.length} user memory candidate(s)`,
+					);
+				} catch (error) {
+					sessionLog(
+						sessionId,
+						"failed to store user memory candidates:",
+						error,
+					);
+				}
+			}
+
+			// discard-last: when the provisional last
+			// compartment was dropped, its facts are not durable yet — skip fact
+			// promotion this run (facts are unanchored; re-derived next run).
+			const discardedLast = newCompartments.length < emittedCompartments.length;
+
+			// register the project for embeddings against the
+			// LIVE directory ONCE up front (not inside the promotion block), so a
+			// discard-last pass that skips promotion still registers before the
+			// embedding block below — embedTextForProject() silently no-ops
+			// without a registration. Mirrors OpenCode.
+			// Two distinct gates (parity with OpenCode):
+			// embeddingActive = memory feature on (drives registration + embedding,
+			// the ctx_search / dreamer-linking substrate); promotionActive
+			// additionally requires auto_promote (drives writing facts as memories).
+			const embeddingActive = memoryEnabled !== false;
+			const promotionActive = embeddingActive && autoPromote !== false;
+			if (embeddingActive) {
+				await ensureProjectRegisteredFromPiDirectory(directory, db);
+			}
+			if (promotionActive && !discardedLast) {
 				promoteSessionFactsToMemory(
 					db,
 					sessionId,
@@ -656,23 +781,85 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				);
 			}
 
-			queueDropsForCompartmentalizedMessages(db, sessionId, lastNewEnd);
+			// v2 (E6/E2 parity): resolve durable ids for the just-appended
+			// compartments (last N rows by sequence — appendCompartments inserts
+			// at the tail), then persist events + P1 embeddings. Mirrors the
+			// OpenCode runner.
+			const persistedIds = getCompartments(db, sessionId)
+				.slice(-newCompartments.length)
+				.map((c) => c.id);
 
-			if (validatedPass.userObservations?.length) {
-				sessionLog(
-					sessionId,
-					`stored ${validatedPass.userObservations.length} user memory candidate(s)`,
-				);
+			// Events: stored, NOT rendered. Best-effort. discard-last:
+			// drop events anchored to the discarded provisional compartment.
+			const publishableEvents = (validatedPass.events ?? []).filter(
+				(e) =>
+					e.atCompartment == null || e.atCompartment <= newCompartments.length,
+			);
+			if (publishableEvents.length > 0) {
+				try {
+					insertCompartmentEvents(
+						db,
+						sessionId,
+						publishableEvents,
+						persistedIds,
+					);
+					sessionLog(
+						sessionId,
+						`stored ${publishableEvents.length} compartment event(s)`,
+					);
+				} catch (error) {
+					sessionLog(sessionId, "failed to store compartment events:", error);
+				}
 			}
+
+			// P1 embeddings: LOCKED substrate for ctx_search + future dreamer
+			// cross-linking. Fire-and-forget, best-effort, memory-gated.
+			if (embeddingActive) {
+				const toEmbed = newCompartments
+					.map((c, i) => ({ id: persistedIds[i], p1: c.p1 ?? c.content }))
+					.filter((c) => typeof c.id === "number" && c.p1.length > 0);
+				void embedAndStoreCompartments(db, sessionId, projectPath, toEmbed);
+			}
+
+			queueDropsForCompartmentalizedMessages(db, sessionId, lastNewEnd);
 
 			sessionLog(
 				sessionId,
 				`historian: published ${newCompartments.length} compartment(s), ${validatedPass.facts?.length ?? 0} fact(s) covering messages ${chunk.startIndex}-${lastNewEnd}`,
 			);
 			completedSuccessfully = true;
+
+			// historian_runs telemetry — full success metrics.
+			{
+				const facts = validatedPass.facts ?? [];
+				const validIds = persistedIds.filter(
+					(id): id is number => typeof id === "number",
+				);
+				const imp = summarizeImportance(
+					newCompartments.map((c) => c.importance ?? 50),
+				);
+				telemetry.status = "success";
+				telemetry.chunkStartOrdinal = chunk.startIndex;
+				telemetry.chunkEndOrdinal = chunk.endIndex;
+				telemetry.unprocessedFrom = lastNewEnd + 1;
+				telemetry.compartmentsProduced = newCompartments.length;
+				telemetry.compartmentIdMin =
+					validIds.length > 0 ? Math.min(...validIds) : null;
+				telemetry.compartmentIdMax =
+					validIds.length > 0 ? Math.max(...validIds) : null;
+				telemetry.factsEmitted = facts.length;
+				telemetry.factsByCategory =
+					facts.length > 0 ? tallyFactsByCategory(facts) : null;
+				telemetry.eventsEmitted = publishableEvents.length;
+				telemetry.importanceMin = imp.min;
+				telemetry.importanceMax = imp.max;
+				telemetry.importanceAvg = imp.avg;
+				telemetry.discardedLast = discardedLast;
+			}
 		});
 	} catch (error) {
 		const desc = describeError(error);
+		telemetry.failureReason = `exception: ${desc.brief}`;
 		sessionLog(
 			sessionId,
 			`historian failure: source=exception ${desc.brief}${desc.stackHead ? ` stackHead="${desc.stackHead}"` : ""}`,
@@ -680,10 +867,38 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 		incrementHistorianFailure(db, sessionId, desc.brief);
 		await notify(`Historian failed unexpectedly: ${desc.brief}`);
 	} finally {
-		if (!completedSuccessfully) {
-			updateSessionMeta(db, sessionId, { compartmentInProgress: false });
-		} else {
-			updateSessionMeta(db, sessionId, { compartmentInProgress: false });
+		updateSessionMeta(db, sessionId, { compartmentInProgress: false });
+		// Record one historian_runs row for this attempt (every exit path).
+		try {
+			const latest = getLatestHistorianInvocationId(db, sessionId);
+			const invocationId =
+				latest != null &&
+				(invocationBaseline == null || latest > invocationBaseline)
+					? latest
+					: null;
+			recordHistorianRun(db, {
+				sessionId,
+				harness: "pi",
+				subagentInvocationId: invocationId,
+				runKind: telemetry.runKind ?? "incremental",
+				status: telemetry.status ?? "failed",
+				failureReason: telemetry.failureReason ?? null,
+				chunkStartOrdinal: telemetry.chunkStartOrdinal ?? null,
+				chunkEndOrdinal: telemetry.chunkEndOrdinal ?? null,
+				unprocessedFrom: telemetry.unprocessedFrom ?? null,
+				compartmentsProduced: telemetry.compartmentsProduced ?? 0,
+				compartmentIdMin: telemetry.compartmentIdMin ?? null,
+				compartmentIdMax: telemetry.compartmentIdMax ?? null,
+				factsEmitted: telemetry.factsEmitted ?? 0,
+				factsByCategory: telemetry.factsByCategory ?? null,
+				eventsEmitted: telemetry.eventsEmitted ?? 0,
+				importanceMin: telemetry.importanceMin ?? null,
+				importanceMax: telemetry.importanceMax ?? null,
+				importanceAvg: telemetry.importanceAvg ?? null,
+				discardedLast: telemetry.discardedLast ?? false,
+			});
+		} catch {
+			/* telemetry must not break compaction */
 		}
 		// Best-effort cleanup of the temp state file written when existing
 		// state exceeded the inline threshold. Safe with undefined.
@@ -706,6 +921,11 @@ type ValidationOutcome =
 					: never
 				: never;
 			userObservations?: string[];
+			events?: ReturnType<typeof validateHistorianOutput> extends infer T
+				? T extends { ok: true; events?: infer E }
+					? E
+					: never
+				: never;
 	  }
 	| { kind: "validation-failed"; error: string; rawText: string }
 	| { kind: "spawn-failed"; reason: string; error: string }
@@ -742,6 +962,7 @@ async function validateHistorianResult(
 			compartments: validation.compartments,
 			facts: validation.facts,
 			userObservations: validation.userObservations,
+			events: validation.events,
 		};
 	}
 	return {

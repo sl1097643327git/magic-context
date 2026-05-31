@@ -55,10 +55,6 @@ describe("clearContextHandlerSession internals", () => {
 		// Pinned: was also missing pre-audit.
 		expect(body).toContain("systemPromptRefreshSessions.delete(sessionId)");
 	});
-
-	test("clears compressor cooldown state", () => {
-		expect(body).toContain("clearPiCompressorState(sessionId)");
-	});
 });
 
 describe("session_before_switch handler wiring", () => {

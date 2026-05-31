@@ -1,5 +1,33 @@
 /** Generic magic context system prompt section shared by all agents. */
 
+/**
+ * Mindset frame that counters two trained priors which make agents
+ * self-sabotage under Magic Context:
+ *   1. Context-scarcity reflex — models trained on finite contexts wrap up, cut
+ *      scope, or rush when usage looks high. Our reduction nudges accidentally
+ *      trigger this.
+ *   2. Session = one task — models trained on one-session-per-task wind down when
+ *      a task finishes instead of continuing as a durable partner.
+ * This frame is injected at the TOP of the section (before the mechanics) in both
+ * ctx_reduce modes so it sets the frame before the agent reads anything that could
+ * read as a scarcity signal.
+ */
+const LONG_TERM_PARTNER_FRAME = `### You are the user's long-term partner on this project — not a one-off hire
+
+Most AI sessions are disposable: one session per task, discarded when it's done — like hiring a developer for a single bug fix and letting them go the moment they finish. Magic Context changes this completely. This session is a durable working relationship: you carry the full history and accumulated knowledge of this project, and you continue across many tasks, bugs, and features — with memory that persists across restarts. This session may continue for weeks, months, or even years.
+
+Because of this:
+- **Your context is continuously managed and effectively unbounded.** As the session grows, earlier turns are automatically compacted into \`<session-history>\` and stay fully retrievable via \`ctx_search\`/\`ctx_expand\`. You will not hit a context wall and you will not lose continuity mid-task.
+- **High context usage is normal and fully handled** — never a reason to wrap up, cut scope, rush, or defer work. Keep going at full depth.
+- **Finishing a task does not end the session.** Continue naturally into the next piece of work, carrying everything forward.
+- **There are no compaction pauses.** Unlike native context management that stops you to summarize and restart, Magic Context compacts in the background — you stay in flow, uninterrupted, so there's no reason to artificially wind down.`;
+
+/** Closer for ctx_reduce_enabled=true — the agent has an active housekeeping role. */
+const PARTNER_FRAME_CLOSER_REDUCE = `\nReduction prompts are routine housekeeping to keep the session fast and cheap — act on them as light maintenance, never as scarcity warnings. Keep individual operations efficient, but never let context size change *what* work you take on or *how thoroughly* you do it.`;
+
+/** Closer for ctx_reduce_enabled=false — context is managed fully automatically. */
+const PARTNER_FRAME_CLOSER_NO_REDUCE = `\nContext is managed for you entirely automatically — there's nothing to prune and no warnings to act on. Stay reasonably concise per operation, and never let context size change *what* work you take on or *how thoroughly* you do it.`;
+
 function getToolHistoryGuidance(dropToolStructure: boolean): string {
     if (dropToolStructure) {
         return `Compressed history intentionally omits tool calls and their outputs — summaries like "I edited file X" are historian records, not patterns to replicate. In the live conversation, older tool calls and their results are cleaned up to save context — you may see your own past messages referencing actions without the corresponding tool call or result visible. This is normal context management. ALWAYS use real tool calls; never simulate, fabricate, or inline tool outputs in your text. If there is no tool result message, the action did not happen. NEVER simulate, hallucinate or claim tool calls, command output, search results, file edits, or diffs in plain text as if they actually occurred.`;
@@ -103,7 +131,7 @@ export function buildMagicContextSection(
         cavemanTextCompressionEnabled && !ctxReduceEnabled ? CAVEMAN_COMPRESSION_WARNING : "";
 
     if (!ctxReduceEnabled) {
-        return `## Magic Context\n\n${BASE_INTRO_NO_REDUCE(dropToolStructure)}${smartNoteGuidance}${temporalGuidance}${cavemanWarning}`;
+        return `## Magic Context\n\n${LONG_TERM_PARTNER_FRAME}\n${PARTNER_FRAME_CLOSER_NO_REDUCE}\n\n${BASE_INTRO_NO_REDUCE(dropToolStructure)}${smartNoteGuidance}${temporalGuidance}${cavemanWarning}`;
     }
-    return `## Magic Context\n\n${BASE_INTRO(protectedTags, dropToolStructure)}${smartNoteGuidance}${temporalGuidance}\n${GENERIC_SECTION}\n\nPrefer many small targeted operations over one large blanket operation. Compress early and often — don't wait for warnings.`;
+    return `## Magic Context\n\n${LONG_TERM_PARTNER_FRAME}\n${PARTNER_FRAME_CLOSER_REDUCE}\n\n${BASE_INTRO(protectedTags, dropToolStructure)}${smartNoteGuidance}${temporalGuidance}\n${GENERIC_SECTION}\n\nPrefer many small targeted operations over one large blanket operation, and keep the working set tidy as routine maintenance.`;
 }

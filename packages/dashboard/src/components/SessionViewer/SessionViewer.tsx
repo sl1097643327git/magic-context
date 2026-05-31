@@ -37,60 +37,74 @@ const HARNESS_FILTER_KEY = "mc_sessions_harness_filter";
 const PAGE_SIZE = 50;
 
 /**
- * Compression depth → user-facing label + `.pill` color variant.
+ * v2 importance (decay-rate, 1–100) → user-facing band label + `.pill` color.
  *
- * Maps Magic Context compressor tiers:
- *   0 → no compression (uncompressed historian output)
- *   1 → merge-only (no caveman text compression)
- *   2 → caveman-lite
- *   3 → caveman-full
- *   4 → caveman-ultra
- *   5 → title-only collapse (no LLM call, full body discarded)
- *
- * Returns `null` for depth 0 so callers can render nothing in the common case.
+ * Importance is how slowly a compartment decays into lower render tiers:
+ * higher = stays at verbose tiers longer. Bands mirror the decay-curve's
+ * intuition (low decays fast, high is sticky), not the deleted compressor
+ * depth model.
  */
-function compressionDepthInfo(
-  depth: number,
-): { label: string; pillColor: "gray" | "blue" | "amber" | "red"; title: string } | null {
-  if (!depth || depth < 1) return null;
-  switch (depth) {
-    case 1:
-      return {
-        label: "merged",
-        pillColor: "blue",
-        title: "Depth 1 · merged with neighbors (no text compression yet)",
-      };
-    case 2:
-      return {
-        label: "lite",
-        pillColor: "gray",
-        title: "Depth 2 · caveman-lite text compression",
-      };
-    case 3:
-      return {
-        label: "full",
-        pillColor: "amber",
-        title: "Depth 3 · caveman-full text compression",
-      };
-    case 4:
-      return {
-        label: "ultra",
-        pillColor: "amber",
-        title: "Depth 4 · caveman-ultra text compression",
-      };
-    case 5:
-      return {
-        label: "title-only",
-        pillColor: "red",
-        title: "Depth 5 · title-only collapse (body discarded, no LLM call)",
-      };
-    default:
-      return {
-        label: `d${depth}`,
-        pillColor: "red",
-        title: `Depth ${depth} · beyond standard tier table`,
-      };
+function importanceInfo(importance: number): {
+  label: string;
+  pillColor: "gray" | "blue" | "amber" | "red";
+  title: string;
+} {
+  const imp = Number.isFinite(importance) ? importance : 50;
+  let band: { label: string; pillColor: "gray" | "blue" | "amber" | "red" };
+  if (imp >= 80) band = { label: "critical", pillColor: "red" };
+  else if (imp >= 60) band = { label: "high", pillColor: "amber" };
+  else if (imp >= 40) band = { label: "medium", pillColor: "blue" };
+  else if (imp >= 20) band = { label: "low", pillColor: "gray" };
+  else band = { label: "minimal", pillColor: "gray" };
+  return {
+    ...band,
+    title: `Importance ${imp}/100 · ${band.label} — decay rate (higher stays at verbose tiers longer)`,
+  };
+}
+
+/**
+ * Split a v2 `episode_type` (possibly comma-joined, e.g. "design,bug,refactor")
+ * into trimmed non-empty tags for badge rendering.
+ */
+function episodeTags(episodeType?: string): string[] {
+  if (!episodeType) return [];
+  return episodeType
+    .split(",")
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0);
+}
+
+type TierKey = "p1" | "p2" | "p3" | "p4";
+const TIER_KEYS: TierKey[] = ["p1", "p2", "p3", "p4"];
+
+/**
+ * Resolve the text to show for a requested v2 tier, mirroring the runtime
+ * renderer's fallback chain: prefer the exact `p{n}` column, fall back to the
+ * next-denser tier, and finally to `content` (which mirrors P1). Legacy rows
+ * have no p1–p4, so they always fall through to `content`.
+ */
+function tierBody(comp: Compartment, tier: TierKey): string {
+  const byKey: Record<TierKey, string | undefined> = {
+    p1: comp.p1,
+    p2: comp.p2,
+    p3: comp.p3,
+    p4: comp.p4,
+  };
+  // Requested tier first, then fall back toward the densest tier (p1).
+  for (let i = TIER_KEYS.indexOf(tier); i >= 0; i--) {
+    const v = byKey[TIER_KEYS[i]];
+    if (v && v.trim().length > 0) return v;
   }
+  // Legacy / content-only rows.
+  return comp.content ?? "";
+}
+
+/** Whether a compartment has any real v2 tier columns (vs legacy content-only). */
+function hasTiers(comp: Compartment): boolean {
+  return TIER_KEYS.some((k) => {
+    const v = comp[k];
+    return typeof v === "string" && v.trim().length > 0;
+  });
 }
 
 type ActiveTab = "messages" | "compartments" | "facts" | "notes" | "historian" | "tokens" | "keyFiles" | "cache";
@@ -128,6 +142,9 @@ export default function SessionViewer() {
   // and Cache events both load lazily when the user activates their tab.
   const [activeTab, setActiveTab] = createSignal<ActiveTab>("compartments");
   const [expandedCompartment, setExpandedCompartment] = createSignal<number | null>(null);
+  // Per-compartment selected render tier for the expanded v2 tier viewer
+  // ("p1" verbose → "p4" anchor-only). Defaults to p1 (full content).
+  const [compartmentTier, setCompartmentTier] = createSignal<Record<number, TierKey>>({});
   const [searchQuery, setSearchQuery] = createSignal("");
   const [projectFilter, setProjectFilterSignal] = createSignal(loadStoredValue(PROJECT_FILTER_KEY));
   const [harnessFilter, setHarnessFilterSignal] = createSignal<HarnessFilter>(loadHarnessFilter());
@@ -881,16 +898,15 @@ export default function SessionViewer() {
                 {(comp) => {
                   const range = comp.end_message - comp.start_message;
                   const width = () => Math.max(0.5, (range / totalRange()) * 100);
-                  // Fade saturation and lightness with depth so compressed
-                  // compartments visually recede on the timeline (depth 0 =
-                  // full color, depth 5 = nearly gray). Clamped so even the
-                  // most compressed segments stay visible.
+                  // Saturation tracks v2 importance: high-importance (sticky,
+                  // slow-decay) compartments stay vivid; low-importance ones
+                  // recede toward gray. Clamped so every segment stays visible.
                   const isExpanded = () => expandedCompartment() === comp.id;
-                  const depth = comp.compression_depth ?? 0;
-                  const sat = Math.max(15, (isExpanded() ? 70 : 50) - depth * 8);
-                  const light = Math.max(28, (isExpanded() ? 55 : 40) - depth * 2);
-                  const depthInfo = compressionDepthInfo(depth);
-                  const titleSuffix = depthInfo ? ` · d${depth} ${depthInfo.label}` : "";
+                  const imp = Number.isFinite(comp.importance) ? comp.importance : 50;
+                  const sat = Math.max(15, (isExpanded() ? 40 : 20) + (imp / 100) * 45);
+                  const light = Math.max(28, (isExpanded() ? 55 : 45) - (imp / 100) * 12);
+                  const info = importanceInfo(imp);
+                  const titleSuffix = ` · imp ${imp} ${info.label}${comp.legacy ? " · legacy" : ""}`;
                   return (
                     <button
                       type="button"
@@ -1085,17 +1101,37 @@ export default function SessionViewer() {
                             </span>
                             Messages {comp.start_message}–{comp.end_message}
                             {(() => {
-                              const info = compressionDepthInfo(comp.compression_depth);
-                              return info ? (
+                              const info = importanceInfo(comp.importance);
+                              return (
                                 <span
                                   class={`pill ${info.pillColor}`}
                                   style={{ "margin-left": "8px" }}
                                   title={info.title}
                                 >
-                                  d{comp.compression_depth} · {info.label}
+                                  imp {comp.importance} · {info.label}
                                 </span>
-                              ) : null;
+                              );
                             })()}
+                            <For each={episodeTags(comp.episode_type)}>
+                              {(tag) => (
+                                <span
+                                  class="pill gray"
+                                  style={{ "margin-left": "6px" }}
+                                  title={`Episode type: ${tag}`}
+                                >
+                                  {tag}
+                                </span>
+                              )}
+                            </For>
+                            {comp.legacy ? (
+                              <span
+                                class="pill amber"
+                                style={{ "margin-left": "6px" }}
+                                title="Legacy pre-v2 compartment — no paraphrase tiers; renders degraded. Run /ctx-session-upgrade to rebuild."
+                              >
+                                legacy
+                              </span>
+                            ) : null}
                             {comp.start_time && comp.end_time && (
                               <span
                                 style={{
@@ -1116,6 +1152,60 @@ export default function SessionViewer() {
                         <div
                           class={`expandable-content ${expandedCompartment() === comp.id ? "expanded" : "collapsed"}`}
                         >
+                          {/* v2 tier selector — inspect each paraphrase tier
+                              (P1 verbose → P4 anchor-only). Hidden for legacy
+                              content-only rows. */}
+                          <Show when={hasTiers(comp)}>
+                            <div
+                              style={{
+                                display: "flex",
+                                gap: "4px",
+                                "margin-top": "10px",
+                                "align-items": "center",
+                              }}
+                            >
+                              <span
+                                style={{
+                                  "font-size": "11px",
+                                  color: "var(--text-muted)",
+                                  "margin-right": "4px",
+                                }}
+                              >
+                                tier:
+                              </span>
+                              <For each={TIER_KEYS}>
+                                {(tk) => {
+                                  const active = () => (compartmentTier()[comp.id] ?? "p1") === tk;
+                                  const empty = () => {
+                                    const v = comp[tk];
+                                    return !(typeof v === "string" && v.trim().length > 0);
+                                  };
+                                  return (
+                                    <button
+                                      type="button"
+                                      class={`pill ${active() ? "blue" : "gray"}`}
+                                      style={{
+                                        cursor: "pointer",
+                                        border: "none",
+                                        opacity: empty() ? "0.45" : "1",
+                                      }}
+                                      title={
+                                        empty()
+                                          ? `${tk.toUpperCase()} is empty — falls back to a denser tier`
+                                          : `Show ${tk.toUpperCase()} tier`
+                                      }
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setCompartmentTier((prev) => ({ ...prev, [comp.id]: tk }));
+                                      }}
+                                    >
+                                      {tk.toUpperCase()}
+                                    </button>
+                                  );
+                                }}
+                              </For>
+                            </div>
+                          </Show>
                           <div
                             style={{
                               "margin-top": "10px",
@@ -1127,7 +1217,7 @@ export default function SessionViewer() {
                               "word-break": "break-word",
                             }}
                           >
-                            <Index each={comp.content.split("\n")}>
+                            <Index each={tierBody(comp, compartmentTier()[comp.id] ?? "p1").split("\n")}>
                               {(line) => {
                                 const isUser = () => line().startsWith("U:");
                                 return (

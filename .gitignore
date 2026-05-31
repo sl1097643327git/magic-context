@@ -48,5 +48,12 @@ packages/plugin/docs/animation[0-9]*/
 .alfonso/*
 !.alfonso/release-notes/
 
+# Prompt/model experiment harnesses (model-dispatch, replay, migration validation).
+# Kept on disk for reuse but excluded from git + CI typecheck: they intentionally
+# track in-flight prompt/signature shapes that drift faster than production src,
+# so committing them would couple CI to experiment state. Production generators
+# (scripts/build-*.ts) stay tracked — they are wired into release.sh.
+packages/plugin/scripts/experiments/
+
 # Local scratch directories — checkouts dropped here for one-off lookups
 .tmp-*/

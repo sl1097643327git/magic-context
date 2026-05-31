@@ -33,6 +33,7 @@ import type { PluginContext } from "../../plugin/types";
 import { getErrorMessage } from "../../shared/error-message";
 import { log } from "../../shared/logger";
 import { resolveFallbackChain } from "../../shared/resolve-fallbacks";
+import { isTuiConnected, pushNotification } from "../../shared/rpc-notifications";
 import { createMagicContextCommandHandler } from "./command-handler";
 import { deriveHistorianChunkTokens, resolveHistorianContextLimit } from "./derive-budgets";
 import { createEventHandler } from "./event-handler";
@@ -40,6 +41,8 @@ import { resolveContextLimit, resolveModelKey } from "./event-resolvers";
 import { clearInjectionCache } from "./inject-compartments";
 import { createNudger } from "./nudger";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
+import type { ManagedRecompContext } from "./recomp-orchestrator";
+import { runManagedRecomp, runManagedUpgrade } from "./recomp-orchestrator";
 import { createTextCompleteHandler } from "./text-complete";
 import { createNudgePlacementStore, createTransform } from "./transform";
 
@@ -57,6 +60,7 @@ import {
 import type { LiveSessionState } from "./live-session-state";
 import { sendIgnoredMessage } from "./send-session-notification";
 import { createSystemPromptHashHandler } from "./system-prompt-hash";
+import { maybeSendUpgradeReminder } from "./upgrade-reminder";
 
 const DREAM_SCHEDULE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 // NOTE: lastScheduleCheckMs is intentionally inside createMagicContextHook (not module scope)
@@ -102,12 +106,6 @@ export interface MagicContextDeps {
          *  the inline type so legacy tests/callers don't have to construct it;
          *  Zod's .default() guarantees it's present in real loaded configs. */
         system_prompt_injection?: { enabled: boolean; skip_signatures: string[] };
-        compressor?: {
-            enabled: boolean;
-            min_compartment_ratio: number;
-            max_merge_depth: number;
-            cooldown_ms: number;
-        };
         experimental?: {
             temporal_awareness?: boolean;
             git_commit_indexing?: { enabled: boolean; since_days: number; max_commits: number };
@@ -260,6 +258,11 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     const agentBySession = deps.liveSessionState?.agentBySession ?? new Map<string, string>();
     const sessionDirectoryBySession =
         deps.liveSessionState?.sessionDirectoryBySession ?? new Map<string, string>();
+    // Recomp/upgrade progress map — shared with the RPC sidebar/status snapshot
+    // when liveSessionState is provided (production), local fallback in tests.
+    const recompProgressBySession =
+        deps.liveSessionState?.recompProgressBySession ??
+        new Map<string, import("./compartment-runner-types").RecompProgress>();
     const recentReduceBySession = new Map<string, number>();
     const toolUsageSinceUserTurn = new Map<string, number>();
 
@@ -290,6 +293,48 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     const dreamerRunnable = isDreamerRunnable(deps.config);
     const dreamerConfig = dreamerRunnable ? deps.config.dreamer : undefined;
     const historianRunnable = isHistorianRunnable(deps.config);
+
+    // Shared context for the recomp/upgrade orchestrator. Both `/ctx-recomp` and
+    // `/ctx-session-upgrade` (command paths) build this so they run through the
+    // exact same runner as the RPC dialog paths — identical fallback, progress,
+    // and terminal state. `fallbackModelId` is resolved here with the OpenCode-DB
+    // recovery (resolveLiveModel) so the last-resort fallback model is known even
+    // when a command is invoked before the first transform pass populates the map.
+    const buildManagedRecompCtx = (sessionId: string): ManagedRecompContext => ({
+        client: deps.client,
+        db,
+        // Pass the SAME map/set instances the hook uses so the orchestrator's
+        // writes (progress, session-dir cache, refresh signals) propagate to the
+        // shared live state — and the next transform pass + RPC sidebar see them.
+        liveSessionState: {
+            liveModelBySession,
+            variantBySession,
+            agentBySession,
+            historyRefreshSessions,
+            deferredHistoryRefreshSessions,
+            systemPromptRefreshSessions,
+            pendingMaterializationSessions,
+            deferredMaterializationSessions,
+            sessionDirectoryBySession,
+            recompProgressBySession,
+        },
+        directory: deps.directory,
+        historianChunkTokens: getHistorianChunkTokens(),
+        historianTimeoutMs: deps.config.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
+        memoryEnabled: deps.config.memory?.enabled ?? true,
+        autoPromote: deps.config.memory?.auto_promote ?? true,
+        fallbackModels: historianFallbackModels,
+        fallbackModelId: (() => {
+            const model = resolveLiveModel(sessionId);
+            return model ? `${model.providerID}/${model.modelID}` : undefined;
+        })(),
+        historianTwoPass: deps.config.historian?.two_pass === true,
+        runMigration: deps.config.memory?.enabled !== false && !!deps.config.historian?.model,
+        userMemoriesEnabled: dreamerConfig?.user_memories?.enabled === true,
+        ensureProjectRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
+        getNotificationParams: (sid) =>
+            getLiveNotificationParams(sid, liveModelBySession, variantBySession, agentBySession),
+    });
     const sidekickRunnable = isSidekickRunnable(deps.config);
     const sidekickConfig = sidekickRunnable ? deps.config.sidekick : undefined;
     const nudgerWithRecentReduce = ctxReduceEnabled
@@ -361,18 +406,6 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         experimentalPinKeyFilesTokenBudget: dreamerConfig?.pin_key_files?.token_budget,
         experimentalTemporalAwareness: deps.config.experimental?.temporal_awareness === true,
         historianTwoPass: deps.config.historian?.two_pass === true,
-        compressorMinCompartmentRatio:
-            deps.config.compressor?.enabled === false
-                ? undefined
-                : deps.config.compressor?.min_compartment_ratio,
-        compressorMaxMergeDepth:
-            deps.config.compressor?.enabled === false
-                ? undefined
-                : deps.config.compressor?.max_merge_depth,
-        compressorCooldownMs:
-            deps.config.compressor?.enabled === false
-                ? undefined
-                : deps.config.compressor?.cooldown_ms,
         liveModelBySession,
         sessionDirectoryBySession,
         autoSearch: deps.config.experimental?.auto_search?.enabled
@@ -499,55 +532,22 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             systemPromptRefreshSessions.add(sessionId);
             pendingMaterializationSessions.add(sessionId);
         },
+        // E3 (recomp) + /ctx-session-upgrade: both run through the SHARED
+        // orchestrator (runManagedRecomp / runManagedUpgrade) so the command
+        // paths get identical model fallback + live progress + terminal state as
+        // the RPC dialog paths. Dogfood 2026-05-30: previously the command path
+        // had fallback but no progress (sidebar stuck on stale "failed") while
+        // the RPC dialog had progress but no fallback (failed on empty primary
+        // model). One runner closes both gaps.
         executeRecomp: historianRunnable
             ? async (sessionId, options) =>
-                  executeContextRecomp(
-                      {
-                          client: deps.client,
-                          db,
-                          sessionId,
-                          historianChunkTokens: getHistorianChunkTokens(),
-                          historianTimeoutMs:
-                              deps.config.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
-                          fallbackModels: historianFallbackModels,
-                          directory: deps.directory,
-                          fallbackModelId: (() => {
-                              // DB fallback so /ctx-recomp's last-resort fallback model
-                              // is known even when invoked before the first transform.
-                              const model = resolveLiveModel(sessionId);
-                              return model ? `${model.providerID}/${model.modelID}` : undefined;
-                          })(),
-                          getNotificationParams: () =>
-                              getLiveNotificationParams(
-                                  sessionId,
-                                  liveModelBySession,
-                                  variantBySession,
-                                  agentBySession,
-                              ),
-                          historianTwoPass: deps.config.historian?.two_pass === true,
-                          // Issue #44: respect memory feature gates from /ctx-recomp too.
-                          memoryEnabled: deps.config.memory?.enabled,
-                          autoPromote: deps.config.memory?.auto_promote ?? true,
-                          ensureProjectRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
-                          // Recomp invalidates injection cache and queues drop ops
-                          // via queueDropsForCompartmentalizedMessages. Signal both
-                          // history-rebuild (one-shot for the next transform) and
-                          // pending-materialization (persistent until heuristics
-                          // succeed). NOT systemPromptRefresh — recomp doesn't
-                          // touch disk-backed adjuncts. See council Finding #9.
-                          onCompartmentStatePublished: (sid) => {
-                              historyRefreshSessions.add(sid);
-                              pendingMaterializationSessions.add(sid);
-                          },
-                          // Plan v6 §4 + §7: signal deferred-marker drain on incremental
-                          // publish. Recomp is explicit so this is a no-op there, but
-                          // the runner type is shared and the callback is always optional.
-                          onDeferredMarkerPending: (sid) => {
-                              deferredHistoryRefreshSessions.add(sid);
-                          },
-                      },
-                      options,
-                  )
+                  runManagedRecomp(buildManagedRecompCtx(sessionId), sessionId, options)
+            : undefined,
+        // E3.2 — /ctx-session-upgrade: full recomp + once-per-project memory
+        // migration in one managed run. The command handler delivers the result.
+        runUpgrade: historianRunnable
+            ? async (sessionId: string) =>
+                  runManagedUpgrade(buildManagedRecompCtx(sessionId), sessionId)
             : undefined,
         sendNotification: async (sessionId, text, params) => {
             await sendIgnoredMessage(deps.client, sessionId, text, {
@@ -670,6 +670,40 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             pendingMaterializationSessions,
             lastHeuristicsTurnId,
             ctxReduceEnabled,
+            // E5 — only offer the upgrade reminder when historian can run (so
+            // /ctx-session-upgrade is actually actionable). Self-gates per session.
+            upgradeReminder: historianRunnable
+                ? (sessionId: string) =>
+                      maybeSendUpgradeReminder(
+                          {
+                              client: deps.client,
+                              db,
+                              sendIgnoredMessage,
+                              getNotificationParams: (sid) =>
+                                  getLiveNotificationParams(
+                                      sid,
+                                      liveModelBySession,
+                                      variantBySession,
+                                      agentBySession,
+                                  ),
+                              isTuiConnected,
+                              pushTuiDialogAction: (sid, resume) =>
+                                  pushNotification(
+                                      "action",
+                                      resume
+                                          ? {
+                                                action: "show-upgrade-dialog",
+                                                resume: true,
+                                                stagedCount: resume.stagedCount,
+                                                stagedThrough: resume.stagedThrough,
+                                            }
+                                          : { action: "show-upgrade-dialog" },
+                                      sid,
+                                  ),
+                          },
+                          sessionId,
+                      )
+                : undefined,
         }),
         event: async (input: { event: { type: string; properties?: unknown } }) => {
             await eventHook(input);

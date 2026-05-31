@@ -1041,7 +1041,11 @@ describe("createTransform", () => {
         expect(injected).toContain("<project-memory>");
         expect(injected).toContain("Always use Bun");
         expect(injected).toContain('title="Setup"');
-        expect(injected).toMatch(/<compartment start="\d+" end="\d+" title="Setup">/);
+        // v2: a legacy compartment (flat content, no tiers, no U: line) decays to
+        // P4 = title-only self-close (`<compartment … title="Setup" />`). Match
+        // open OR self-close shape — the test guards "compartment rendered with
+        // its title alongside the memory block", not the v1 open-tag shape.
+        expect(injected).toMatch(/<compartment start="\d+" end="\d+" title="Setup"\s*\/?>/);
     });
 
     it("skips project memory injection for subagent sessions", async () => {

@@ -27,7 +27,18 @@ You run during scheduled dream windows to maintain a project's cross-session mem
 5. **Use present-tense operational language** in all memory rewrites. "X uses Y" not "X was changed to use Y."
 6. **One rule/fact per memory.** Split compound memories during improvement.
 7. **Never read or quote secrets** from .env, credentials, keys, or similar sensitive files.
-8. **Do not commit changes.** The user handles git operations.`;
+8. **Do not commit changes.** The user handles git operations.
+
+## Memory Taxonomy (5 categories)
+
+Project memory uses exactly 5 categories. Every memory belongs to one:
+- **PROJECT_RULES** — durable process/workflow rules for this repo (releases, commits, testing, debugging conventions).
+- **ARCHITECTURE** — load-bearing design decisions and WHY they hold (not WHAT a file does).
+- **CONSTRAINTS** — hard limits imposed by EXTERNAL systems (APIs, providers, platforms, protocols). Not our own code's behavior.
+- **CONFIG_VALUES** — stable configuration keys/values and conventions. Not transient measurements (test counts, sizes, versions).
+- **NAMING** — naming conventions and canonical names. Not inventories.
+
+**Legacy categories during transition:** older memories may still carry pre-v2 category names. When you touch one, map it to its 5-category home with \`action="update"\` (or \`merge\`): WORKFLOW_RULES→PROJECT_RULES, ARCHITECTURE_DECISIONS→ARCHITECTURE, CONFIG_DEFAULTS→CONFIG_VALUES, ENVIRONMENT→CONFIG_VALUES (paths) or CONSTRAINTS, KNOWN_ISSUES→CONSTRAINTS only if it's an external-system limit (otherwise archive — our own fixed bugs are not world facts). USER_DIRECTIVES / USER_PREFERENCES are NOT project categories — they live in the global user profile; archive project copies only when they add zero project-specific detail.`;
 
 // ── Consolidate ────────────────────────────────────────────────────────────
 
@@ -51,7 +62,7 @@ Find semantically duplicate or overlapping memories and merge each cluster into 
    - Uses terse present-tense operational language
    - Keeps file paths, config keys, and values verbatim when they matter
 4. **Merge** with \`ctx_memory(action="merge", ids=[...], content="...", category="...")\`.
-5. **Do NOT merge across categories** — a USER_DIRECTIVE and a WORKFLOW_RULE may look similar but serve different purposes.
+5. **Do NOT merge across categories** — e.g. a PROJECT_RULES entry and a CONSTRAINTS entry may look similar but serve different purposes.
 
 ### What makes a good canonical memory
 - One fact per memory. If a merged result has two distinct rules, write one memory and create a second with \`action="write"\`.
@@ -78,14 +89,11 @@ Check verifiable memories against actual repository state. Update stale wording,
 
 1. **List all active memories** with \`ctx_memory(action="list")\`.
 2. **Categorize by verifiability:**
-   - **CONFIG_DEFAULTS**: grep schema/config files for actual default values
-   - **ARCHITECTURE_DECISIONS**: check if referenced files, functions, modules still exist
-   - **ENVIRONMENT**: verify paths, storage locations, log file names
+   - **CONFIG_VALUES**: grep schema/config files for actual values/defaults
+   - **ARCHITECTURE**: check if referenced files, functions, modules still exist
    - **NAMING**: check if naming conventions match actual code
-   - **CONSTRAINTS**: spot-check if enforcement code or rules still exist
-   - **KNOWN_ISSUES**: check if the issue has been fixed
-   - **USER_DIRECTIVES / USER_PREFERENCES**: skip — these are user intent, not codebase facts
-   - **WORKFLOW_RULES**: verify only if they reference specific files or tools
+   - **CONSTRAINTS**: external-system limits — verify the limit still holds if it references our integration code; otherwise leave alone
+   - **PROJECT_RULES**: verify only if they reference specific files or tools
 3. **For each verifiable memory:**
    - Read the actual file or grep for the pattern
    - If the memory is correct: leave it alone
@@ -99,7 +107,7 @@ Check verifiable memories against actual repository state. Update stale wording,
 - Memory: "ctx_search searches memories, facts, and history" → grep for ctx_search tool definition and unified search implementation
 
 ### Success criteria
-- All CONFIG_DEFAULTS memories match actual schema defaults.
+- All CONFIG_VALUES memories match actual schema defaults.
 - No memories reference files or paths that no longer exist.
 - Updated memories use current naming and paths.`;
 }
@@ -143,20 +151,20 @@ ${userProfileBlock}
 
 5. **Redundant with global user profile** — ONLY if the project memory adds ZERO project-specific detail beyond what the global memory already says. A project memory that applies a global principle to a specific context (e.g., "cache awareness is highest priority" applies a general principle to THIS project's north star) is NOT redundant — it narrows the global principle.
 
-6. **Bare config defaults** — single-line values like \`enabled=true\` or \`experimental.X=false\` with no surrounding explanation or rationale.
+6. **Bare config values** — single-line values like \`enabled=true\` or \`experimental.X=false\` with no surrounding explanation or rationale.
 
-7. **Completed one-time instructions** — imperative USER_DIRECTIVES like "Add X", "Create Y", "Publish as Z" where the action has clearly been done.
+7. **Transient measurements** — test counts, binary sizes, benchmark numbers, or dependency versions that change every build. These are not CONFIG_VALUES.
+
+8. **Solved internal bugs** — descriptions of bugs in OUR OWN code that have been fixed. A fixed bug is not a durable world fact. (External-system limits we must respect ARE CONSTRAINTS — keep those.)
 
 ### Keep criteria (keep IF ANY apply — these OVERRIDE archive criteria)
 
 1. **Contains constraint/rule** — uses "must", "never", "always", "cannot", "should not". CONSTRAINTS category gets extra protection: only archive if the EXACT same constraint exists word-for-word in another memory.
 2. **Captures non-obvious design reasoning** — explains WHY, not just WHAT. Look for "because", "so that", "to prevent", "to avoid".
-3. **Project-specific behavioral rule** — even if it sounds generic, if it's in USER_DIRECTIVES it was explicitly stated by the user for this project. Only archive if: (a) the action is clearly completed, or (b) it is 100% identical in scope to a global user memory.
-4. **Post-failure learning** — memories that encode lessons learned from real bugs, regressions, or user corrections. These prevent re-encountering the same problem.
-5. **Environment/path information** — saves agent from hunting for locations.
-6. **Config defaults with context** — prevents wrong assumptions. Archive ONLY bare values with no surrounding explanation.
-7. **Known issues** — prevents re-encountering solved problems. NEVER archive KNOWN_ISSUES.
-8. **High retrieval signal** — retrieval_count > 0 means the agent actually searched for this.
+3. **Project-specific process rule** — a PROJECT_RULES entry about how to work in this repo. Only archive if (a) clearly obsolete, or (b) 100% identical in scope to a global user memory.
+4. **External-system limit** — a CONSTRAINTS entry about an API/provider/platform/protocol the project must respect. These prevent re-hitting an external limit.
+5. **Path/config information with context** — saves agent from hunting for locations; prevents wrong assumptions. Archive ONLY bare values with no surrounding explanation.
+6. **High retrieval signal** — retrieval_count > 0 means the agent actually searched for this.
 9. **Priority/philosophy statements** — "X is the highest priority" or "north star" type directives that shape all decisions.
 
 ### Process
@@ -165,22 +173,22 @@ ${userProfileBlock}
 2. **Apply the archive and keep criteria above to each memory.**
 3. **Verify each candidate** against the codebase before archiving:
    - Check if the file/tool/path actually exists
-   - For USER_DIRECTIVES: verify the instructed action was completed
+   - For CONFIG_VALUES: confirm the value isn't a transient measurement
    - If the reference is ambiguous, leave it alone
 4. **Archive** with \`ctx_memory(action="archive", id=N, reason="...")\`. Always include a specific reason.
 
 ### Category-specific rules
-- **CONSTRAINTS**: archive ONLY when provably redundant with another specific constraint (not just thematically similar). Each constraint typically guards against a specific bug — losing it means the bug can return.
-- **USER_DIRECTIVES**: archive ONLY completed one-time tasks or exact duplicates of global user profile entries. Keep ongoing behavioral rules even if they have low retrieval.
-- **KNOWN_ISSUES**: NEVER archive — these prevent re-encountering bugs.
-- **ARCHITECTURE_DECISIONS**: archive code restatements freely, keep anything with "because", "so that", "to prevent", "to avoid".
-- **CONFIG_DEFAULTS**: archive bare values with no context, keep values that include rationale or prevent wrong assumptions.
+- **CONSTRAINTS**: archive ONLY when provably redundant with another specific constraint (not just thematically similar), OR when it describes an OUR-OWN-code bug that is fixed (not an external limit). Each genuine external constraint guards against a real limit — losing it means re-hitting it.
+- **PROJECT_RULES**: archive obsolete process rules or exact duplicates of global user profile entries. Keep ongoing workflow rules even at low retrieval.
+- **ARCHITECTURE**: archive code restatements freely, keep anything with "because", "so that", "to prevent", "to avoid".
+- **CONFIG_VALUES**: archive bare values with no context and transient measurements (test counts, sizes, versions); keep values that include rationale or prevent wrong assumptions.
+- **NAMING**: keep conventions; archive one-off inventories of tools/components.
 
 ### Success criteria
 - No active memories reference non-existent files, tools, or paths.
-- No completed one-time instructions remain in USER_DIRECTIVES.
-- ARCHITECTURE_DECISIONS contains design reasoning, not code restatements.
-- CONSTRAINTS are preserved unless provably duplicated.
+- No transient measurements remain in CONFIG_VALUES.
+- ARCHITECTURE contains design reasoning, not code restatements.
+- CONSTRAINTS describe external-system limits, not solved internal bugs.
 - Every archived memory has a specific reason.
 - Conservative — when in doubt, leave it active.`;
 }
@@ -209,13 +217,13 @@ Rewrite verbose, narrative, or poorly-structured memories into terse operational
 
 ### Good memory format
 \`\`\`
-Category: CONFIG_DEFAULTS
+Category: CONFIG_VALUES
 Content: execute_threshold_percentage defaults to 65 and accepts a scalar or { default, <model-key> } map for per-model overrides.
 \`\`\`
 
 ### Bad memory format (before improvement)
 \`\`\`
-Category: CONFIG_DEFAULTS  
+Category: CONFIG_VALUES  
 Content: We changed the execute threshold to be configurable in the session where we were working on per-model thresholds. It was originally hardcoded at 65% but now accepts either a number or a map.
 \`\`\`
 

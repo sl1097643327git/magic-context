@@ -89,6 +89,8 @@ describe("calibrateBuckets", () => {
             compartmentsLocal: 100,
             factsLocal: 0,
             memoriesLocal: 0,
+            docsLocal: 0,
+            profileLocal: 0,
             conversationLocal: 200,
             toolCallsLocal: 50,
             calibration: NEUTRAL,
@@ -108,6 +110,8 @@ describe("calibrateBuckets", () => {
             compartmentsLocal: 80_000,
             factsLocal: 50,
             memoriesLocal: 0,
+            docsLocal: 0,
+            profileLocal: 0,
             conversationLocal: 30_000,
             toolCallsLocal: 60_000,
             calibration: NEUTRAL,
@@ -135,6 +139,8 @@ describe("calibrateBuckets", () => {
             compartmentsLocal: 0,
             factsLocal: 0,
             memoriesLocal: 0,
+            docsLocal: 0,
+            profileLocal: 0,
             conversationLocal: 30_000,
             toolCallsLocal: 0,
             calibration: { systemRatio: 2.0, toolsRatio: 1.0 },
@@ -156,6 +162,8 @@ describe("calibrateBuckets", () => {
             compartmentsLocal: 1_000,
             factsLocal: 500,
             memoriesLocal: 0,
+            docsLocal: 0,
+            profileLocal: 0,
             conversationLocal: 2_000,
             toolCallsLocal: 500,
             calibration: NEUTRAL,
@@ -196,6 +204,8 @@ describe("calibrateBuckets", () => {
             compartmentsLocal: 0,
             factsLocal: 0,
             memoriesLocal: 0,
+            docsLocal: 0,
+            profileLocal: 0,
             conversationLocal: 0,
             toolCallsLocal: 0,
             calibration: NEUTRAL,
@@ -221,6 +231,8 @@ describe("calibrateBuckets", () => {
             compartmentsLocal: 100,
             factsLocal: 0,
             memoriesLocal: 0,
+            docsLocal: 0,
+            profileLocal: 0,
             conversationLocal: 100,
             toolCallsLocal: 0,
             calibration: { systemRatio: 5.0, toolsRatio: 5.0 },
@@ -250,6 +262,8 @@ describe("calibrateBuckets", () => {
             compartmentsLocal: 2,
             factsLocal: 2,
             memoriesLocal: 0,
+            docsLocal: 0,
+            profileLocal: 0,
             conversationLocal: 1,
             toolCallsLocal: 0,
             calibration: { systemRatio: 1.51, toolsRatio: 1.57 },
@@ -292,6 +306,8 @@ describe("calibrateBuckets", () => {
             compartmentsLocal: 500,
             factsLocal: 0,
             memoriesLocal: 0,
+            docsLocal: 0,
+            profileLocal: 0,
             conversationLocal: 0,
             toolCallsLocal: 0,
             calibration: { systemRatio: 5.0, toolsRatio: 5.0 },
@@ -335,6 +351,8 @@ describe("calibrateBuckets", () => {
             compartmentsLocal: 89_000,
             factsLocal: 50,
             memoriesLocal: 8_000,
+            docsLocal: 0,
+            profileLocal: 0,
             conversationLocal: 40_000,
             toolCallsLocal: 68_000,
             calibration: { systemRatio: 1.51, toolsRatio: 1.57 },
@@ -360,5 +378,42 @@ describe("calibrateBuckets", () => {
             out.conversationTokens +
             out.toolCallTokens;
         expect(sum).toBe(378_000);
+    });
+
+    it("docs + profile are verbatim buckets that come OUT of the residual (not Conversation)", () => {
+        // v2: <project-docs> and <user-profile> live in m[0]. They must surface
+        // as their own buckets, not silently inflate Conversation.
+        const base = {
+            inputTokens: 200_000,
+            systemLocal: 5_000,
+            toolDefsLocal: 5_000,
+            compartmentsLocal: 60_000,
+            factsLocal: 0,
+            memoriesLocal: 10_000,
+            conversationLocal: 40_000,
+            toolCallsLocal: 20_000,
+            calibration: { systemRatio: 1, toolsRatio: 1 },
+        };
+        const without = calibrateBuckets({ ...base, docsLocal: 0, profileLocal: 0 });
+        const withDocs = calibrateBuckets({ ...base, docsLocal: 20_000, profileLocal: 2_000 });
+
+        // Verbatim — exact local counts, no scaling.
+        expect(withDocs.docsTokens).toBe(20_000);
+        expect(withDocs.profileTokens).toBe(2_000);
+        // The 22K of docs+profile is carved out of the residual, so Conversation
+        // SHRINKS vs the run that attributed them to nothing.
+        expect(withDocs.conversationTokens).toBeLessThan(without.conversationTokens);
+        // Sum (including the two new buckets) is still EXACTLY inputTokens.
+        const sum =
+            withDocs.systemTokens +
+            withDocs.toolDefinitionTokens +
+            withDocs.compartmentTokens +
+            withDocs.factTokens +
+            withDocs.memoryTokens +
+            withDocs.docsTokens +
+            withDocs.profileTokens +
+            withDocs.conversationTokens +
+            withDocs.toolCallTokens;
+        expect(sum).toBe(200_000);
     });
 });

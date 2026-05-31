@@ -1,64 +1,79 @@
 import { describe, expect, it } from "bun:test";
 import { parseCompartmentOutput } from "./compartment-parser";
 
-describe("parseCompartmentOutput", () => {
-    it("parses USER_PREFERENCES fact blocks", () => {
+describe("parseCompartmentOutput — v2 5-category facts", () => {
+    it("parses each of the 5 world categories", () => {
         const parsed = parseCompartmentOutput(`
 <output>
 <compartments>
-<compartment start="1" end="2" title="Prompt cleanup">Updated the summarizer prompt.</compartment>
+<compartment start="1" end="2" title="Setup" episode_type="infra" importance="40">
+<p1>did setup</p1><p2>setup</p2><p3>setup</p3><p4/>
+</compartment>
 </compartments>
 <facts>
-<USER_PREFERENCES>
-* Always do feat -> integrate -> build after fixes unless explicitly told not to.
-</USER_PREFERENCES>
+<PROJECT_RULES>
+* Always commit + build after every fix.
+</PROJECT_RULES>
+<ARCHITECTURE>
+* Storage is a single SQLite DB.
+</ARCHITECTURE>
+<CONSTRAINTS>
+* Provider rejects empty assistant messages.
+</CONSTRAINTS>
+<CONFIG_VALUES>
+* execute_threshold defaults to 65.
+</CONFIG_VALUES>
+<NAMING>
+* The helper is named requireTenantContext.
+</NAMING>
 </facts>
 <meta>
-<messages_processed>1-2</messages_processed>
+<unprocessed_from>3</unprocessed_from>
 </meta>
 </output>`);
 
-        expect(parsed.facts).toEqual([
-            {
-                category: "USER_PREFERENCES",
-                content:
-                    "Always do feat -> integrate -> build after fixes unless explicitly told not to.",
-            },
+        const cats = parsed.facts.map((f) => f.category);
+        expect(cats).toEqual([
+            "PROJECT_RULES",
+            "ARCHITECTURE",
+            "CONSTRAINTS",
+            "CONFIG_VALUES",
+            "NAMING",
         ]);
-    });
-
-    it("parses USER_DIRECTIVES facts", () => {
-        const parsed = parseCompartmentOutput(`
-<output>
-<compartments>
-<compartment start="3" end="4" title="Decision capture">Preserved the user's durable goal.</compartment>
-</compartments>
-<facts>
-<USER_DIRECTIVES>
-* Keep the magic-context rename broad and user-facing.
-</USER_DIRECTIVES>
-</facts>
-<meta>
-<messages_processed>3-4</messages_processed>
-</meta>
-</output>`);
-
-        expect(parsed.facts).toContainEqual({
-            category: "USER_DIRECTIVES",
-            content: "Keep the magic-context rename broad and user-facing.",
+        expect(parsed.facts[0]).toEqual({
+            category: "PROJECT_RULES",
+            content: "Always commit + build after every fix.",
         });
     });
 
-    it("unescapes escaped XML content in titles, compartments, and facts", () => {
+    it("does NOT parse legacy 9-cat fact categories (they exited historian output)", () => {
+        const parsed = parseCompartmentOutput(`
+<output>
+<facts>
+<USER_DIRECTIVES>
+* Keep the magic-context rename broad.
+</USER_DIRECTIVES>
+<WORKFLOW_RULES>
+* Use scripts/release.sh.
+</WORKFLOW_RULES>
+<ARCHITECTURE_DECISIONS>
+* This should not parse as a fact.
+</ARCHITECTURE_DECISIONS>
+</facts>
+</output>`);
+        expect(parsed.facts).toEqual([]);
+    });
+
+    it("unescapes escaped XML in titles, compartments, and facts", () => {
         const parsed = parseCompartmentOutput(`
 <output>
 <compartments>
 <compartment start="5" end="6" title="Team&apos;s &quot;rules&quot;">Keep &lt;instruction&gt; blocks &amp; notes safe.</compartment>
 </compartments>
 <facts>
-<USER_DIRECTIVES>
+<PROJECT_RULES>
 * Preserve Sam&apos;s decision &amp; keep &lt;magic-context&gt; wording.
-</USER_DIRECTIVES>
+</PROJECT_RULES>
 </facts>
 <meta>
 <messages_processed>5-6</messages_processed>
@@ -71,11 +86,173 @@ describe("parseCompartmentOutput", () => {
                 endMessage: 6,
                 title: `Team's "rules"`,
                 content: "Keep <instruction> blocks & notes safe.",
+                importance: undefined,
+                episodeType: undefined,
             },
         ]);
         expect(parsed.facts).toContainEqual({
-            category: "USER_DIRECTIVES",
+            category: "PROJECT_RULES",
             content: "Preserve Sam's decision & keep <magic-context> wording.",
         });
+    });
+});
+
+describe("parseCompartmentOutput — v2 tiers/importance/episode_type", () => {
+    it("extracts four tiers, importance, and episode_type", () => {
+        const parsed = parseCompartmentOutput(`
+<output>
+<compartments>
+<compartment start="10" end="20" title="Tiered" episode_type="design,feature" importance="88">
+<p1>full narrative with U: line</p1>
+<p2>condensed</p2>
+<p3>outcome</p3>
+<p4>anchorA; anchorB</p4>
+</compartment>
+</compartments>
+</output>`);
+        const c = parsed.compartments[0];
+        expect(c.importance).toBe(88);
+        expect(c.episodeType).toBe("design,feature");
+        expect(c.p1).toBe("full narrative with U: line");
+        expect(c.p2).toBe("condensed");
+        expect(c.p3).toBe("outcome");
+        expect(c.p4).toBe("anchorA; anchorB");
+        expect(c.content).toBe("full narrative with U: line"); // mirrors P1
+    });
+
+    it("handles self-closing <p4/> as empty tier", () => {
+        const parsed = parseCompartmentOutput(`
+<compartment start="1" end="2" title="x" importance="30">
+<p1>a</p1><p2>b</p2><p3>c</p3><p4/>
+</compartment>`);
+        expect(parsed.compartments[0].p4).toBe("");
+    });
+});
+
+describe("parseCompartmentOutput — events (v2, stored not rendered)", () => {
+    it("parses causal_incident and trajectory_correction kind-agnostically", () => {
+        const parsed = parseCompartmentOutput(`
+<output>
+<compartments>
+<compartment start="1" end="9" title="x" importance="50"><p1>a</p1><p2>b</p2><p3>c</p3><p4/></compartment>
+</compartments>
+<events>
+<causal_incident at_compartment="1">
+<summary>thing broke</summary>
+<affected_surface>module X</affected_surface>
+<symptom>500s</symptom>
+<cause_summary>missing guard</cause_summary>
+<disposition>fixed</disposition>
+<evidence>logs</evidence>
+<fix_summary>added guard</fix_summary>
+</causal_incident>
+<trajectory_correction at_compartment="1">
+<summary>pivoted approach</summary>
+<before_strategy>old way</before_strategy>
+<correction_source>user</correction_source>
+<correction_signal>U: "do it differently"</correction_signal>
+<after_strategy>new way</after_strategy>
+<evidence>final impl</evidence>
+</trajectory_correction>
+</events>
+</output>`);
+
+        expect(parsed.events).toHaveLength(2);
+        const [incident, correction] = parsed.events;
+        expect(incident.kind).toBe("causal_incident");
+        expect(incident.atCompartment).toBe(1);
+        expect(incident.fields.summary).toBe("thing broke");
+        expect(incident.fields.disposition).toBe("fixed");
+        expect(incident.fields.fix_summary).toBe("added guard");
+        expect(correction.kind).toBe("trajectory_correction");
+        expect(correction.fields.before_strategy).toBe("old way");
+        expect(correction.fields.correction_signal).toBe('U: "do it differently"');
+    });
+
+    it("returns [] when no events block (the common case)", () => {
+        const parsed = parseCompartmentOutput(`
+<output>
+<compartments>
+<compartment start="1" end="2" title="x" importance="50"><p1>a</p1><p2>b</p2><p3>c</p3><p4/></compartment>
+</compartments>
+</output>`);
+        expect(parsed.events).toEqual([]);
+    });
+
+    it("does not mis-read fact categories or compartments as events", () => {
+        const parsed = parseCompartmentOutput(`
+<output>
+<compartments>
+<compartment start="1" end="2" title="x" importance="50"><p1>a</p1><p2>b</p2><p3>c</p3><p4/></compartment>
+</compartments>
+<facts>
+<PROJECT_RULES>
+* a rule
+</PROJECT_RULES>
+</facts>
+</output>`);
+        expect(parsed.events).toEqual([]);
+        expect(parsed.facts).toHaveLength(1);
+    });
+});
+
+describe("parseCompartmentOutput — user_observations", () => {
+    it("parses observation bullets", () => {
+        const parsed = parseCompartmentOutput(`
+<output>
+<user_observations>
+* User prefers evidence-backed root-cause analysis.
+* User dislikes low-value config knobs.
+</user_observations>
+</output>`);
+        expect(parsed.userObservations).toEqual([
+            "User prefers evidence-backed root-cause analysis.",
+            "User dislikes low-value config knobs.",
+        ]);
+    });
+});
+
+describe("parseCompartmentOutput — fact scoping (audit Fix 6)", () => {
+    it("does NOT misread a category tag inside <events> as a promotable fact", () => {
+        // A causal_incident's field text legitimately contains a 5-cat tag name.
+        // Fact extraction must be scoped to <facts>, not the whole response.
+        const parsed = parseCompartmentOutput(`
+<output>
+<facts>
+<ARCHITECTURE>
+* Real fact: storage is one SQLite DB.
+</ARCHITECTURE>
+</facts>
+<events>
+<causal_incident at_compartment="1">
+<finding>The provider enforced a CONSTRAINTS-style limit we must respect.</finding>
+</causal_incident>
+</events>
+</output>`);
+        // Exactly one fact — from <facts>. The word "CONSTRAINTS" inside the
+        // event field must not become a phantom CONSTRAINTS fact.
+        expect(parsed.facts).toHaveLength(1);
+        expect(parsed.facts[0].category).toBe("ARCHITECTURE");
+        expect(parsed.facts.some((f) => f.category === "CONSTRAINTS")).toBe(false);
+        expect(parsed.events).toHaveLength(1);
+    });
+
+    it("falls back to whole-text scan (minus events) when no <facts> wrapper", () => {
+        // Transition/older shape: bare category blocks, no <facts> wrapper.
+        const parsed = parseCompartmentOutput(`
+<output>
+<PROJECT_RULES>
+* Use scripts/release.sh for releases.
+</PROJECT_RULES>
+<events>
+<trajectory_correction at_compartment="1">
+<from>Considered a NAMING convention change.</from>
+</trajectory_correction>
+</events>
+</output>`);
+        expect(parsed.facts).toHaveLength(1);
+        expect(parsed.facts[0].category).toBe("PROJECT_RULES");
+        // "NAMING" inside the event must not leak in via the fallback path.
+        expect(parsed.facts.some((f) => f.category === "NAMING")).toBe(false);
     });
 });

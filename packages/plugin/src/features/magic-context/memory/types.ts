@@ -1,4 +1,14 @@
 export type MemoryCategory =
+    // v2 world taxonomy (the 5 categories the historian emits). CONSTRAINTS and
+    // NAMING are shared with the legacy set; PROJECT_RULES/ARCHITECTURE/
+    // CONFIG_VALUES are new in v2.
+    | "PROJECT_RULES"
+    | "ARCHITECTURE"
+    | "CONFIG_VALUES"
+    // Legacy 9-cat taxonomy — retained as an accept-both bridge so the existing
+    // memory store (pre-v2 rows) keeps full ordering/TTL/rendering until the
+    // one-time recategorization migration (E3 / /ctx-session-upgrade) folds them
+    // into the 5-cat set. The historian no longer emits these.
     | "ARCHITECTURE_DECISIONS"
     | "CONSTRAINTS"
     | "CONFIG_DEFAULTS"

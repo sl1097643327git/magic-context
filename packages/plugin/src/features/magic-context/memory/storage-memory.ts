@@ -36,6 +36,11 @@ export const COLUMN_MAP: Record<keyof Memory, string> = {
 };
 
 const MEMORY_CATEGORY_LOOKUP = {
+    // v2 world taxonomy
+    PROJECT_RULES: true,
+    ARCHITECTURE: true,
+    CONFIG_VALUES: true,
+    // legacy 9-cat (accept-both bridge until E3 recategorization)
     ARCHITECTURE_DECISIONS: true,
     CONSTRAINTS: true,
     CONFIG_DEFAULTS: true,
@@ -70,6 +75,7 @@ const VERIFICATION_STATUS_LOOKUP = {
 const insertMemoryStatements = new WeakMap<Database, PreparedStatement>();
 const getMemoryByHashStatements = new WeakMap<Database, PreparedStatement>();
 const getMemoryByIdStatements = new WeakMap<Database, PreparedStatement>();
+const activeMemoriesNoExpiryStatements = new WeakMap<Database, PreparedStatement>();
 const updateMemorySeenCountStatements = new WeakMap<Database, PreparedStatement>();
 const updateMemoryRetrievalCountStatements = new WeakMap<Database, PreparedStatement>();
 const updateMemoryStatusStatements = new WeakMap<Database, PreparedStatement>();
@@ -272,6 +278,19 @@ function getMemoriesByProjectStatement(db: Database, statuses: MemoryStatus[]): 
     return stmt;
 }
 
+/** All `active` rows for a project with NO expiry filter — for the destructive
+ *  migration path only (see getAllActiveMemoriesForMigration). */
+function getActiveMemoriesNoExpiryStatement(db: Database): PreparedStatement {
+    let stmt = activeMemoriesNoExpiryStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare(
+            `SELECT ${getMemorySelectColumns(db)} FROM memories WHERE project_path = ? AND status = 'active' ORDER BY category ASC, updated_at DESC, id ASC`,
+        );
+        activeMemoriesNoExpiryStatements.set(db, stmt);
+    }
+    return stmt;
+}
+
 function getUpdateMemorySeenCountStatement(db: Database): PreparedStatement {
     let stmt = updateMemorySeenCountStatements.get(db);
     if (!stmt) {
@@ -464,15 +483,37 @@ export function getMemoriesByProject(
     db: Database,
     projectPath: string,
     statuses: MemoryStatus[] = ["active", "permanent"],
+    // Expiry cutoff. Defaults to live Date.now() for normal callers. The m[1]
+    // render path passes a FROZEN cutoff (the m[0] materialization timestamp) so
+    // defer passes render a byte-stable memory set — a memory crossing expires_at
+    // between two defer passes must not silently change the wire (cache bust).
+    expiryCutoff: number = Date.now(),
 ): Memory[] {
     if (statuses.length === 0) {
         return [];
     }
 
     const rows = getMemoriesByProjectStatement(db, statuses)
-        .all(projectPath, ...statuses, Date.now())
+        .all(projectPath, ...statuses, expiryCutoff)
         .filter(isMemoryRow);
 
+    return rows.map(toMemory);
+}
+
+/**
+ * Load ALL `active` memories for a project, INCLUDING expired ones.
+ *
+ * `getMemoriesByProject` filters out rows whose `expires_at` has passed (correct
+ * for the RENDER path — expired memories shouldn't be injected). But the memory
+ * MIGRATION (`/ctx-session-upgrade`) does a destructive delete+reinsert of the
+ * `active` pool, and it MUST operate on the full active set: if it only saw
+ * unexpired rows, it would delete those and leave expired `active` rows orphaned
+ * — a partial, inconsistent wipe (root cause, dogfood 2026-05-31: 831 unexpired
+ * deleted, 27 expired KNOWN_ISSUES stranded). Migration is a re-categorization,
+ * so it re-evaluates every active row regardless of TTL.
+ */
+export function getAllActiveMemoriesForMigration(db: Database, projectPath: string): Memory[] {
+    const rows = getActiveMemoriesNoExpiryStatement(db).all(projectPath).filter(isMemoryRow);
     return rows.map(toMemory);
 }
 

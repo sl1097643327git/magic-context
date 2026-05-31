@@ -55,6 +55,8 @@ const EMPTY_SNAPSHOT: SidebarSnapshot = {
     compartmentTokens: 0,
     factTokens: 0,
     memoryTokens: 0,
+    docsTokens: 0,
+    profileTokens: 0,
     conversationTokens: 0,
     toolCallTokens: 0,
     toolDefinitionTokens: 0,
@@ -223,6 +225,33 @@ export async function requestRecomp(sessionId: string): Promise<boolean> {
     if (!rpcClient) return false;
     try {
         const result = await rpcClient.call<{ ok: boolean }>("recomp", { sessionId });
+        return result.ok ?? false;
+    } catch {
+        return false;
+    }
+}
+
+/** Run `/ctx-session-upgrade` for the session (full recomp + once-per-project
+ *  memory migration). Fired from the upgrade dialog's "Run upgrade now" action. */
+export async function requestUpgrade(sessionId: string): Promise<boolean> {
+    if (!rpcClient) return false;
+    try {
+        const result = await rpcClient.call<{ ok: boolean }>("upgrade", { sessionId });
+        return result.ok ?? false;
+    } catch {
+        return false;
+    }
+}
+
+/** Mark the upgrade reminder dismissed (the user made an explicit Confirm/Cancel
+ *  choice), setting the durable stamp so the FRESH dialog won't re-show. Resume
+ *  prompts are staging-driven and unaffected. */
+export async function dismissUpgradeReminder(sessionId: string): Promise<boolean> {
+    if (!rpcClient) return false;
+    try {
+        const result = await rpcClient.call<{ ok: boolean }>("dismiss-upgrade-reminder", {
+            sessionId,
+        });
         return result.ok ?? false;
     } catch {
         return false;

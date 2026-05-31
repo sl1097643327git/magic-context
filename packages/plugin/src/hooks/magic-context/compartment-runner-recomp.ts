@@ -1,14 +1,19 @@
+import { embedAndStoreCompartments } from "../../features/magic-context/compartment-embedding";
 import { isCompartmentLeaseHeld } from "../../features/magic-context/compartment-lease";
 import {
     clearRecompStaging,
+    getCompartments,
     getRecompStaging,
     saveRecompStagingPass,
 } from "../../features/magic-context/compartment-storage";
 import { clearCompressionDepth } from "../../features/magic-context/compression-depth-storage";
-import { promoteSessionFactsToMemory } from "../../features/magic-context/memory";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
-import { getMemoriesByProject } from "../../features/magic-context/memory/storage-memory";
-import { appendM0Mutation, bumpSessionFactsVersion } from "../../features/magic-context/storage";
+import { appendM0Mutation } from "../../features/magic-context/storage";
+import {
+    recordHistorianRun,
+    summarizeImportance,
+    tallyFactsByCategory,
+} from "../../features/magic-context/storage-historian-runs";
 import {
     clearPendingCompactionMarkerStateIf,
     getPendingCompactionMarkerState,
@@ -21,26 +26,22 @@ import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import { updateCompactionMarkerAfterPublication } from "./compaction-marker-manager";
 import { buildCompartmentAgentPrompt } from "./compartment-prompt";
-import { runCompressionPassIfNeeded } from "./compartment-runner-compressor";
 import { queueDropsForCompartmentalizedMessages } from "./compartment-runner-drop-queue";
 import { runValidatedHistorianPass } from "./compartment-runner-historian";
-import {
-    cleanupHistorianStateFile,
-    maybeWriteHistorianStateFile,
-} from "./compartment-runner-incremental";
-import { buildExistingStateXml } from "./compartment-runner-state-xml";
+import { cleanupHistorianStateFile } from "./compartment-runner-incremental";
 import type { CandidateCompartment, CompartmentRunnerDeps } from "./compartment-runner-types";
 import {
     getReducedRecompTokenBudget,
     validateChunkCoverage,
     validateStoredCompartments,
 } from "./compartment-runner-validation";
-import { clearInjectionCache, renderMemoryBlock } from "./inject-compartments";
+import { clearInjectionCache } from "./inject-compartments";
 import {
     getProtectedTailStartOrdinal,
     getRawSessionMessageCount,
     readSessionChunk,
 } from "./read-session-chunk";
+import { buildReferenceBlocks } from "./reference-retrieval";
 import { sendIgnoredMessage } from "./send-session-notification";
 
 function insertRecompCompartmentRows(
@@ -49,10 +50,14 @@ function insertRecompCompartmentRows(
     compartments: CandidateCompartment[],
     now: number,
 ): void {
+    // v2: carry paraphrase tiers + importance/episode_type through the recomp
+    // promote path. Must match compartment-storage.ts insertCompartmentRows column
+    // order. legacy=0 when P1 present, else 1 (flat).
     const stmt = db.prepare(
-        "INSERT INTO compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, created_at, harness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, p1, p2, p3, p4, importance, episode_type, legacy, created_at, harness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     );
     for (const c of compartments) {
+        const hasTiers = typeof c.p1 === "string" && c.p1.length > 0;
         stmt.run(
             sessionId,
             c.sequence,
@@ -62,23 +67,16 @@ function insertRecompCompartmentRows(
             c.endMessageId,
             c.title,
             c.content,
+            c.p1 ?? null,
+            c.p2 ?? null,
+            c.p3 ?? null,
+            c.p4 ?? null,
+            typeof c.importance === "number" ? c.importance : 50,
+            c.episodeType ?? null,
+            hasTiers ? 0 : 1,
             now,
             getHarness(),
         );
-    }
-}
-
-function insertRecompFactRows(
-    db: Database,
-    sessionId: string,
-    facts: Array<{ category: string; content: string }>,
-    now: number,
-): void {
-    const stmt = db.prepare(
-        "INSERT INTO session_facts (session_id, category, content, created_at, updated_at, harness) VALUES (?, ?, ?, ?, ?, ?)",
-    );
-    for (const fact of facts) {
-        stmt.run(sessionId, fact.category, fact.content, now, now, getHarness());
     }
 }
 
@@ -108,10 +106,13 @@ export function promoteRecompStagingWithM0Mutation(
         }
 
         db.prepare("DELETE FROM compartments WHERE session_id = ?").run(sessionId);
+        // v2 faithful facts: recomp does NOT write session_facts. Facts are a
+        // promoted-memory concern now, and recomp must not emit facts at all
+        // (re-processing curated memories would degrade them — locked rule).
+        // The renderer no longer reads session_facts, so we clear any legacy
+        // rows for hygiene and never re-insert.
         db.prepare("DELETE FROM session_facts WHERE session_id = ?").run(sessionId);
         insertRecompCompartmentRows(db, sessionId, staging.compartments, now);
-        insertRecompFactRows(db, sessionId, staging.facts, now);
-        bumpSessionFactsVersion(db, sessionId);
         appendM0Mutation(db, {
             sessionId,
             mutationType: "recomp_boundary_change",
@@ -176,12 +177,8 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
         );
         const sessionDirectory = parentSession?.directory ?? directory;
 
-        // Render project memories once as read-only reference for fact dedup across all passes
-        const projectPath = directory ? resolveProjectIdentity(directory) : undefined;
-        const memories = projectPath
-            ? getMemoriesByProject(db, projectPath, ["active", "permanent"])
-            : [];
-        const memoryBlock = renderMemoryBlock(memories) ?? undefined;
+        // v2: no <project-memory> dedup block for recomp — it emits no facts to
+        // memory (structural rebuild only), so there is nothing to dedup against.
 
         // ── Resume from staging if a previous run was interrupted ────────────
         const existingStaging = getRecompStaging(db, sessionId);
@@ -202,6 +199,33 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                 notifParams(),
             );
         }
+
+        // ── Live progress (sidebar / status) ────────────────────────────────
+        // The recomp loop processes raw messages from `offset` up to
+        // `protectedTailStart`; `emitProgress` drives the TUI progress bar.
+        // (Outcome LOGGING is done once in executeContextRecompWithResult, which
+        // wraps every return path — previously only lease-loss logged, making a
+        // silently-non-publishing recomp undiagnosable; see dogfood 2026-05-30.)
+        const totalMessages = Math.max(0, protectedTailStart - 1);
+        const progressStartedAt = Date.now();
+        const emitProgress = (note?: string): void => {
+            try {
+                deps.onRecompProgress?.({
+                    sessionId,
+                    phase: "recomp",
+                    processedMessages: Math.min(offset, totalMessages),
+                    totalMessages,
+                    passCount,
+                    compartmentsCreated: candidateCompartments.length,
+                    startedAt: progressStartedAt,
+                    updatedAt: Date.now(),
+                    note,
+                });
+            } catch {
+                // best-effort — progress must never break the recomp loop
+            }
+        };
+        emitProgress("Preparing…");
 
         /** Promote staging → real tables and run post-processing.
          *  Returns formatted status lines on success, or null if validation fails or there's nothing to promote. */
@@ -229,15 +253,28 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             }
             deps.onCompartmentStatePublished?.(sessionId);
 
-            // Issue #44: respect memory.enabled and memory.auto_promote.
-            if (deps.directory && deps.memoryEnabled !== false && deps.autoPromote !== false) {
-                await deps.ensureProjectRegistered?.(deps.directory, db);
-                promoteSessionFactsToMemory(
-                    db,
-                    sessionId,
-                    resolveProjectIdentity(deps.directory),
-                    promoted.facts,
-                );
+            // v2 locked rule: recomp does NOT promote facts to project memory
+            // (see final-success path below for rationale). Structural rebuild only.
+            void promoted.facts;
+
+            // v2 (E2): recompute P1 embeddings for the rebuilt compartments.
+            // Recomp deletes + reinserts every compartment with fresh P1 text, so
+            // their embeddings must be regenerated — otherwise the rebuilt rows
+            // have NULL p1_embedding and vanish from ctx_search semantic results +
+            // the dreamer cross-linking substrate. Embedding is the search/linking
+            // substrate (gated on memory-enabled), distinct from fact promotion
+            // (which recomp deliberately skips). Fire-and-forget, best-effort.
+            if (deps.memoryEnabled !== false) {
+                const projectIdentity = resolveProjectIdentity(sessionDirectory);
+                // Register the project's embedding provider before embedding;
+                // embedTextForProject silently no-ops for unregistered projects,
+                // so without this the rebuilt rows keep NULL p1_embedding.
+                await deps.ensureProjectRegistered?.(sessionDirectory, db);
+                const liveCompartments = getCompartments(db, sessionId);
+                const toEmbed = liveCompartments
+                    .map((c) => ({ id: c.id, p1: c.p1 ?? c.content }))
+                    .filter((c) => typeof c.id === "number" && c.p1.length > 0);
+                void embedAndStoreCompartments(db, sessionId, projectIdentity, toEmbed);
             }
 
             const lastCompartmentEnd =
@@ -301,29 +338,28 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                 return `## Magic Recomp — Failed\n\nRecomp stopped because the raw chunk could not be represented safely: ${chunkCoverageError}\n\nNothing was written.`;
             }
 
-            const existingState =
-                candidateCompartments.length > 0 || candidateFacts.length > 0
-                    ? buildExistingStateXml(candidateCompartments, candidateFacts, memoryBlock)
-                    : memoryBlock
-                      ? `${memoryBlock}\n\nThis is your first run. No existing compartments or facts.`
-                      : "This is your first run. No existing state.";
-
-            // Clean up previous pass's state file before writing the new one.
-            // State file lives under <project>/.opencode/magic-context/historian/
-            // so historian's Read tool doesn't trigger OpenCode's
-            // external_directory permission prompt.
-            cleanupHistorianStateFile(currentStateFilePath);
-            currentStateFilePath = maybeWriteHistorianStateFile(
+            // v2 bounded reference model: 4 rotating seeds + last-6 recency
+            // (the compartments built so far in THIS recomp run provide
+            // continuity). Recomp is a structural rebuild and emits no durable
+            // facts (see below), so <project-memory> is omitted — there's
+            // nothing to dedup against.
+            const references = buildReferenceBlocks({
                 sessionId,
-                existingState,
-                sessionDirectory,
-            );
+                chunkStart: chunk.startIndex,
+                sessionCompartments: candidateCompartments,
+            });
 
-            const prompt = buildCompartmentAgentPrompt(
-                existingState,
-                `Messages ${chunk.startIndex}-${chunk.endIndex}:\n\n${chunk.text}`,
-                { stateFilePath: currentStateFilePath },
-            );
+            const prompt = buildCompartmentAgentPrompt({
+                seedExamples: references.seedExamples,
+                sessionReferences: references.sessionReferences,
+                projectMemory: "",
+                inputSource: `Messages ${chunk.startIndex}-${chunk.endIndex}:\n\n${chunk.text}`,
+                // Recomp is a structural rebuild only — it must NOT emit facts
+                // (locked rule: never re-promote into a user-curated memory store).
+                // Suppress the <facts> section so the model doesn't waste output
+                // tokens on facts we'd discard anyway.
+                memoryEnabled: false,
+            });
 
             await sendIgnoredMessage(
                 client,
@@ -331,6 +367,9 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                 `## Magic Recomp\n\nHistorian pass ${passCount + 1}, attempt ${passAttempt} started for messages ${chunk.startIndex}-${chunk.endIndex}.`,
                 notifParams(),
             );
+            // Live note: a single pass can take 60-90s through the fallback chain;
+            // surface "running historian…" so the sidebar bar isn't frozen.
+            emitProgress(`Running historian (pass ${passCount + 1})…`);
 
             const validatedPass = await runValidatedHistorianPass({
                 client,
@@ -348,12 +387,18 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                 subagentKind: "recomp",
                 callbacks: {
                     onRepairRetry: async (error) => {
+                        emitProgress(`Repair retry (pass ${passCount + 1})…`);
                         await sendIgnoredMessage(
                             client,
                             sessionId,
                             `## Magic Recomp\n\nHistorian pass ${passCount + 1}, attempt ${passAttempt} is continuing with a repair retry for messages ${chunk.startIndex}-${chunk.endIndex}.\n\nThe previous output did not validate: ${error}`,
                             notifParams(),
                         );
+                    },
+                    onModelFallback: (modelId, index, total) => {
+                        // Short model label (drop provider prefix) for the sidebar.
+                        const short = modelId.includes("/") ? modelId.split("/").pop() : modelId;
+                        emitProgress(`Trying fallback ${short} (${index}/${total})…`);
                     },
                 },
             });
@@ -379,6 +424,26 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                     }
                 }
 
+                // historian_runs telemetry: record the TERMINAL failure for this
+                // chunk. The budget-reduction retry above already `continue`d for
+                // recoverable cases, so reaching here means every attempt
+                // (primary + repair + fallback chain) failed to produce valid
+                // output. Recording failures (not just successes) honors the
+                // historian_runs design intent: capture whether a run failed and
+                // why. The kept failed child session + dump XMLs hold per-attempt
+                // detail; this row makes the failure queryable.
+                recordHistorianRun(db, {
+                    sessionId,
+                    harness: getHarness(),
+                    subagentInvocationId: validatedPass.invocationId ?? null,
+                    runKind: "recomp",
+                    status: "failed",
+                    failureReason: validatedPass.error,
+                    chunkStartOrdinal: chunk.startIndex,
+                    chunkEndOrdinal: chunk.endIndex,
+                    compartmentsProduced: 0,
+                });
+
                 const partial = await promoteAndFinalize(
                     `historian failed to validate messages ${chunk.startIndex}-${chunk.endIndex}: ${validatedPass.error}`,
                 );
@@ -386,6 +451,38 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                     return `## Magic Recomp — Partial\n\n${partial}`;
                 }
                 return `## Magic Recomp — Failed\n\nRecomp failed while rebuilding messages ${chunk.startIndex}-${chunk.endIndex}: ${validatedPass.error}\n\nNothing was written.`;
+            }
+
+            // historian_runs telemetry: one row per SUCCESSFUL recomp pass. Failure
+            // early-returns above are already captured in subagent_invocations; we
+            // keep recomp instrumentation to the clean per-pass success point to
+            // avoid destabilizing this delicate multi-pass path. run_kind="recomp"
+            // also covers /ctx-session-upgrade (upgrade = full recomp + migration).
+            {
+                const passComps = validatedPass.compartments ?? [];
+                const passFacts = validatedPass.facts ?? [];
+                const imp = summarizeImportance(passComps.map((c) => c.importance ?? 50));
+                recordHistorianRun(db, {
+                    sessionId,
+                    harness: getHarness(),
+                    // Exact FK: the invocation of the attempt that produced this
+                    // validated output. A kind-filtered "latest historian" lookup
+                    // mislinks here because recomp invocations are recorded under
+                    // subagent='recomp', not 'historian'.
+                    subagentInvocationId: validatedPass.invocationId ?? null,
+                    runKind: "recomp",
+                    status: "success",
+                    chunkStartOrdinal: chunk.startIndex,
+                    chunkEndOrdinal: chunk.endIndex,
+                    unprocessedFrom: passComps[passComps.length - 1]?.endMessage ?? null,
+                    compartmentsProduced: passComps.length,
+                    factsEmitted: passFacts.length,
+                    factsByCategory: passFacts.length > 0 ? tallyFactsByCategory(passFacts) : null,
+                    eventsEmitted: (validatedPass.events ?? []).length,
+                    importanceMin: imp.min,
+                    importanceMax: imp.max,
+                    importanceAvg: imp.avg,
+                });
             }
 
             candidateCompartments = [
@@ -414,6 +511,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                 return `## Magic Recomp — Failed\n\nRecomp made no forward progress after messages ${chunk.startIndex}-${chunk.endIndex}. Nothing was written.`;
             }
             offset = nextOffset;
+            emitProgress();
         }
 
         const mergedValidationError = validateStoredCompartments(candidateCompartments);
@@ -441,45 +539,61 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
         const finalCompartments = promoted?.compartments ?? candidateCompartments;
         const finalFacts = promoted?.facts ?? candidateFacts;
 
-        // Issue #44: respect memory.enabled and memory.auto_promote.
-        if (deps.directory && deps.memoryEnabled !== false && deps.autoPromote !== false) {
-            promoteSessionFactsToMemory(
-                db,
-                sessionId,
-                resolveProjectIdentity(deps.directory),
-                finalFacts,
-            );
-        }
+        // v2 locked rule: recomp does NOT promote facts to project memory.
+        // Recomp reprocesses already-curated history; the user's memories may be
+        // hand-picked, dreamer-consolidated, or self-edited, and re-promoting
+        // recomp-emitted facts would degrade that curated store. Recomp is a
+        // structural compartment rebuild only. (The historian prompt still emits
+        // a <facts> block, but recomp discards it for promotion purposes.)
+        void finalFacts;
 
         const lastCompartmentEnd = finalCompartments[finalCompartments.length - 1]?.endMessage ?? 0;
         if (lastCompartmentEnd > 0) {
             queueDropsForCompartmentalizedMessages(db, sessionId, lastCompartmentEnd);
         }
 
-        // Run compression pass if history block exceeds budget
-        let compressed = false;
-        if (deps.historyBudgetTokens && deps.historyBudgetTokens > 0) {
-            compressed = await runCompressionPassIfNeeded({
-                client,
-                db,
-                sessionId,
-                directory: sessionDirectory,
-                historyBudgetTokens: deps.historyBudgetTokens,
-                historianTimeoutMs,
-                fallbackModels: deps.fallbackModels,
-                minCompartmentRatio: deps.compressorMinCompartmentRatio,
-                maxMergeDepth: deps.compressorMaxMergeDepth,
-            });
+        // v2 (E2): recompute P1 embeddings for the rebuilt compartments. This is
+        // the NORMAL full-completion path (distinct from promoteAndFinalize, which
+        // handles early-exit/partial cases and already embeds). Without this, a
+        // fully-completed recomp leaves NULL p1_embedding → rebuilds vanish from
+        // ctx_search + dreamer cross-linking. Embedding is the search substrate
+        // (gated on memory-enabled), distinct from fact promotion (recomp skips).
+        if (deps.memoryEnabled !== false) {
+            const projectIdentity = resolveProjectIdentity(sessionDirectory);
+            // Register the embedding provider first; embedTextForProject silently
+            // no-ops for unregistered projects, leaving NULL p1_embedding.
+            await deps.ensureProjectRegistered?.(sessionDirectory, db);
+            const liveCompartments = getCompartments(db, sessionId);
+            const toEmbed = liveCompartments
+                .map((c) => ({ id: c.id, p1: c.p1 ?? c.content }))
+                .filter((c) => typeof c.id === "number" && c.p1.length > 0);
+            void embedAndStoreCompartments(db, sessionId, projectIdentity, toEmbed);
         }
 
+        // v2: advance the compaction marker on the full-completion path too (the
+        // promoteAndFinalize early-exit path already does this). Without it, the
+        // next incremental run may reprocess already-compartmentalized messages.
+        if (lastCompartmentEnd > 0) {
+            updateCompactionMarkerAfterPublication(
+                db,
+                sessionId,
+                lastCompartmentEnd,
+                deps.directory,
+            );
+            const stalePending = getPendingCompactionMarkerState(db, sessionId);
+            if (stalePending) {
+                clearPendingCompactionMarkerStateIf(db, sessionId, stalePending);
+            }
+        }
+
+        // v2: no compressor pass — deterministic decay-tier rendering keeps the
+        // rebuilt history within budget at render time.
         return [
             "## Magic Recomp — Complete",
             "",
             ...(resumed ? ["Resumed from previous interrupted run."] : []),
             `Rebuilt ${finalCompartments.length} compartment${finalCompartments.length === 1 ? "" : "s"} across ${passCount} historian pass${passCount === 1 ? "" : "es"}.`,
             `Covered raw history 1-${lastCompartmentEnd} out of ${rawMessageCount} total messages, stopping before protected tail at ${protectedTailStart}.`,
-            `Replaced facts with ${finalFacts.length} current entr${finalFacts.length === 1 ? "y" : "ies"}.`,
-            ...(compressed ? ["Compression pass ran to fit within history budget."] : []),
         ].join("\n");
     } catch (error: unknown) {
         // Recomp replaces durable state atomically, so unexpected failures must leave state untouched.

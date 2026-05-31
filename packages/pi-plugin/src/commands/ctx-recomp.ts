@@ -21,11 +21,11 @@ import {
 	signalPiHistoryRefresh,
 	signalPiPendingMaterialization,
 } from "../context-handler";
-import { clearPiCompressorState } from "../pi-compressor-runner";
 import {
 	buildPiCompactionSummary,
 	findFirstKeptEntryId,
 } from "../pi-historian-runner";
+import { createPiHistorianClient } from "../pi-recomp-client-shared";
 import { readPiSessionMessages } from "../read-session-pi";
 import { setMagicContextRecompActive, updateStatusLine } from "../status-line";
 import { resolveSessionId, sendCtxStatusMessage } from "./pi-command-utils";
@@ -130,9 +130,10 @@ export function registerCtxRecompCommand(
 			try {
 				const result = await executeContextRecompWithResult(
 					{
-						client: createPiRecompClient({
+						client: createPiHistorianClient({
 							runner: deps.runner,
 							model: deps.historianModel,
+							systemPrompt: COMPARTMENT_AGENT_SYSTEM_PROMPT,
 							fallbackModels: deps.historianFallbacks,
 							timeoutMs: deps.historianTimeoutMs,
 							thinkingLevel: deps.historianThinkingLevel,
@@ -177,14 +178,6 @@ export function registerCtxRecompCommand(
 				queueAndApplyPiRecompMarker({ db: deps.db, sessionId, ctx });
 				signalPiHistoryRefresh(sessionId);
 				signalPiPendingMaterialization(sessionId);
-				// Compressor-cooldown reset: the freshly rebuilt
-				// compartments may legitimately need compression on the
-				// next opportunity, but the in-memory cooldown timer
-				// would block the compressor from picking them up
-				// inside its 10-min window. Clearing the timer lets
-				// the compressor re-evaluate as if it had never run
-				// for this session.
-				clearPiCompressorState(sessionId);
 			} catch (error) {
 				sendCtxStatusMessage(pi, {
 					title: "/ctx-recomp",
@@ -365,105 +358,6 @@ function buildConfirmationWarning(
 			"",
 			"**To confirm, run `/ctx-recomp` again within 60 seconds.**",
 		].join("\n"),
-	};
-}
-
-function createPiRecompClient(args: {
-	runner: SubagentRunner;
-	model: string;
-	fallbackModels?: readonly string[];
-	timeoutMs?: number;
-	thinkingLevel?: string;
-	directory: string;
-	accountingSessionId: string;
-	notify: (text: string) => void;
-}) {
-	const sessions = new Map<string, unknown[]>();
-	let counter = 0;
-	async function prompt(input: unknown): Promise<Record<string, never>> {
-		const body = readBody(input);
-		const sessionId = readPathId(input);
-		if (body.noReply) {
-			const text = extractPromptText(body.parts);
-			if (text.length > 0) args.notify(text);
-			return {};
-		}
-		const promptText = extractPromptText(body.parts);
-		const result = await args.runner.run({
-			agent: "magic-context-historian",
-			systemPrompt: COMPARTMENT_AGENT_SYSTEM_PROMPT,
-			userMessage: promptText,
-			model: args.model,
-			fallbackModels: args.fallbackModels,
-			timeoutMs: args.timeoutMs,
-			cwd: args.directory,
-			thinkingLevel: args.thinkingLevel,
-			accountingSessionId: args.accountingSessionId,
-			accountingSubagent: "recomp",
-		});
-		if (!result.ok) {
-			throw new Error(
-				`Pi recomp historian failed (${result.reason}): ${result.error}`,
-			);
-		}
-		sessions.set(sessionId, [makeMessage("assistant", result.assistantText)]);
-		return {};
-	}
-	return {
-		session: {
-			get: async () => ({ directory: args.directory }),
-			create: async () => {
-				const id = `magic-context-pi-recomp-${++counter}`;
-				sessions.set(id, []);
-				return { id };
-			},
-			prompt,
-			promptAsync: prompt,
-			messages: async (input: unknown) => ({
-				data: sessions.get(readPathId(input)) ?? [],
-			}),
-			delete: async (input: unknown) => {
-				sessions.delete(readPathId(input));
-				return {};
-			},
-		},
-	};
-}
-
-function readPathId(input: unknown): string {
-	if (typeof input !== "object" || input === null) return "";
-	const path = (input as { path?: { id?: unknown } }).path;
-	return typeof path?.id === "string" ? path.id : "";
-}
-
-function readBody(input: unknown): { noReply?: boolean; parts?: unknown } {
-	if (typeof input !== "object" || input === null) return {};
-	const body = (input as { body?: unknown }).body;
-	return typeof body === "object" && body !== null
-		? (body as { noReply?: boolean; parts?: unknown })
-		: {};
-}
-
-function extractPromptText(parts: unknown): string {
-	if (!Array.isArray(parts)) return "";
-	return parts
-		.map((part) =>
-			typeof part === "object" && part !== null
-				? (part as { text?: unknown }).text
-				: undefined,
-		)
-		.filter(
-			(text): text is string => typeof text === "string" && text.length > 0,
-		)
-		.join("\n");
-}
-
-function makeMessage(role: "assistant", text: string): unknown {
-	return {
-		info: { role, time: { created: Date.now() } },
-		parts: [{ type: "text", text }],
-		role,
-		content: [{ type: "text", text }],
 	};
 }
 

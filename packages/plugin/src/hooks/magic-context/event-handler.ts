@@ -52,7 +52,6 @@ import { clearNoteNudgeTriggerOnly } from "./note-nudger";
 import { readRawSessionMessages } from "./read-session-chunk";
 import { type NotificationParams, sendIgnoredMessage } from "./send-session-notification";
 import { clearMessageTokensCache, type NudgePlacementStore } from "./transform";
-import { clearCompressorCooldown } from "./transform-compartment-phase";
 import { resetDegradedCacheCount } from "./transform-postprocess-phase";
 
 const CONTEXT_USAGE_TTL_MS = 60 * 60 * 1000;
@@ -681,7 +680,6 @@ export function createEventHandler(deps: EventHandlerDeps) {
             deps.onSessionDeleted?.(sessionId);
             deps.contextUsageMap.delete(sessionId);
             deps.tagger.cleanup(sessionId);
-            clearCompressorCooldown(sessionId);
             clearMessageTokensCache(sessionId);
             return;
         }

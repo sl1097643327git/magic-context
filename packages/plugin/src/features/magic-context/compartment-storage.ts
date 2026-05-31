@@ -10,7 +10,7 @@ function getInsertCompartmentStatement(db: Database): PreparedStatement {
     let stmt = insertCompartmentStatements.get(db);
     if (!stmt) {
         stmt = db.prepare(
-            "INSERT INTO compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, created_at, harness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, p1, p2, p3, p4, importance, episode_type, legacy, created_at, harness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         );
         insertCompartmentStatements.set(db, stmt);
     }
@@ -37,7 +37,19 @@ export interface Compartment {
     startMessageId: string;
     endMessageId: string;
     title: string;
+    /** v2: P1 tier text (fullest). Legacy rows: flat v1 content. Always present (NOT NULL). */
     content: string;
+    /** v2 paraphrase tiers (model B). NULL for legacy=1 rows. */
+    p1: string | null;
+    p2: string | null;
+    p3: string | null;
+    p4: string | null;
+    /** Decay-rate signal (1-100). Defaults to 50. */
+    importance: number;
+    /** Comma-separated activity types (e.g. "design,feature"). NULL for legacy rows. */
+    episodeType: string | null;
+    /** 1 = pre-v2 flat compartment (no tiers); 0 = v2 tiered. */
+    legacy: number;
     createdAt: number;
 }
 
@@ -60,6 +72,13 @@ interface CompartmentRow {
     end_message_id: string;
     title: string;
     content: string;
+    p1: string | null;
+    p2: string | null;
+    p3: string | null;
+    p4: string | null;
+    importance: number | null;
+    episode_type: string | null;
+    legacy: number | null;
     created_at: number;
 }
 
@@ -70,6 +89,14 @@ interface SessionFactRow {
     content: string;
     created_at: number;
     updated_at: number;
+}
+
+function isStringOrNullish(v: unknown): v is string | null | undefined {
+    return v === null || v === undefined || typeof v === "string";
+}
+
+function isNumberOrNullish(v: unknown): v is number | null | undefined {
+    return v === null || v === undefined || typeof v === "number";
 }
 
 function isCompartmentRow(row: unknown): row is CompartmentRow {
@@ -85,6 +112,15 @@ function isCompartmentRow(row: unknown): row is CompartmentRow {
         typeof candidate.end_message_id === "string" &&
         typeof candidate.title === "string" &&
         typeof candidate.content === "string" &&
+        // v2 tier columns are nullable (legacy rows store NULL). Tolerate absence
+        // so a row is never rejected just for missing/null tier metadata.
+        isStringOrNullish(candidate.p1) &&
+        isStringOrNullish(candidate.p2) &&
+        isStringOrNullish(candidate.p3) &&
+        isStringOrNullish(candidate.p4) &&
+        isNumberOrNullish(candidate.importance) &&
+        isStringOrNullish(candidate.episode_type) &&
+        isNumberOrNullish(candidate.legacy) &&
         typeof candidate.created_at === "number"
     );
 }
@@ -109,7 +145,17 @@ export interface CompartmentInput {
     startMessageId: string;
     endMessageId: string;
     title: string;
+    /** v2: P1 tier text. Legacy/compressor inserts: flat content. */
     content: string;
+    /** v2 paraphrase tiers (model B). Omitted/null for legacy or compressor inserts → stored NULL. */
+    p1?: string | null;
+    p2?: string | null;
+    p3?: string | null;
+    p4?: string | null;
+    /** Decay-rate signal (1-100). Omitted → stored 50. */
+    importance?: number | null;
+    /** Comma-separated activity types. Omitted/null → stored NULL. */
+    episodeType?: string | null;
 }
 
 function insertCompartmentRows(
@@ -120,6 +166,9 @@ function insertCompartmentRows(
 ): void {
     const stmt = getInsertCompartmentStatement(db);
     for (const compartment of compartments) {
+        // A compartment is v2 (legacy=0) iff it carries at least the P1 tier.
+        // Compressor/legacy inserts pass no tiers → stored NULL + legacy=1.
+        const hasTiers = typeof compartment.p1 === "string" && compartment.p1.length > 0;
         stmt.run(
             sessionId,
             compartment.sequence,
@@ -129,6 +178,13 @@ function insertCompartmentRows(
             compartment.endMessageId,
             compartment.title,
             compartment.content,
+            compartment.p1 ?? null,
+            compartment.p2 ?? null,
+            compartment.p3 ?? null,
+            compartment.p4 ?? null,
+            typeof compartment.importance === "number" ? compartment.importance : 50,
+            compartment.episodeType ?? null,
+            hasTiers ? 0 : 1,
             now,
             getHarness(),
         );
@@ -158,6 +214,13 @@ function toCompartment(row: CompartmentRow): Compartment {
         endMessageId: row.end_message_id,
         title: row.title,
         content: row.content,
+        p1: row.p1 ?? null,
+        p2: row.p2 ?? null,
+        p3: row.p3 ?? null,
+        p4: row.p4 ?? null,
+        importance: typeof row.importance === "number" ? row.importance : 50,
+        episodeType: row.episode_type ?? null,
+        legacy: typeof row.legacy === "number" ? row.legacy : 0,
         createdAt: row.created_at,
     };
 }
@@ -421,7 +484,7 @@ export function saveRecompStagingPass(
         db.prepare("DELETE FROM recomp_facts WHERE session_id = ?").run(sessionId);
 
         const compartmentStmt = db.prepare(
-            "INSERT OR REPLACE INTO recomp_compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, pass_number, created_at, harness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO recomp_compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, p1, p2, p3, p4, importance, episode_type, pass_number, created_at, harness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         );
         for (const c of compartments) {
             compartmentStmt.run(
@@ -433,6 +496,12 @@ export function saveRecompStagingPass(
                 c.endMessageId,
                 c.title,
                 c.content,
+                c.p1 ?? null,
+                c.p2 ?? null,
+                c.p3 ?? null,
+                c.p4 ?? null,
+                typeof c.importance === "number" ? c.importance : 50,
+                c.episodeType ?? null,
                 passNumber,
                 now,
                 getHarness(),
@@ -465,6 +534,12 @@ export function getRecompStaging(db: Database, sessionId: string): RecompStaging
         endMessageId: row.end_message_id,
         title: row.title,
         content: row.content,
+        p1: row.p1 ?? null,
+        p2: row.p2 ?? null,
+        p3: row.p3 ?? null,
+        p4: row.p4 ?? null,
+        importance: typeof row.importance === "number" ? row.importance : 50,
+        episodeType: row.episode_type ?? null,
     }));
 
     const factRows = db
@@ -648,6 +723,12 @@ interface RecompCompartmentRow {
     end_message_id: string;
     title: string;
     content: string;
+    p1: string | null;
+    p2: string | null;
+    p3: string | null;
+    p4: string | null;
+    importance: number | null;
+    episode_type: string | null;
     pass_number: number;
     created_at: number;
 }
@@ -665,6 +746,12 @@ function isRecompCompartmentRow(row: unknown): row is RecompCompartmentRow {
         typeof candidate.end_message_id === "string" &&
         typeof candidate.title === "string" &&
         typeof candidate.content === "string" &&
+        isStringOrNullish(candidate.p1) &&
+        isStringOrNullish(candidate.p2) &&
+        isStringOrNullish(candidate.p3) &&
+        isStringOrNullish(candidate.p4) &&
+        isNumberOrNullish(candidate.importance) &&
+        isStringOrNullish(candidate.episode_type) &&
         typeof candidate.pass_number === "number" &&
         typeof candidate.created_at === "number"
     );

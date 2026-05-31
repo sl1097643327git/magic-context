@@ -1,6 +1,41 @@
 import type { PluginContext } from "../../plugin/types";
 import type { Database } from "../../shared/sqlite";
+import type { ParsedEvent } from "./compartment-parser";
 import type { NotificationParams } from "./send-session-notification";
+
+/**
+ * Live progress for a running recomp / session-upgrade, surfaced in the TUI
+ * sidebar + /ctx-status so users can watch a long rebuild instead of staring at
+ * a single "started" toast. Lives in `LiveSessionState.recompProgressBySession`
+ * (process-local, in-memory — if the process restarts mid-recomp the recomp
+ * itself is interrupted, so losing the progress entry is correct).
+ *
+ *  - phase "recomp"    → rebuilding compartments; `processedMessages/totalMessages` drives the bar.
+ *  - phase "migration" → recomp done, re-organizing project memories (indeterminate).
+ *  - phase "done"      → finished successfully; `message` holds the summary. Auto-cleared after a grace period.
+ *  - phase "failed"    → stopped without publishing; `message` holds the reason. Retained until next run.
+ */
+export interface RecompProgress {
+    sessionId: string;
+    phase: "recomp" | "migration" | "done" | "failed";
+    /** Raw messages processed so far (the recomp loop's `offset`). */
+    processedMessages: number;
+    /** Total raw messages to reprocess (protected-tail start − 1). */
+    totalMessages: number;
+    /** Successful historian passes completed. */
+    passCount: number;
+    /** Compartments rebuilt so far this run. */
+    compartmentsCreated: number;
+    startedAt: number;
+    updatedAt: number;
+    /** Terminal summary/reason (done | failed). */
+    message?: string;
+    /** Transient status line for the active phase — e.g. "Starting…", "Running
+     *  historian…", "Primary returned nothing — trying fallback sonnet-4.6…",
+     *  "Repair retry…". Surfaced under the progress bar so a long/retrying pass
+     *  shows live activity instead of a frozen bar. */
+    note?: string;
+}
 
 export interface CompartmentRunnerDeps {
     client: PluginContext["client"];
@@ -27,10 +62,6 @@ export interface CompartmentRunnerDeps {
     /** When true, run an editor pass after successful historian output to clean
      *  low-signal U: lines and cross-compartment duplicates. */
     historianTwoPass?: boolean;
-    /** Compressor floor ratio: floor = ceil(lastEndMessage / minCompartmentRatio). */
-    compressorMinCompartmentRatio?: number;
-    /** Compressor max merge depth (1-5). Compartments at or above this depth are skipped. */
-    compressorMaxMergeDepth?: number;
     /**
      * Cross-session memory feature gate (`memory.enabled` config). When false,
      * historian/recomp must NOT promote session facts into project memories
@@ -49,6 +80,10 @@ export interface CompartmentRunnerDeps {
      * run as published before invoking this callback.
      */
     onCompartmentStatePublished?: (sessionId: string) => void;
+    /** Live recomp-phase progress callback (sidebar / status). The runner emits
+     *  "recomp"-phase updates (start + each pass); the caller owns the migration
+     *  and terminal (done/failed) phases. Best-effort, never throws into the loop. */
+    onRecompProgress?: (progress: RecompProgress) => void;
     /**
      * When true, publication preserves the in-memory injection cache until a
      * later materializing pass consumes the deferred refresh.
@@ -73,7 +108,19 @@ export interface CandidateCompartment {
     startMessageId: string;
     endMessageId: string;
     title: string;
+    /** v2: P1 tier text (mirror). v1/compressor: flat content. */
     content: string;
+    /** v2 paraphrase tiers (model B). Null/undefined for v1/flat compartments.
+     *  Nullability matches CompartmentInput so candidates and staging rows
+     *  round-trip through each other without type friction. */
+    p1?: string | null;
+    p2?: string | null;
+    p3?: string | null;
+    p4?: string | null;
+    /** v2 decay-rate signal (1-100). Null/undefined for v1/flat. */
+    importance?: number | null;
+    /** v2 comma-separated activity types. Null/undefined for v1/flat. */
+    episodeType?: string | null;
 }
 
 export interface HistorianRunResult {
@@ -90,8 +137,19 @@ export type ValidatedHistorianPassResult =
           compartments: CandidateCompartment[];
           facts: Array<{ category: string; content: string }>;
           userObservations?: string[];
+          /** v2: historian-extracted events (stored, not rendered). */
+          events?: ParsedEvent[];
+          /**
+           * Subagent-invocation id of the model attempt that actually produced
+           * this validated output (primary, repair, editor, or fallback). The
+           * caller uses it as the exact `historian_runs.subagent_invocation_id`
+           * FK so the telemetry row joins to the right tokens/model — a kind-
+           * filtered "latest invocation" lookup mislinks recomp passes (recorded
+           * under subagent='recomp') to a stale subagent='historian' row.
+           */
+          invocationId?: number | null;
       }
-    | { ok: false; error: string };
+    | { ok: false; error: string; invocationId?: number | null };
 
 export interface StoredCompartmentRange {
     startMessage: number;
@@ -100,4 +158,9 @@ export interface StoredCompartmentRange {
 
 export interface HistorianProgressCallbacks {
     onRepairRetry?: (error: string) => Promise<void>;
+    /** Fired before each fallback model attempt in `runFallbackHistorianPass`
+     *  (after the primary + repair failed). `modelId` is the model about to be
+     *  tried; `index`/`total` describe its position in the fallback chain. Lets
+     *  the caller surface "trying fallback X…" in live progress. */
+    onModelFallback?: (modelId: string, index: number, total: number) => void;
 }

@@ -20,7 +20,7 @@ const databases = new Map<string, Database>();
 const persistenceByDatabase = new WeakMap<Database, boolean>();
 const persistenceErrorByDatabase = new WeakMap<Database, string>();
 
-export const LATEST_SUPPORTED_VERSION = 22;
+export const LATEST_SUPPORTED_VERSION = 24;
 
 export interface OpenDatabaseOptions {
     dbPath?: string;
@@ -186,6 +186,10 @@ export function initializeDatabase(db: Database): void {
       end_message_id TEXT DEFAULT '',
       title TEXT NOT NULL,
       content TEXT NOT NULL,
+      p1 TEXT,
+      p2 TEXT,
+      p3 TEXT,
+      p4 TEXT,
       importance INTEGER NOT NULL DEFAULT 50,
       episode_type TEXT,
       p1_embedding BLOB,
@@ -196,6 +200,19 @@ export function initializeDatabase(db: Database): void {
       UNIQUE(session_id, sequence)
     );
     CREATE INDEX IF NOT EXISTS idx_compartments_session ON compartments(session_id);
+
+    CREATE TABLE IF NOT EXISTS compartment_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      compartment_id INTEGER,
+      kind TEXT NOT NULL,
+      at_compartment INTEGER,
+      fields_json TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL,
+      harness TEXT NOT NULL DEFAULT 'opencode'
+    );
+    CREATE INDEX IF NOT EXISTS idx_compartment_events_session
+      ON compartment_events(session_id);
 
     CREATE TABLE IF NOT EXISTS compartment_state_lease (
       session_id TEXT PRIMARY KEY NOT NULL,
@@ -314,6 +331,11 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     CREATE TABLE IF NOT EXISTS project_key_files_version (
       project_path TEXT    PRIMARY KEY,
       version      INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS schema_migrations_meta (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS project_state (
@@ -480,6 +502,35 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     CREATE INDEX IF NOT EXISTS idx_sai_subagent
       ON subagent_invocations(subagent, started_at DESC);
 
+    CREATE TABLE IF NOT EXISTS historian_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      harness TEXT NOT NULL DEFAULT 'opencode',
+      subagent_invocation_id INTEGER,
+      run_kind TEXT NOT NULL,
+      status TEXT NOT NULL,
+      failure_reason TEXT,
+      chunk_start_ordinal INTEGER,
+      chunk_end_ordinal INTEGER,
+      unprocessed_from INTEGER,
+      compartments_produced INTEGER NOT NULL DEFAULT 0,
+      compartment_id_min INTEGER,
+      compartment_id_max INTEGER,
+      facts_emitted INTEGER NOT NULL DEFAULT 0,
+      facts_by_category_json TEXT,
+      events_emitted INTEGER NOT NULL DEFAULT 0,
+      importance_min INTEGER,
+      importance_max INTEGER,
+      importance_avg REAL,
+      discarded_last INTEGER NOT NULL DEFAULT 0,
+      legacy INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_historian_runs_session
+      ON historian_runs(session_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_historian_runs_status
+      ON historian_runs(status, created_at DESC);
+
     CREATE INDEX IF NOT EXISTS idx_tags_session_tag_number ON tags(session_id, tag_number);
     CREATE INDEX IF NOT EXISTS idx_tags_session_message_id ON tags(session_id, message_id);
     CREATE INDEX IF NOT EXISTS idx_pending_ops_session ON pending_ops(session_id);
@@ -496,6 +547,12 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       end_message_id TEXT DEFAULT '',
       title TEXT NOT NULL,
       content TEXT NOT NULL,
+      p1 TEXT,
+      p2 TEXT,
+      p3 TEXT,
+      p4 TEXT,
+      importance INTEGER NOT NULL DEFAULT 50,
+      episode_type TEXT,
       pass_number INTEGER NOT NULL,
       created_at INTEGER NOT NULL,
       harness TEXT NOT NULL DEFAULT 'opencode',
@@ -626,11 +683,21 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     // NOT be added to `healNullTextColumns`.
     ensureColumn(db, "session_meta", "deferred_execute_state", "TEXT");
 
+    ensureColumn(db, "compartments", "p1", "TEXT");
+    ensureColumn(db, "compartments", "p2", "TEXT");
+    ensureColumn(db, "compartments", "p3", "TEXT");
+    ensureColumn(db, "compartments", "p4", "TEXT");
     ensureColumn(db, "compartments", "importance", "INTEGER NOT NULL DEFAULT 50");
     ensureColumn(db, "compartments", "episode_type", "TEXT");
     ensureColumn(db, "compartments", "p1_embedding", "BLOB");
     ensureColumn(db, "compartments", "p1_embedding_model_id", "TEXT");
     ensureColumn(db, "compartments", "legacy", "INTEGER NOT NULL DEFAULT 0");
+    ensureColumn(db, "recomp_compartments", "p1", "TEXT");
+    ensureColumn(db, "recomp_compartments", "p2", "TEXT");
+    ensureColumn(db, "recomp_compartments", "p3", "TEXT");
+    ensureColumn(db, "recomp_compartments", "p4", "TEXT");
+    ensureColumn(db, "recomp_compartments", "importance", "INTEGER NOT NULL DEFAULT 50");
+    ensureColumn(db, "recomp_compartments", "episode_type", "TEXT");
     ensureColumn(db, "memories", "importance", "INTEGER");
     ensureColumn(db, "session_meta", "cached_m0_bytes", "BLOB");
     ensureColumn(db, "session_meta", "cached_m0_project_memory_epoch", "INTEGER");

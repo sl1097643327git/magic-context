@@ -125,13 +125,45 @@ function executeRecompUpgradeStub(db: Database, sessionId: string): string {
         return "## Magic Recomp Upgrade\n\nNothing to upgrade: this session has no legacy compartments.";
     }
 
-    // TODO(wave-3): wire upgrade runner.
+    // Legacy --upgrade flag is superseded by the /ctx-session-upgrade command.
     return [
         "## Magic Recomp Upgrade",
         "",
         `Found ${legacyCount} legacy compartment${legacyCount === 1 ? "" : "s"} for this session.`,
-        "Upgrade runner not yet implemented (Wave 3). No state was changed.",
+        "The `--upgrade` flag is deprecated. Run `/ctx-session-upgrade` to upgrade this session.",
     ].join("\n");
+}
+
+/**
+ * Execute /ctx-session-upgrade: upgrade THIS session to the v2 history format.
+ *
+ * Two halves (locked design):
+ *  1. Compartment upgrade — run a full recomp, which rebuilds every legacy v1
+ *     compartment into the v2 tiered/scored shape (legacy=0). This is just the
+ *     normal full-recomp path; recomp already produces v2 compartments.
+ *  2. Memory migration (E3.2) — re-evaluate project memories into the 5-category
+ *     taxonomy via a transient historian-model prompt, once per project. Wired
+ *     in a follow-up; this command runs the compartment upgrade today and notes
+ *     the pending migration step.
+ *
+ * Session-scoped: recomp rebuilds THIS session's compartments. The memory
+ * migration is project-scoped and idempotent (guarded once-per-project).
+ */
+async function executeSessionUpgrade(
+    deps: {
+        /** Runs the full session upgrade (compartment recomp → once-per-project
+         *  memory migration) via the shared orchestrator. Optional: unavailable
+         *  when no historian model is configured. The orchestrator gives the
+         *  command path identical model fallback + live progress + terminal
+         *  state as the RPC dialog path (dogfood 2026-05-30 unification). */
+        runUpgrade?: (sessionId: string) => Promise<string>;
+    },
+    sessionId: string,
+): Promise<string> {
+    if (!deps.runUpgrade) {
+        return "## Session Upgrade\n\nUpgrade is unavailable because the recomp handler is not configured.";
+    }
+    return deps.runUpgrade(sessionId);
 }
 
 /**
@@ -328,6 +360,10 @@ export function createMagicContextCommandHandler(deps: {
         sessionId: string,
         options?: { range?: PartialRecompRange },
     ) => Promise<string>;
+    /** Runs the once-per-project 5-cat memory migration for /ctx-session-upgrade.
+     *  Optional: when unavailable, /ctx-session-upgrade still upgrades compartments
+     *  via recomp and skips the memory re-evaluation. */
+    runUpgrade?: (sessionId: string) => Promise<string>;
     sendNotification: (
         sessionId: string,
         text: string,
@@ -360,6 +396,7 @@ export function createMagicContextCommandHandler(deps: {
     const isRecompCommand = (command: string): boolean => command === "ctx-recomp";
     const isAugCommand = (command: string): boolean => command === "ctx-aug";
     const isDreamCommand = (command: string): boolean => command === "ctx-dream";
+    const isSessionUpgradeCommand = (command: string): boolean => command === "ctx-session-upgrade";
 
     return {
         "command.execute.before": async (
@@ -372,8 +409,9 @@ export function createMagicContextCommandHandler(deps: {
             const isRecomp = isRecompCommand(input.command);
             const isAug = isAugCommand(input.command);
             const isDream = isDreamCommand(input.command);
+            const isSessionUpgrade = isSessionUpgradeCommand(input.command);
 
-            if (!isStatus && !isFlush && !isRecomp && !isAug && !isDream) {
+            if (!isStatus && !isFlush && !isRecomp && !isAug && !isDream && !isSessionUpgrade) {
                 return;
             }
 
@@ -527,6 +565,18 @@ export function createMagicContextCommandHandler(deps: {
                             result = warningLines.join("\n");
                         }
                     }
+                }
+            }
+
+            if (isSessionUpgrade) {
+                // TUI-no-session edge: before the first message, the prompt may
+                // not be bound to a session. Resolve defensively — nothing to
+                // upgrade without a session id.
+                if (!sessionId) {
+                    result =
+                        "## Session Upgrade\n\nThis prompt is not attached to a session yet — send a message first, then run `/ctx-session-upgrade`.";
+                } else {
+                    result = await executeSessionUpgrade(deps, sessionId);
                 }
             }
 

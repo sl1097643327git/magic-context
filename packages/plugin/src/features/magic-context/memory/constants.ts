@@ -1,10 +1,16 @@
 import type { MemoryCategory } from "./types";
 
 export const PROMOTABLE_CATEGORIES: MemoryCategory[] = [
-    "ARCHITECTURE_DECISIONS",
+    // v2 world taxonomy (what the historian emits today)
+    "PROJECT_RULES",
+    "ARCHITECTURE",
     "CONSTRAINTS",
-    "CONFIG_DEFAULTS",
+    "CONFIG_VALUES",
     "NAMING",
+    // legacy 9-cat — still promotable so pre-v2 behavior + any lingering
+    // legacy-category writes keep working until the E3 recategorization
+    "ARCHITECTURE_DECISIONS",
+    "CONFIG_DEFAULTS",
     "USER_PREFERENCES",
     "USER_DIRECTIVES",
     "ENVIRONMENT",
@@ -13,11 +19,16 @@ export const PROMOTABLE_CATEGORIES: MemoryCategory[] = [
 ];
 
 export const CATEGORY_PRIORITY: MemoryCategory[] = [
+    // v2 world taxonomy first (these dominate new sessions)
+    "PROJECT_RULES",
+    "ARCHITECTURE",
+    "CONSTRAINTS",
+    "CONFIG_VALUES",
+    "NAMING",
+    // legacy 9-cat ordering preserved below for pre-v2 rows
     "USER_DIRECTIVES",
     "USER_PREFERENCES",
-    "NAMING",
     "CONFIG_DEFAULTS",
-    "CONSTRAINTS",
     "ARCHITECTURE_DECISIONS",
     "ENVIRONMENT",
     "WORKFLOW_RULES",

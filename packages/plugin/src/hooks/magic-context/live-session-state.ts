@@ -1,3 +1,4 @@
+import type { RecompProgress } from "./compartment-runner-types";
 import type { AgentBySession, LiveModelBySession, VariantBySession } from "./hook-handlers";
 
 /**
@@ -38,6 +39,14 @@ export interface LiveSessionState {
      * Populated on first successful resolution; cleared on `session.deleted`.
      */
     sessionDirectoryBySession: Map<string, string>;
+    /**
+     * Live recomp / session-upgrade progress, keyed by sessionId. Written by the
+     * RPC recomp/upgrade handlers (via the runner's `onRecompProgress` callback
+     * plus their own migration/terminal updates) and read by `buildSidebarSnapshot`
+     * so the TUI sidebar + /ctx-status can show a live progress bar. In-memory
+     * only — a process restart interrupts the recomp anyway.
+     */
+    recompProgressBySession: Map<string, RecompProgress>;
 }
 
 export function createLiveSessionState(): LiveSessionState {
@@ -51,5 +60,6 @@ export function createLiveSessionState(): LiveSessionState {
         pendingMaterializationSessions: new Set<string>(),
         deferredMaterializationSessions: new Set<string>(),
         sessionDirectoryBySession: new Map<string, string>(),
+        recompProgressBySession: new Map<string, RecompProgress>(),
     };
 }

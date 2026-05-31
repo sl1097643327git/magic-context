@@ -4,12 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "cargo tauri dev",
+    "dev": "bunx tauri dev",
     "dev:frontend": "vite",
     "build": "vite build",
-    "build:tauri": "cargo tauri build",
+    "build:tauri": "bunx tauri build",
     "preview": "vite preview",
-    "tauri": "cargo tauri"
+    "tauri": "bunx tauri"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.5.0",

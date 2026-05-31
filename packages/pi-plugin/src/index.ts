@@ -54,6 +54,7 @@ import {
 	onNoteTrigger,
 } from "@magic-context/core/hooks/magic-context/note-nudger";
 import { normalizeTodoStateJson } from "@magic-context/core/hooks/magic-context/todo-view";
+import { maybeSendUpgradeReminder } from "@magic-context/core/hooks/magic-context/upgrade-reminder";
 import {
 	ANNOUNCEMENT_FEATURES,
 	ANNOUNCEMENT_FOOTER,
@@ -76,6 +77,7 @@ import {
 import { registerCtxDreamCommand } from "./commands/ctx-dream";
 import { registerCtxFlushCommand } from "./commands/ctx-flush";
 import { registerCtxRecompCommand } from "./commands/ctx-recomp";
+import { registerCtxSessionUpgradeCommand } from "./commands/ctx-session-upgrade";
 import { registerCtxStatusCommand } from "./commands/ctx-status";
 import { loadPiConfig } from "./config";
 import {
@@ -392,16 +394,9 @@ export function resolveHistorianFromConfig(
 		clearReasoningAge: config.clear_reasoning_age,
 		dropToolStructure: config.drop_tool_structure,
 		historyBudgetPercentage: config.history_budget_percentage,
-		compressor: {
-			enabled: config.compressor.enabled,
-			minCompartmentRatio: config.compressor.min_compartment_ratio,
-			maxMergeDepth: config.compressor.max_merge_depth,
-			cooldownMs: config.compressor.cooldown_ms,
-			maxCompartmentsPerPass: config.compressor.max_compartments_per_pass,
-			graceCompartments: config.compressor.grace_compartments,
-		},
 		memoryEnabled: config.memory.enabled,
 		autoPromote: config.memory.auto_promote,
+		userMemoriesEnabled: config.dreamer?.user_memories?.enabled === true,
 	};
 }
 
@@ -608,7 +603,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			injectionBudgetTokens: config.memory.injection_budget_tokens,
 			temporalAwareness: config.experimental?.temporal_awareness === true,
 			keyFilesEnabled: config.dreamer?.pin_key_files?.enabled ?? false,
-			keyFilesTokenBudget: config.dreamer?.pin_key_files?.token_budget ?? 10_000,
+			keyFilesTokenBudget:
+				config.dreamer?.pin_key_files?.token_budget ?? 10_000,
 		},
 		// Scheduler config — TTL + threshold gating for cache-busting
 		// stages. Heuristic cleanup runs only on execute passes so
@@ -695,6 +691,25 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		autoPromote: config.memory.auto_promote,
 	});
 	info("registered /ctx-recomp");
+
+	// E6b/E6c: /ctx-session-upgrade — full recomp (legacy→v2 tiered) + once-per-
+	// project memory migration into the 5-category taxonomy. Own runner instance
+	// for the same isolation reasons as /ctx-recomp.
+	registerCtxSessionUpgradeCommand(pi, {
+		db,
+		runner: new PiSubagentRunner(),
+		historianModel: historianConfig?.model,
+		historianChunkTokens: deriveHistorianChunkTokens(
+			resolveHistorianContextLimit(historianConfig?.model),
+		),
+		historianFallbacks: historianConfig?.fallbackModels,
+		historianTimeoutMs: config.historian_timeout_ms,
+		historianThinkingLevel: historianConfig?.thinkingLevel,
+		memoryEnabled: config.memory.enabled,
+		autoPromote: config.memory.auto_promote,
+		userMemoriesEnabled: config.dreamer?.user_memories?.enabled === true,
+	});
+	info("registered /ctx-session-upgrade");
 
 	registerCtxDreamCommand(pi, {
 		db,
@@ -814,6 +829,26 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			}
 			if (sessionId) {
 				trackSessionForProject(currentProject.projectIdentity, sessionId);
+
+				// E6d: one-time upgrade reminder for sessions with legacy (pre-v2)
+				// compartments. Model-invisible (ctx.ui.notify), self-gating via the
+				// durable + per-process guards in the shared helper. Only when the
+				// historian can run (so /ctx-session-upgrade is actionable).
+				if (ctx.hasUI && historianConfig?.model) {
+					void maybeSendUpgradeReminder(
+						{
+							client: null,
+							db,
+							sendIgnoredMessage: async (_client, _sid, text) => {
+								ctx.ui.notify(text, "info");
+							},
+							getNotificationParams: () => ({}),
+						},
+						sessionId,
+					).catch(() => {
+						// Never block agent start on reminder delivery.
+					});
+				}
 			}
 
 			if (config.system_prompt_injection?.enabled === false) {

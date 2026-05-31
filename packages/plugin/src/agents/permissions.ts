@@ -40,16 +40,17 @@
  * # What each agent needs
  *
  *   - **historian / historian-editor / compressor**: `read` plus the
- *     read-only AFT navigation tools `aft_outline` and `aft_zoom`.
- *     The runner offloads large existing-state XML to a temp file
- *     under `<project>/.opencode/magic-context/historian/` and the
- *     prompt instructs the model to read that file. AFT navigation
- *     is allowed so historian can verify a symbol or file structure
- *     when writing accurate compartment summaries.
+ *     read-only AFT navigation/search tools `aft_outline`, `aft_zoom`,
+ *     and `aft_search`. The runner offloads large existing-state XML to
+ *     a temp file under `<project>/.opencode/magic-context/historian/`
+ *     and the prompt instructs the model to read that file. AFT
+ *     navigation is allowed so historian can find or verify a symbol or
+ *     file structure when writing accurate compartment summaries.
  *
- *   - **dreamer**: `read`, `grep`, `glob`, `bash`, the read-only AFT
- *     navigation tools `aft_outline` and `aft_zoom`, plus the Magic
- *     Context MCP tools `ctx_memory`, `ctx_search`, `ctx_note`.
+ *   - **dreamer**: `read`, `grep`, `glob`, `bash`, `write`, `edit`, the
+ *     read-only AFT navigation/search tools `aft_outline`, `aft_zoom`,
+ *     `aft_search`, plus the Magic Context MCP tools `ctx_memory`,
+ *     `ctx_search`, `ctx_note`.
  *     Dreamer task prompts in
  *     `features/magic-context/dreamer/task-prompts.ts` explicitly tell
  *     the model to grep schema files for defaults, read source to
@@ -105,7 +106,7 @@ export function buildAllowOnlyPermission(
  * websearch. Historian's job is summarizing the input it was given,
  * not exploring the repo.
  */
-export const HISTORIAN_ALLOWED_TOOLS = ["read", "aft_outline", "aft_zoom"] as const;
+export const HISTORIAN_ALLOWED_TOOLS = ["read", "aft_outline", "aft_zoom", "aft_search"] as const;
 
 /**
  * Tools the dreamer agent needs. This is the broadest hidden-agent
@@ -127,21 +128,38 @@ export const HISTORIAN_ALLOWED_TOOLS = ["read", "aft_outline", "aft_zoom"] as co
  *     consolidate / verify / improve / archive-stale / smart-notes
  *     dreamer child sessions, so removing it would regress real,
  *     documented dreamer behavior.
+ *   - `write` / `edit` — the maintain-docs task (`task-prompts.ts`)
+ *     explicitly instructs the model to "Write or update using the
+ *     Write tool" to keep `ARCHITECTURE.md` / `STRUCTURE.md` at the
+ *     project root synchronized. Without these tools the dreamer was
+ *     forced to emit docs through `bash` heredocs/`sed` — fragile and
+ *     hard to review. Granting `write` + `edit` lets it use the proper
+ *     file tools (which back up + validate) instead.
+ *   - `aft_search` — primary read-only code search for the verify /
+ *     improve / maintain-docs tasks; finds the symbols and call sites a
+ *     doc/memory rewrite must describe, more precisely than raw `grep`.
  *
  * Deliberately NOT allowed:
  *   - `task` — no subagent fanout from dreamer
- *   - `edit` / `write` — dreamer must not modify project files;
- *     `task-prompts.ts` explicitly states "Do not commit changes"
  *   - `webfetch` / `websearch` — out of scope; smart-note URL fetches
  *     go through `bash` + `curl` instead
+ *
+ * Note: `write` / `edit` grant general file-write capability (the
+ * permission gate is tool-level, not path-level). Dreamer is a trusted
+ * hidden agent whose prompts scope writes to docs + memory; the
+ * task-prompts still say "Do not commit changes," so it edits the
+ * working tree but never commits.
  */
 export const DREAMER_ALLOWED_TOOLS = [
     "read",
     "grep",
     "glob",
     "bash",
+    "write",
+    "edit",
     "aft_outline",
     "aft_zoom",
+    "aft_search",
     "ctx_memory",
     "ctx_search",
     "ctx_note",

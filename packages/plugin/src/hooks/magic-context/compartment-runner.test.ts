@@ -151,9 +151,10 @@ describe("executeContextRecomp", () => {
                 title: "Recovered history",
             }),
         ]);
-        expect(getSessionFacts(db, "ses-recomp")).toEqual([
-            expect.objectContaining({ category: "CONSTRAINTS", content: "Rebuilt fact." }),
-        ]);
+        // v2: recomp is structural only — it does NOT write session_facts
+        // (facts are a promoted-memory concern, and recomp must not re-emit
+        // facts that could degrade curated memories).
+        expect(getSessionFacts(db, "ses-recomp")).toHaveLength(0);
     });
 
     it("keeps published state unchanged when a later recomp pass fails", async () => {
@@ -384,7 +385,7 @@ describe("executeContextRecomp", () => {
                         parts: [
                             {
                                 type: "text",
-                                text: `<compartment start="3" end="3" title="Pass two">Next summary</compartment>\n<WORKFLOW_RULES>\n* Rewritten fact.\n</WORKFLOW_RULES>`,
+                                text: `<compartment start="3" end="3" title="Pass two">Next summary</compartment>\n<PROJECT_RULES>\n* Rewritten fact.\n</PROJECT_RULES>`,
                             },
                         ],
                     },
@@ -423,9 +424,8 @@ describe("executeContextRecomp", () => {
             }),
             expect.objectContaining({ startMessage: 3, endMessage: 3, content: "Next summary" }),
         ]);
-        expect(getSessionFacts(db, "ses-recomp-full-state")).toEqual([
-            expect.objectContaining({ category: "WORKFLOW_RULES", content: "Rewritten fact." }),
-        ]);
+        // v2: recomp is structural only — no session_facts written.
+        expect(getSessionFacts(db, "ses-recomp-full-state")).toHaveLength(0);
     });
 
     it("returns a timeout failure and keeps progress visible when a historian pass hangs", async () => {
@@ -1140,6 +1140,100 @@ describe("runCompartmentAgent", () => {
         ]);
     });
 
+    it("escalates through configured fallback_models before the session-model last resort", async () => {
+        useTempDataHome("compartment-runner-chain-");
+        createOpenCodeDb("ses-chain", [
+            { id: "m-1", role: "user", text: "First" },
+            { id: "m-2", role: "assistant", text: "Second" },
+            { id: "m-3", role: "user", text: "protected 1" },
+            { id: "m-4", role: "user", text: "protected 2" },
+            { id: "m-5", role: "user", text: "protected 3" },
+            { id: "m-6", role: "user", text: "protected 4" },
+            { id: "m-7", role: "user", text: "protected 5" },
+        ]);
+        const db = openDatabase();
+
+        // Primary (call 0) + repair (call 1) both return invalid output → escalate.
+        // First configured fallback "anthropic/claude-sonnet-4-6" (call 2) returns
+        // a VALID compartment. The session-model last resort "openai/gpt-4o" must
+        // therefore NEVER be reached.
+        const promptSession = mock(async () => ({}));
+        const messages = mock(async () => {
+            const callIndex = messages.mock.calls.length;
+            if (callIndex < 3) {
+                return {
+                    data: [
+                        {
+                            info: { role: "assistant", time: { created: callIndex } },
+                            parts: [
+                                {
+                                    type: "text",
+                                    text: `<compartment start="9" end="9" title="Bad">Out of range</compartment>`,
+                                },
+                            ],
+                        },
+                    ],
+                };
+            }
+            return {
+                data: [
+                    {
+                        info: { role: "assistant", time: { created: callIndex } },
+                        parts: [
+                            {
+                                type: "text",
+                                text: `<compartment start="1" end="2" title="ChainFallback">Recovered via sonnet</compartment>`,
+                            },
+                        ],
+                    },
+                ],
+            };
+        });
+        const client = {
+            session: {
+                get: mock(async () => ({ data: { directory: "/tmp/chain" } })),
+                create: mock(async () => ({
+                    data: { id: `ses-agent-${messages.mock.calls.length}` },
+                })),
+                prompt: promptSession,
+                messages,
+                delete: mock(async () => ({})),
+            },
+        } as unknown as PluginContext["client"];
+
+        await runCompartmentAgentWithLease({
+            client,
+            db,
+            sessionId: "ses-chain",
+            historianChunkTokens: 10_000,
+            directory: "/tmp",
+            fallbackModels: ["anthropic/claude-sonnet-4-6"],
+            fallbackModelId: "openai/gpt-4o",
+        });
+
+        const calls = promptSession.mock.calls as unknown as Array<
+            [{ body?: { model?: { providerID: string; modelID: string } } }]
+        >;
+        // Call 0 (primary) + call 1 (repair): no model override (agent default).
+        expect(calls[0]?.[0]?.body?.model).toBeUndefined();
+        expect(calls[1]?.[0]?.body?.model).toBeUndefined();
+        // Call 2: the FIRST configured fallback (sonnet), not the session model.
+        expect(calls[2]?.[0]?.body?.model).toEqual({
+            providerID: "anthropic",
+            modelID: "claude-sonnet-4-6",
+        });
+        // Session-model last resort (gpt-4o) must never be reached.
+        const usedGpt4o = calls.some(
+            (c) =>
+                c[0]?.body?.model?.providerID === "openai" &&
+                c[0]?.body?.model?.modelID === "gpt-4o",
+        );
+        expect(usedGpt4o).toBe(false);
+        expect(getCompartments(db, "ses-chain")).toEqual([
+            expect.objectContaining({ title: "ChainFallback", startMessage: 1, endMessage: 2 }),
+        ]);
+    });
+
     it("starts new summarization after the last stored raw compartment end", async () => {
         useTempDataHome("compartment-runner-offset-");
         createOpenCodeDb("ses-2", [
@@ -1230,18 +1324,21 @@ describe("runCompartmentAgent", () => {
         expect(sentPrompt).toContain("[3] U: two");
         expect(sentPrompt).toContain("[4] A: three");
         expect(sentPrompt).not.toContain("msg_");
-        expect(sentPrompt).toContain(
-            "Existing state (read-only context for continuity and fact normalization — do NOT re-emit these compartments):",
+        // v2: the unbounded existing_state dump is gone. Prior compartments now
+        // appear in the bounded <session_references> recency block (last 6),
+        // and facts are no longer dumped/replaced — they dedup against
+        // <project-memory>. The prior compartment is still shown for continuity.
+        expect(sentPrompt).toContain("<session_references>");
+        expect(sentPrompt).toContain('start="1" end="2"');
+        expect(sentPrompt).toContain('title="Earlier &quot;work&quot;"');
+        // v2: no existing_state fact-normalization block, no raw session_facts dump.
+        expect(sentPrompt).not.toContain(
+            "Existing state (read-only context for continuity and fact normalization",
         );
-        expect(sentPrompt).toContain(
-            '<compartment start="1" end="2" title="Earlier &quot;work&quot;">',
-        );
-        expect(sentPrompt).toContain(
+        expect(sentPrompt).not.toContain(
             "Rewrite all facts below into canonical present-tense operational form",
         );
-        expect(sentPrompt).toContain("<WORKFLOW_RULES>");
-        expect(sentPrompt).toContain("* Commit to feat first.");
-        expect(sentPrompt).toContain("Do not copy wording verbatim");
+        // The chunk only covers messages 3-4, so message 1's raw text never appears.
         expect(sentPrompt).not.toContain("[1] U: zero");
 
         const compartments = getCompartments(db, "ses-2");

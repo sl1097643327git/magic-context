@@ -100,7 +100,7 @@ export async function runValidatedHistorianPass(args: {
                   draftDumpPath: firstRun.dumpPath,
                   draftInvocationId: firstRun.invocationId ?? null,
               })
-            : firstValidation;
+            : { ...firstValidation, invocationId: firstRun.invocationId ?? null };
         cleanupHistorianDump(args.parentSessionId, firstRun.dumpPath);
         return finalResult;
     }
@@ -141,7 +141,7 @@ export async function runValidatedHistorianPass(args: {
                   draftDumpPath: repairRun.dumpPath,
                   draftInvocationId: repairRun.invocationId ?? null,
               })
-            : repairValidation;
+            : { ...repairValidation, invocationId: repairRun.invocationId ?? null };
         // Keep firstRun.dumpPath (initial failure) for debugging.
         // Only cleanup the successful repair run's dump.
         cleanupHistorianDump(args.parentSessionId, repairRun.dumpPath);
@@ -206,7 +206,8 @@ async function runEditorPassOrFallback(args: {
         shared.sessionLog(args.parentSessionId, "historian two-pass: editor call failed", {
             error: editorRun.error,
         });
-        return args.draftValidation;
+        // Editor failed → keep the validated draft; FK links to the draft run.
+        return { ...args.draftValidation, invocationId: args.draftInvocationId ?? null };
     }
 
     const editorValidation = validateHistorianOutput(
@@ -223,12 +224,12 @@ async function runEditorPassOrFallback(args: {
             { error: editorValidation.error },
         );
         // Editor output was bad — keep editor dump for debugging.
-        return args.draftValidation;
+        return { ...args.draftValidation, invocationId: args.draftInvocationId ?? null };
     }
 
     cleanupHistorianDump(args.parentSessionId, editorRun.dumpPath);
     shared.sessionLog(args.parentSessionId, "historian two-pass: editor accepted");
-    return editorValidation;
+    return { ...editorValidation, invocationId: editorRun.invocationId ?? null };
 }
 
 async function runHistorianPrompt(args: {
@@ -263,6 +264,10 @@ async function runHistorianPrompt(args: {
     let agentSessionId: string | null = null;
     const startedAt = Date.now();
     let invocationRecorded = false;
+    // Keep FAILED historian child sessions for debugging (the model output, the
+    // exact prompt, and the error are all inspectable in the child session). Only
+    // delete on SUCCESS, where the result is already persisted as a compartment.
+    let outcomeOk = false;
 
     const recordInvocation = (params: {
         status: "completed" | "failed" | "aborted";
@@ -397,6 +402,7 @@ async function runHistorianPrompt(args: {
             dumpLabel ?? "historian-response",
             result,
         );
+        outcomeOk = true;
         return { ok: true, result, dumpPath, invocationId: invocationId ?? undefined };
     } catch (modelError: unknown) {
         const desc = describeError(modelError);
@@ -410,7 +416,12 @@ async function runHistorianPrompt(args: {
             error: `Historian failed while processing this session: ${desc.brief}`,
         };
     } finally {
-        if (agentSessionId) {
+        // Delete the child session ONLY on success. On failure, keep it so the
+        // failed model output / prompt / error can be inspected for debugging
+        // (the run is already recorded as failed in subagent_invocations +
+        // historian_runs; the live child session is the missing piece). A periodic
+        // sweep can GC old failed child sessions later if needed.
+        if (agentSessionId && outcomeOk) {
             await client.session.delete({ path: { id: agentSessionId } }).catch((e: unknown) => {
                 shared.sessionLog(
                     parentSessionId,
@@ -418,6 +429,11 @@ async function runHistorianPrompt(args: {
                     getErrorMessage(e),
                 );
             });
+        } else if (agentSessionId && !outcomeOk) {
+            shared.sessionLog(
+                parentSessionId,
+                `historian: KEEPING failed child session ${agentSessionId} for debugging (not deleted)`,
+            );
         }
     }
 }
@@ -437,51 +453,90 @@ async function runFallbackHistorianPass(args: {
     sequenceOffset: number;
     dumpLabelBase: string;
     timeoutMs?: number;
+    /**
+     * Configured historian fallback chain (e.g. `anthropic/claude-sonnet-4-6`),
+     * tried IN ORDER before the session-model last resort. Each candidate's
+     * output is validated — empty or unparseable output (e.g. a misconfigured
+     * primary that returns nothing, or a model that replies conversationally
+     * instead of emitting compartments) escalates to the next candidate rather
+     * than failing the whole pass.
+     */
+    fallbackModels?: readonly string[];
+    /**
+     * The live session provider/model, used as the absolute last resort AFTER
+     * the configured chain is exhausted.
+     */
     fallbackModelId?: string;
+    callbacks?: HistorianProgressCallbacks;
     error: string;
     dumpPaths: Array<string | undefined>;
 }): Promise<ValidatedHistorianPassResult> {
-    if (!args.fallbackModelId) {
+    // Ordered escalation that matches the intended fallback policy:
+    //   configured fallback_models (in order)  →  live session model (last resort)
+    // The primary model already ran (and was repaired) before we get here.
+    // Validation gates EVERY candidate, so a model that returns no usable
+    // compartments escalates to the next instead of ending the pass — this is
+    // exactly the path a misconfigured/empty-returning primary needs, since an
+    // empty-but-successful response never throws and so never triggers the
+    // throw-based chain inside the prompt call.
+    const seen = new Set<string>();
+    const chain: string[] = [];
+    for (const candidate of [...(args.fallbackModels ?? []), args.fallbackModelId ?? ""]) {
+        if (!candidate || seen.has(candidate)) continue;
+        seen.add(candidate);
+        chain.push(candidate);
+    }
+    if (chain.length === 0) {
         return { ok: false, error: args.error };
     }
 
-    const modelOverride = parseModelOverride(args.fallbackModelId);
-    if (!modelOverride) {
-        return { ok: false, error: args.error };
+    let lastError = args.error;
+    for (let i = 0; i < chain.length; i += 1) {
+        const modelId = chain[i];
+        const modelOverride = parseModelOverride(modelId);
+        if (!modelOverride) continue;
+
+        const isSessionModelLastResort = modelId === args.fallbackModelId && i === chain.length - 1;
+        shared.sessionLog(
+            args.parentSessionId,
+            `compartment agent: retrying historian with ${modelId} (${
+                isSessionModelLastResort ? "session-model last resort" : "configured fallback"
+            } ${i + 1}/${chain.length})`,
+        );
+        args.callbacks?.onModelFallback?.(modelId, i + 1, chain.length);
+
+        const fallbackRun = await runHistorianPrompt({
+            client: args.client,
+            parentSessionId: args.parentSessionId,
+            sessionDirectory: args.sessionDirectory,
+            prompt: args.prompt,
+            timeoutMs: args.timeoutMs,
+            dumpLabel: `${args.dumpLabelBase}-fallback-${i + 1}`,
+            modelOverride,
+        });
+        if (!fallbackRun.ok || !fallbackRun.result) {
+            lastError = fallbackRun.error ?? lastError;
+            continue;
+        }
+
+        const fallbackValidation = validateHistorianOutput(
+            fallbackRun.result,
+            args.parentSessionId,
+            args.chunk,
+            args.priorCompartments,
+            args.sequenceOffset,
+        );
+        if (fallbackValidation.ok) {
+            // Only cleanup the successful run's dump. Prior failed dumps
+            // (args.dumpPaths + earlier chain attempts) are kept for debugging.
+            cleanupHistorianDump(args.parentSessionId, fallbackRun.dumpPath);
+            return { ...fallbackValidation, invocationId: fallbackRun.invocationId ?? null };
+        }
+        lastError = fallbackValidation.error ?? lastError;
+        // Keep the dump for debugging; escalate to the next candidate.
     }
 
-    shared.sessionLog(
-        args.parentSessionId,
-        `compartment agent: retrying historian with primary session model ${args.fallbackModelId}`,
-    );
-
-    const fallbackRun = await runHistorianPrompt({
-        client: args.client,
-        parentSessionId: args.parentSessionId,
-        sessionDirectory: args.sessionDirectory,
-        prompt: args.prompt,
-        timeoutMs: args.timeoutMs,
-        dumpLabel: `${args.dumpLabelBase}-fallback-primary-model`,
-        modelOverride,
-    });
-    if (!fallbackRun.ok || !fallbackRun.result) {
-        return { ok: false, error: fallbackRun.error ?? args.error };
-    }
-
-    const fallbackValidation = validateHistorianOutput(
-        fallbackRun.result,
-        args.parentSessionId,
-        args.chunk,
-        args.priorCompartments,
-        args.sequenceOffset,
-    );
-    if (fallbackValidation.ok) {
-        // Only cleanup the successful fallback run's dump.
-        // Prior failed dumps (args.dumpPaths) are kept for debugging.
-        cleanupHistorianDump(args.parentSessionId, fallbackRun.dumpPath);
-    }
-
-    return fallbackValidation;
+    return { ok: false, error: lastError };
 }
 
 function parseModelOverride(modelId: string): HistorianModelOverride | null {

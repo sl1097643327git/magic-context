@@ -5,9 +5,9 @@ import { join } from "node:path";
 import { insertUserMemory } from "@magic-context/core/features/magic-context/user-memory/storage-user-memory";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import {
+	buildMagicContextBlock,
 	MAGIC_CONTEXT_GUIDANCE_MARKER,
 	SYSTEM_PROMPT_DATA_MARKERS,
-	buildMagicContextBlock,
 } from "./system-prompt";
 import { createTestDb } from "./test-utils.test";
 

@@ -106,7 +106,7 @@ describe("runCompartmentPhase - 95% emergency notification idempotency", () => {
      *
      * The guard ensures sendIgnoredMessage runs at most once per ActiveCompartmentRun.
      */
-    it("sends the 95% compacting notification at most once per active compartment run", async () => {
+    it("sends the 95% comparting notification at most once per active compartment run", async () => {
         const sessionId = "ses-notification-guard";
 
         // Create an OpenCode DB with enough messages so hasEligibleHistoryForCompartment
@@ -180,7 +180,7 @@ describe("runCompartmentPhase - 95% emergency notification idempotency", () => {
         >;
         const notifText = calls
             .map((call) => call[0].body?.parts?.[0]?.text ?? "")
-            .find((text) => text.includes("compacting history"));
+            .find((text) => text.includes("comparting history"));
         expect(notifText).toBeDefined();
         expect(notifText).toContain("Context at 97%");
     });

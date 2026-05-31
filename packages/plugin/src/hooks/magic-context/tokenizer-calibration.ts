@@ -34,6 +34,12 @@ interface CalibrationEntry extends ModelCalibration {
  * to 1.0/1.0 which is safer than guessing.
  */
 const CALIBRATION_TABLE: CalibrationEntry[] = [
+    // Anthropic Opus 4.8 — same new tokenizer family as 4.7 (not in ai-tokenizer's
+    // claude encoding). Without these it falls to NEUTRAL (1.0/1.0) and the
+    // sidebar undercounts System+ToolDefs by ~50%, starving the Conversation
+    // bucket. Reuse 4.7's empirically-measured ratios until 4.8 is calibrated.
+    { prefix: "anthropic/claude-opus-4-8", systemRatio: 1.51, toolsRatio: 1.57 },
+    { prefix: "anthropic/claude-opus-4.8", systemRatio: 1.51, toolsRatio: 1.57 },
     // Anthropic Opus 4.7 — new tokenizer not yet in ai-tokenizer's claude encoding.
     { prefix: "anthropic/claude-opus-4-7", systemRatio: 1.51, toolsRatio: 1.57 },
     { prefix: "anthropic/claude-opus-4.7", systemRatio: 1.51, toolsRatio: 1.57 },
@@ -54,6 +60,10 @@ const CALIBRATION_TABLE: CalibrationEntry[] = [
     // through to NEUTRAL (1.0/1.0) and the sidebar misattributes ~30K tokens
     // from System+ToolDefs into Conversation/ToolCalls. Sum-to-inputTokens is
     // still preserved (residuals absorb), but the per-bucket numbers drift.
+    { prefix: "openrouter/anthropic/claude-opus-4-8", systemRatio: 1.51, toolsRatio: 1.57 },
+    { prefix: "openrouter/anthropic/claude-opus-4.8", systemRatio: 1.51, toolsRatio: 1.57 },
+    { prefix: "github-copilot/claude-opus-4-8", systemRatio: 1.51, toolsRatio: 1.57 },
+    { prefix: "github-copilot/claude-opus-4.8", systemRatio: 1.51, toolsRatio: 1.57 },
     { prefix: "openrouter/anthropic/claude-opus-4-7", systemRatio: 1.51, toolsRatio: 1.57 },
     { prefix: "openrouter/anthropic/claude-opus-4.7", systemRatio: 1.51, toolsRatio: 1.57 },
     { prefix: "github-copilot/claude-opus-4-7", systemRatio: 1.51, toolsRatio: 1.57 },
@@ -149,6 +159,8 @@ export interface CalibratedBuckets {
     compartmentTokens: number;
     factTokens: number;
     memoryTokens: number;
+    docsTokens: number;
+    profileTokens: number;
     conversationTokens: number;
     toolCallTokens: number;
 }
@@ -163,6 +175,10 @@ export interface CalibrationInput {
     compartmentsLocal: number;
     factsLocal: number;
     memoriesLocal: number;
+    /** Verbatim — <project-docs> block in m[0] (stable scaffolding, own budget). */
+    docsLocal: number;
+    /** Verbatim — <user-profile> block in m[0] (stable scaffolding, own budget). */
+    profileLocal: number;
     /** Residual absorbers — proportionally scaled to absorb the remainder. */
     conversationLocal: number;
     toolCallsLocal: number;
@@ -176,6 +192,8 @@ export function calibrateBuckets(input: CalibrationInput): CalibratedBuckets {
         compartmentTokens: 0,
         factTokens: 0,
         memoryTokens: 0,
+        docsTokens: 0,
+        profileTokens: 0,
         conversationTokens: 0,
         toolCallTokens: 0,
     };
@@ -191,11 +209,13 @@ export function calibrateBuckets(input: CalibrationInput): CalibratedBuckets {
     let compartments = Math.max(0, input.compartmentsLocal);
     let facts = Math.max(0, input.factsLocal);
     let memories = Math.max(0, input.memoriesLocal);
+    let docs = Math.max(0, input.docsLocal);
+    let profile = Math.max(0, input.profileLocal);
 
     // Edge case: calibrated + verbatim already exceed inputTokens. Clamp them
     // down proportionally so the residual buckets stay non-negative.
     const nonResidualTotal =
-        calibratedSystem + calibratedToolDefs + compartments + facts + memories;
+        calibratedSystem + calibratedToolDefs + compartments + facts + memories + docs + profile;
     if (nonResidualTotal > input.inputTokens) {
         const ratio = input.inputTokens / nonResidualTotal;
         calibratedSystem = Math.round(calibratedSystem * ratio);
@@ -203,12 +223,21 @@ export function calibrateBuckets(input: CalibrationInput): CalibratedBuckets {
         compartments = Math.round(compartments * ratio);
         facts = Math.round(facts * ratio);
         memories = Math.round(memories * ratio);
+        docs = Math.round(docs * ratio);
+        profile = Math.round(profile * ratio);
     }
 
     // (3) Residual buckets: Conversation + Tool Calls absorb whatever's left.
     const residualTarget = Math.max(
         0,
-        input.inputTokens - calibratedSystem - calibratedToolDefs - compartments - facts - memories,
+        input.inputTokens -
+            calibratedSystem -
+            calibratedToolDefs -
+            compartments -
+            facts -
+            memories -
+            docs -
+            profile,
     );
     const residualLocalSum = input.conversationLocal + input.toolCallsLocal;
 
@@ -234,6 +263,8 @@ export function calibrateBuckets(input: CalibrationInput): CalibratedBuckets {
         compartments +
         facts +
         memories +
+        docs +
+        profile +
         conversation +
         toolCalls;
     let delta = input.inputTokens - provisionalSum;
@@ -259,12 +290,21 @@ export function calibrateBuckets(input: CalibrationInput): CalibratedBuckets {
     // with heavy calibration ratios). Without this loop, pathological inputs
     // could leave a residual of +1 or +2 tokens.
     if (delta < 0) {
-        type BucketName = "system" | "toolDefs" | "compartments" | "facts" | "memories";
+        type BucketName =
+            | "system"
+            | "toolDefs"
+            | "compartments"
+            | "facts"
+            | "memories"
+            | "docs"
+            | "profile";
         const get = (name: BucketName): number => {
             if (name === "system") return calibratedSystem;
             if (name === "toolDefs") return calibratedToolDefs;
             if (name === "compartments") return compartments;
             if (name === "facts") return facts;
+            if (name === "docs") return docs;
+            if (name === "profile") return profile;
             return memories;
         };
         const subtract = (name: BucketName, amount: number): void => {
@@ -272,9 +312,19 @@ export function calibrateBuckets(input: CalibrationInput): CalibratedBuckets {
             else if (name === "toolDefs") calibratedToolDefs -= amount;
             else if (name === "compartments") compartments -= amount;
             else if (name === "facts") facts -= amount;
+            else if (name === "docs") docs -= amount;
+            else if (name === "profile") profile -= amount;
             else memories -= amount;
         };
-        const buckets: BucketName[] = ["system", "toolDefs", "compartments", "facts", "memories"];
+        const buckets: BucketName[] = [
+            "system",
+            "toolDefs",
+            "compartments",
+            "facts",
+            "memories",
+            "docs",
+            "profile",
+        ];
         // Sort by current value descending so we drain the largest first.
         buckets.sort((a, b) => get(b) - get(a));
         for (const name of buckets) {
@@ -293,6 +343,8 @@ export function calibrateBuckets(input: CalibrationInput): CalibratedBuckets {
         compartmentTokens: compartments,
         factTokens: facts,
         memoryTokens: memories,
+        docsTokens: docs,
+        profileTokens: profile,
         conversationTokens: conversation,
         toolCallTokens: toolCalls,
     };

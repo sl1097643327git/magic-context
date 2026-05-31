@@ -1,13 +1,33 @@
+import type { ParsedCompartment } from "./compartment-parser";
 import type { CandidateCompartment } from "./compartment-runner-types";
 import { getRawSessionMessageIdsThrough } from "./read-session-chunk";
 
+/** Tier/metadata fields a parsed compartment may carry, threaded to storage. */
+type ParsedTierFields = Pick<
+    ParsedCompartment,
+    "p1" | "p2" | "p3" | "p4" | "importance" | "episodeType"
+>;
+
+function tierFieldsOf(c: ParsedTierFields): ParsedTierFields {
+    return {
+        p1: c.p1,
+        p2: c.p2,
+        p3: c.p3,
+        p4: c.p4,
+        importance: c.importance,
+        episodeType: c.episodeType,
+    };
+}
+
 export function mapParsedCompartmentsToChunk(
-    compartments: Array<{
-        startMessage: number;
-        endMessage: number;
-        title: string;
-        content: string;
-    }>,
+    compartments: Array<
+        {
+            startMessage: number;
+            endMessage: number;
+            title: string;
+            content: string;
+        } & ParsedTierFields
+    >,
     chunk: {
         startIndex: number;
         endIndex: number;
@@ -33,6 +53,7 @@ export function mapParsedCompartmentsToChunk(
             endMessageId: endLine.messageId,
             title: compartment.title,
             content: compartment.content,
+            ...tierFieldsOf(compartment),
         });
     }
 
@@ -40,12 +61,14 @@ export function mapParsedCompartmentsToChunk(
 }
 
 export function mapParsedCompartmentsToSession(
-    compartments: Array<{
-        startMessage: number;
-        endMessage: number;
-        title: string;
-        content: string;
-    }>,
+    compartments: Array<
+        {
+            startMessage: number;
+            endMessage: number;
+            title: string;
+            content: string;
+        } & ParsedTierFields
+    >,
     sessionId: string,
 ): { ok: true; compartments: CandidateCompartment[] } | { ok: false; error: string } {
     const maxEndMessage = compartments.reduce(
@@ -73,6 +96,7 @@ export function mapParsedCompartmentsToSession(
             endMessageId,
             title: compartment.title,
             content: compartment.content,
+            ...tierFieldsOf(compartment),
         });
     }
 
