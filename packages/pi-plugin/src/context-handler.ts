@@ -64,7 +64,6 @@ import {
 	getTagsByNumbers,
 	getTopNBySize,
 	setSessionWorkMetrics,
-	setStrippedPlaceholderIds,
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
 import { getOrCreateSessionMeta } from "@magic-context/core/features/magic-context/storage-meta";
@@ -1613,9 +1612,8 @@ export function registerPiContextHandler(
 			// stamped) or churn the placeholder set under pi-msg-* ids. Defer the
 			// whole cutover to a later pass when getBranch() succeeds.
 			const realEntryIdsAvailable =
-				strictEntryIds?.some(
-					(id) => typeof id === "string" && id.length > 0,
-				) ?? false;
+				strictEntryIds?.some((id) => typeof id === "string" && id.length > 0) ??
+				false;
 			const stableIdSchemeCutover =
 				storedStableIdScheme < PI_STABLE_ID_SCHEME && realEntryIdsAvailable;
 			if (
@@ -3345,6 +3343,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				args.db,
 				args.messages as Parameters<typeof injectM0M1Pi>[2],
 				args.entryIds,
+				executedWorkThisPass,
 			);
 			// PEEK-then-drain-on-success (Oracle audit Round 8 #6):
 			// only drain `historyRefreshSessions` if the rebuild

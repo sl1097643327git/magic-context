@@ -29,11 +29,13 @@ import { getMemoriesByProject } from "@magic-context/core/features/magic-context
 import type { Memory } from "@magic-context/core/features/magic-context/memory/types";
 import {
 	type ContextDatabase,
-	clearCachedM0,
+	clearCachedM0M1,
 	escapeXmlContent,
 	GLOBAL_USER_PROFILE_PROJECT_PATH,
 	getCompartments,
 	getMaxM0MutationId,
+	getMaxMemoryMutationId,
+	getMemoryMutationsForRender,
 	getOrCreateSessionMeta,
 	getProjectState,
 	persistCachedM0,
@@ -491,6 +493,7 @@ export interface PiM0SnapshotMarkers {
 	maxCompartmentSeq: number;
 	maxMemoryId: number;
 	maxMutationId: number;
+	maxMemoryMutationId: number;
 	projectMemoryEpoch: number;
 	projectUserProfileVersion: number;
 	projectDocsHash: string;
@@ -587,6 +590,7 @@ function getCachedMarkers(
 		meta.cachedM0MaxCompartmentSeq === null ||
 		meta.cachedM0MaxMemoryId === null ||
 		meta.cachedM0MaxMutationId === null ||
+		meta.cachedM0MaxMemoryMutationId === null ||
 		meta.cachedM0ProjectMemoryEpoch === null ||
 		meta.cachedM0ProjectUserProfileVersion === null ||
 		meta.cachedM0ProjectDocsHash === null ||
@@ -613,13 +617,18 @@ function getCachedMarkers(
 	// usable boundary, reuse the cache and let findCompartmentBoundaryForSnapshot
 	// degrade to no-trim.
 	const liveBoundary = lastBaselineEndMessageId(compartments);
-	if (maxCompartmentSeq >= 0 && cachedBoundary === null && liveBoundary !== null) {
+	if (
+		maxCompartmentSeq >= 0 &&
+		cachedBoundary === null &&
+		liveBoundary !== null
+	) {
 		return null;
 	}
 	return {
 		maxCompartmentSeq,
 		maxMemoryId: meta.cachedM0MaxMemoryId,
 		maxMutationId: meta.cachedM0MaxMutationId,
+		maxMemoryMutationId: meta.cachedM0MaxMemoryMutationId,
 		projectMemoryEpoch: meta.cachedM0ProjectMemoryEpoch,
 		projectUserProfileVersion: meta.cachedM0ProjectUserProfileVersion,
 		projectDocsHash: meta.cachedM0ProjectDocsHash,
@@ -676,6 +685,7 @@ function readCurrentMarkersFromCompartments(
 				? Math.max(...memories.map((memory) => memory.id))
 				: 0,
 		maxMutationId: getMaxM0MutationId(db, state.sessionId) ?? 0,
+		maxMemoryMutationId: getMaxMemoryMutationId(db, state.projectIdentity) ?? 0,
 		projectMemoryEpoch: projectState?.projectMemoryEpoch ?? 0,
 		projectUserProfileVersion: globalState?.projectUserProfileVersion ?? 0,
 		projectDocsHash:
@@ -708,8 +718,13 @@ export function mustMaterializePi(
 	// markers to null and escape to the unguarded re-materialize path.
 	const currentCompartments =
 		currentCompartmentsOverride ?? getCompartments(db, state.sessionId);
-	const current = readCurrentMarkersFromCompartments(db, state, currentCompartments);
+	const current = readCurrentMarkersFromCompartments(
+		db,
+		state,
+		currentCompartments,
+	);
 	if (!meta.cachedM0Bytes) return { value: true, reason: "first_render" };
+	if (!meta.cachedM1Bytes) return { value: true, reason: "cached_m1_missing" };
 	// Keep invalid cached baselines on the guarded materialize path. The
 	// cache_invalid branch below does not have its own contention fallback, so
 	// detecting missing required markers / empty decoded bytes here prevents a
@@ -751,10 +766,11 @@ export function mustMaterializePi(
 	}
 	// maxMemoryId is deliberately NOT a materialization trigger (parity with
 	// OpenCode): new memories are additive and surface in m[1] via the
-	// maxMemoryId watermark, so they must not bust the m[0] cache. Non-additive
-	// memory mutations bump project_memory_epoch instead. session_facts is
-	// retired as a render source (facts = promoted memories), so its version is
-	// pinned to 0 and never triggers either.
+	// maxMemoryId watermark, so they must not bust the m[0] cache. Memory
+	// mutations use cachedM0MaxMemoryMutationId as an m[1] reconcile cursor,
+	// not as a materialization trigger; keep it out of this trigger set.
+	// session_facts is retired as a render source (facts = promoted memories),
+	// so its version is pinned to 0 and never triggers either.
 	return { value: false, reason: null };
 }
 
@@ -854,6 +870,18 @@ export function renderM0Pi(
 	return sections.join("\n\n").trim();
 }
 
+function renderedMemoryIdsForPi(
+	state: PiM0M1State,
+	memories: readonly Memory[],
+): number[] {
+	if (memories.length === 0) return [];
+	return trimMemoriesToBudgetV2(
+		state.sessionId,
+		[...memories],
+		state.injectionBudgetTokens ?? DEFAULT_MEMORY_BUDGET_TOKENS,
+	).renderOrder.map((memory) => memory.id);
+}
+
 /** Raised when the m[0] snapshot changed between the read-markers phase and the
  *  persist phase (a concurrent writer — sibling Pi/OpenCode process sharing the
  *  same SQLite DB, or the historian — mutated state mid-materialization). Caught
@@ -866,7 +894,10 @@ function isTransientSqliteLockError(error: unknown): boolean {
 		if (code === "SQLITE_BUSY" || code === "SQLITE_LOCKED") return true;
 	}
 	if (typeof message === "string") {
-		return /database is locked/i.test(message) || /sqlite_(busy|locked)/i.test(message);
+		return (
+			/database is locked/i.test(message) ||
+			/sqlite_(busy|locked)/i.test(message)
+		);
 	}
 	return false;
 }
@@ -910,6 +941,8 @@ function readFrozenM0InputsPi(
 				0,
 			),
 			maxMutationId: getMaxM0MutationId(db, state.sessionId) ?? 0,
+			maxMemoryMutationId:
+				getMaxMemoryMutationId(db, state.projectIdentity) ?? 0,
 			projectMemoryEpoch: projectState?.projectMemoryEpoch ?? 0,
 			projectUserProfileVersion: globalState?.projectUserProfileVersion ?? 0,
 			projectDocsHash: docs.canonicalHash,
@@ -928,7 +961,11 @@ function readFrozenM0InputsPi(
 function renderFreshM0PiNonPersisted(
 	state: PiM0M1State,
 	db: ContextDatabase,
-): { m0: string; snapshotMarkers: PiM0SnapshotMarkers } {
+): {
+	m0: string;
+	snapshotMarkers: PiM0SnapshotMarkers;
+	renderedMemoryIds: number[];
+} {
 	const docs = readProjectDocsCanonical(state.projectDirectory);
 	const cachedMaterializedAt =
 		getOrCreateSessionMeta(db, state.sessionId).cachedM0MaterializedAt ?? 0;
@@ -967,13 +1004,22 @@ function renderFreshM0PiNonPersisted(
 		);
 		attempts += 1;
 	}
-	return { m0, snapshotMarkers: frozen.markers };
+	return {
+		m0,
+		snapshotMarkers: frozen.markers,
+		renderedMemoryIds: renderedMemoryIdsForPi(state, frozen.memories),
+	};
 }
 
 export function materializeM0Pi(
 	state: PiM0M1State,
 	db: ContextDatabase,
-): { m0: string; snapshotMarkers: PiM0SnapshotMarkers } {
+): {
+	m0: string;
+	m1: string;
+	snapshotMarkers: PiM0SnapshotMarkers;
+	renderedMemoryIds: number[];
+} {
 	// Phase 1 (no lock): read markers + render. Rendering can be slow, so we do
 	// it OUTSIDE the write lock to keep the BEGIN IMMEDIATE critical section tiny.
 	const docs = readProjectDocsCanonical(state.projectDirectory);
@@ -982,6 +1028,7 @@ export function materializeM0Pi(
 	const snapshotMemories = frozen.memories;
 	const snapshotCompartments = frozen.compartments;
 	const snapshotUserProfile = frozen.userProfile;
+	const renderedMemoryIds = renderedMemoryIdsForPi(state, snapshotMemories);
 	// Over-budget tightening loop (matches OpenCode materializeM0): if the
 	// rendered m[0] exceeds the history budget, escalate the decay pressure and
 	// re-render up to 3x so tight budgets demote more aggressively. Without this,
@@ -1017,11 +1064,15 @@ export function materializeM0Pi(
 		attempts += 1;
 	}
 	const m0Bytes = Buffer.from(m0, "utf8");
+	const preRenderedKeyFilesBlock = preRenderKeyFilesBlockPi(state, db);
+	const phase3ProjectDocsHash = readProjectDocsCanonical(
+		state.projectDirectory,
+	).canonicalHash;
 
 	// Phase 2 + 3 (locked): re-read markers under BEGIN IMMEDIATE; if anything
 	// changed since Phase 1, the rendered bytes are stale — roll back and let the
-	// caller retry. Otherwise persist the cache atomically. Rendering stays
-	// outside the lock so the write-locked critical section is tiny.
+	// caller retry. m[1] is rendered and persisted INSIDE the same transaction as
+	// m[0] so cached_m0_bytes/cached_m1_bytes/markers/memory_block_ids stay paired.
 	try {
 		db.exec("BEGIN IMMEDIATE");
 	} catch (error) {
@@ -1031,24 +1082,19 @@ export function materializeM0Pi(
 		throw error;
 	}
 	try {
-		// Re-read the docs hash FROM DISK here (no override) so a project-docs
-		// edit between Phase 1 and persist is actually detected. Passing the
-		// Phase-1 docs.canonicalHash override would make current.projectDocsHash
-		// echo the snapshot value, defeating the stale check below and letting a
-		// stale-docs m[0] persist (OpenCode's readCurrentM0SnapshotMarkers always
-		// recomputes the docs hash from disk — this restores that parity).
-		const current = readCurrentMarkers(db, state);
+		const current = readCurrentMarkers(db, state, phase3ProjectDocsHash);
 		// maxMemoryId deliberately EXCLUDED (parity with OpenCode materializeM0):
 		// additive memory writes don't bump projectMemoryEpoch and must NOT bust
-		// m[0] — they surface in m[1] via the persisted maxMemoryId watermark. A
-		// new memory between Phase 1 and persist doesn't invalidate the rendered
-		// m[0]. Non-additive mutations bump projectMemoryEpoch and ARE caught here.
+		// m[0] — they surface in m[1] via the persisted maxMemoryId watermark. The
+		// memory-mutation cursor IS included because a materialization pass must
+		// reconcile every non-additive memory change up to its persisted cursor.
 		const stale =
 			current.projectMemoryEpoch !== snapshotMarkers.projectMemoryEpoch ||
 			current.projectUserProfileVersion !==
 				snapshotMarkers.projectUserProfileVersion ||
 			current.maxCompartmentSeq !== snapshotMarkers.maxCompartmentSeq ||
 			current.maxMutationId !== snapshotMarkers.maxMutationId ||
+			current.maxMemoryMutationId !== snapshotMarkers.maxMemoryMutationId ||
 			current.projectDocsHash !== snapshotMarkers.projectDocsHash ||
 			// Inert today (both harnesses pin sessionFactsVersion to 0 — facts are
 			// retired in v2), but kept for structural parity with OpenCode
@@ -1061,13 +1107,18 @@ export function materializeM0Pi(
 			throw new PiMaterializeContentionError("snapshot changed before persist");
 		}
 		// Refresh materializedAt to NOW, right before persist (parity with
-		// OpenCode materializeM0 inject-compartments.ts:1072). readCurrentMarkers
-		// set it at Phase-1 read time, but rendering happens OUTSIDE the lock and
-		// can be slow; m[1] freezes the memory-expiry cutoff at this timestamp, so
-		// persisting the pre-render time could render an expiry-boundary memory
-		// differently than OpenCode. This is a cache-bust (materialize) pass, so a
-		// fresh timestamp is correct; defer passes replay the persisted value.
+		// OpenCode materializeM0). m[1] freezes memory-expiry cutoff at this timestamp;
+		// defer passes replay the persisted value verbatim.
 		snapshotMarkers.materializedAt = Date.now();
+		const m1Render = renderM1PiWithMetadata(
+			state,
+			db,
+			snapshotMarkers,
+			renderedMemoryIds,
+			preRenderedKeyFilesBlock,
+		);
+		const m1Bytes = Buffer.from(m1Render.text, "utf8");
+
 		persistCachedM0(db, state.sessionId, {
 			m0Bytes,
 			projectMemoryEpoch: snapshotMarkers.projectMemoryEpoch,
@@ -1075,6 +1126,8 @@ export function materializeM0Pi(
 			maxCompartmentSeq: snapshotMarkers.maxCompartmentSeq,
 			maxMemoryId: snapshotMarkers.maxMemoryId,
 			maxMutationId: snapshotMarkers.maxMutationId,
+			maxMemoryMutationId: snapshotMarkers.maxMemoryMutationId,
+			m1Bytes,
 			projectDocsHash: snapshotMarkers.projectDocsHash,
 			materializedAt: snapshotMarkers.materializedAt,
 			sessionFactsVersion: snapshotMarkers.sessionFactsVersion,
@@ -1086,16 +1139,6 @@ export function materializeM0Pi(
 		// path, so they'd stay frozen at the last legacy value — wrong sidebar
 		// "Injected" count AND a stale ctx_search hide-already-visible filter after
 		// any memory change (e.g. migration delete+reinserts with new ids).
-		// Compute the SAME budget-trimmed set renderM0Pi actually rendered.
-		const renderedMemories =
-			snapshotMemories.length > 0
-				? trimMemoriesToBudgetV2(
-						state.sessionId,
-						snapshotMemories,
-						state.injectionBudgetTokens ?? DEFAULT_MEMORY_BUDGET_TOKENS,
-					).renderOrder
-				: snapshotMemories;
-		const renderedMemoryIds = renderedMemories.map((m) => m.id);
 		db.prepare(
 			"UPDATE session_meta SET memory_block_count = ?, memory_block_ids = ? WHERE session_id = ?",
 		).run(
@@ -1108,7 +1151,7 @@ export function materializeM0Pi(
 		// BEFORE COMMIT. If written after COMMIT, a crash in the window leaves a
 		// fresh m[0]/maxCompartmentSeq paired with a stale (or null) boundary, so
 		// the next pass trims against the wrong point (under/over-trim). Atomic
-		// with the m[0] bytes + markers is the only correct placement.
+		// with the m[0] bytes + markers + m[1] bytes is the only correct placement.
 		setCachedBoundary(
 			db,
 			state.sessionId,
@@ -1116,6 +1159,12 @@ export function materializeM0Pi(
 		);
 
 		db.exec("COMMIT");
+		return {
+			m0,
+			m1: m1Render.text,
+			snapshotMarkers,
+			renderedMemoryIds,
+		};
 	} catch (error) {
 		try {
 			db.exec("ROLLBACK");
@@ -1124,7 +1173,6 @@ export function materializeM0Pi(
 		}
 		throw error;
 	}
-	return { m0, snapshotMarkers };
 }
 
 /** Retry materializeM0Pi on contention (parity with OpenCode materializeWithRetry). */
@@ -1132,7 +1180,12 @@ export function materializeM0PiWithRetry(
 	state: PiM0M1State,
 	db: ContextDatabase,
 	maxRetries = 3,
-): { m0: string; snapshotMarkers: PiM0SnapshotMarkers } {
+): {
+	m0: string;
+	m1: string;
+	snapshotMarkers: PiM0SnapshotMarkers;
+	renderedMemoryIds: number[];
+} {
 	let lastError: PiMaterializeContentionError | null = null;
 	for (let attempt = 0; attempt < maxRetries; attempt++) {
 		try {
@@ -1148,26 +1201,105 @@ export function materializeM0PiWithRetry(
 	);
 }
 
-export function renderM1Pi(
+function preRenderKeyFilesBlockPi(
+	state: PiM0M1State,
+	db: ContextDatabase,
+): string | null {
+	if (!state.keyFilesEnabled) return null;
+	try {
+		return (
+			buildKeyFilesBlock(db, state.projectDirectory, {
+				enabled: true,
+				tokenBudget: state.keyFilesTokenBudget ?? 10_000,
+			}) ?? null
+		);
+	} catch (error) {
+		logSession(state.sessionId, "key-files render for m[1] failed:", error);
+		return null;
+	}
+}
+
+function renderedKeyFilesBlockPi(
+	state: PiM0M1State,
+	db: ContextDatabase,
+	preRenderedKeyFilesBlock?: string | null,
+): string | null {
+	if (preRenderedKeyFilesBlock !== undefined) return preRenderedKeyFilesBlock;
+	return preRenderKeyFilesBlockPi(state, db);
+}
+
+function renderMemoryUpdatesBlockPi(args: {
+	db: ContextDatabase;
+	projectPath: string;
+	afterId: number;
+	renderedMemoryIds: readonly number[];
+}): { block: string; count: number } {
+	if (args.renderedMemoryIds.length === 0) return { block: "", count: 0 };
+
+	const renderedIds = new Set(args.renderedMemoryIds);
+	const mutations = getMemoryMutationsForRender(
+		args.db,
+		args.projectPath,
+		args.afterId,
+		args.renderedMemoryIds,
+	);
+	if (mutations.length === 0) return { block: "", count: 0 };
+
+	const lines = [
+		"These memories changed since the snapshot below — trust these:",
+	];
+	for (const mutation of mutations) {
+		if (mutation.mutationType === "update") {
+			lines.push(
+				`  <updated id="${mutation.targetMemoryId}">${escapeXmlContent(mutation.newContent ?? "")}</updated>`,
+			);
+			continue;
+		}
+		if (mutation.mutationType === "superseded") {
+			if (
+				mutation.supersededById !== null &&
+				renderedIds.has(mutation.supersededById)
+			) {
+				lines.push(
+					`  <superseded id="${mutation.targetMemoryId}" by="${mutation.supersededById}"/>`,
+				);
+			} else {
+				lines.push(`  <removed id="${mutation.targetMemoryId}"/>`);
+			}
+			continue;
+		}
+		lines.push(`  <removed id="${mutation.targetMemoryId}"/>`);
+	}
+
+	return {
+		block: `<memory-updates>\n${lines.join("\n")}\n</memory-updates>`,
+		count: mutations.length,
+	};
+}
+
+interface RenderM1PiResult {
+	text: string;
+	memoryUpdateCount: number;
+}
+
+function renderM1PiWithMetadata(
 	state: PiM0M1State,
 	db: ContextDatabase,
 	markers: PiM0SnapshotMarkers,
-): string {
+	renderedMemoryIds: readonly number[],
+	preRenderedKeyFilesBlock?: string | null,
+): RenderM1PiResult {
 	const sections: string[] = [];
-	if (state.keyFilesEnabled) {
-		// Guard key-files render (parity with OpenCode renderM1): a corrupted
-		// key-files index or filesystem error must degrade gracefully, not abort
-		// the entire m[1] render and drop all volatile-delta content.
-		try {
-			const keyFiles = buildKeyFilesBlock(db, state.projectDirectory, {
-				enabled: true,
-				tokenBudget: state.keyFilesTokenBudget ?? 10_000,
-			});
-			if (keyFiles) sections.push(keyFiles);
-		} catch (error) {
-			logSession(state.sessionId, "key-files render for m[1] failed:", error);
-		}
-	}
+	const keyFiles = renderedKeyFilesBlockPi(state, db, preRenderedKeyFilesBlock);
+	if (keyFiles) sections.push(keyFiles);
+
+	const memoryUpdates = renderMemoryUpdatesBlockPi({
+		db,
+		projectPath: state.projectIdentity,
+		afterId: markers.maxMemoryMutationId,
+		renderedMemoryIds,
+	});
+	if (memoryUpdates.block) sections.push(memoryUpdates.block);
 
 	const newCompartments = getCompartments(db, state.sessionId).filter(
 		(compartment) => compartment.sequence > markers.maxCompartmentSeq,
@@ -1201,13 +1333,11 @@ export function renderM1Pi(
 			newMemories,
 			Math.max(1, Math.floor(memoryBudget * 0.25)),
 		).renderOrder;
-		// Guard against an empty wrapper: if the budget trims every new memory to
-		// zero, renderMemoryBlockV2 would emit an empty <new-memories></new-memories>
-		// shell, which both wastes a (tiny) m[1] block and diverges from OpenCode's
-		// renderM1 (which guards with `if (block)`). Only push when content remains.
-		if (trimmedNewMemories.length > 0) {
-			sections.push(renderMemoryBlockV2(trimmedNewMemories, "new-memories"));
-		}
+		const newMemoriesBlock = renderMemoryBlockV2(
+			trimmedNewMemories,
+			"new-memories",
+		);
+		if (newMemoriesBlock) sections.push(newMemoriesBlock);
 	}
 
 	// new-user-profile delta: when the global user-profile version advanced since
@@ -1233,10 +1363,294 @@ export function renderM1Pi(
 		if (profileBlock) sections.push(profileBlock);
 	}
 
-	if (sections.length === 0) return PI_M1_PLACEHOLDER;
+	if (sections.length === 0) {
+		return {
+			text: PI_M1_PLACEHOLDER,
+			memoryUpdateCount: memoryUpdates.count,
+		};
+	}
 	// Join with "\n" (single newline) to match OpenCode renderM1 exactly — the
 	// m[1] delta bytes must be identical across harnesses.
-	return `<session-history-since>\n${sections.join("\n")}\n</session-history-since>`;
+	return {
+		text: `<session-history-since>\n${sections.join("\n")}\n</session-history-since>`,
+		memoryUpdateCount: memoryUpdates.count,
+	};
+}
+
+export function renderM1Pi(
+	state: PiM0M1State,
+	db: ContextDatabase,
+	markers: PiM0SnapshotMarkers,
+	renderedMemoryIds: readonly number[] = [],
+): string {
+	return renderM1PiWithMetadata(state, db, markers, renderedMemoryIds).text;
+}
+
+interface CachedPiM0M1Row {
+	cached_m0_bytes: Buffer | Uint8Array | null;
+	cached_m1_bytes: Buffer | Uint8Array | null;
+	cached_m0_project_memory_epoch: number | null;
+	cached_m0_project_user_profile_version: number | null;
+	cached_m0_max_compartment_seq: number | null;
+	cached_m0_max_memory_id: number | null;
+	cached_m0_max_mutation_id: number | null;
+	cached_m0_max_memory_mutation_id: number | null;
+	cached_m0_project_docs_hash: string | null;
+	cached_m0_materialized_at: number | null;
+	cached_m0_session_facts_version: number | null;
+	cached_m0_upgrade_state: string | null;
+	cached_m0_last_baseline_end_message_id: string | null;
+	memory_block_ids: string | null;
+}
+
+function toCachedBuffer(value: Buffer | Uint8Array): Buffer {
+	return Buffer.isBuffer(value)
+		? value
+		: Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+}
+
+function bufferEqualsNullable(
+	left: Buffer | Uint8Array | null,
+	right: Buffer | Uint8Array | null,
+): boolean {
+	if (left === null || right === null) return left === right;
+	return toCachedBuffer(left).equals(toCachedBuffer(right));
+}
+
+function parseMemoryBlockIds(raw: string | null): number[] {
+	if (!raw) return [];
+	try {
+		const parsed = JSON.parse(raw) as unknown;
+		if (!Array.isArray(parsed)) return [];
+		return parsed.filter((value): value is number => typeof value === "number");
+	} catch {
+		return [];
+	}
+}
+
+function readCachedPiM0M1Row(
+	db: ContextDatabase,
+	sessionId: string,
+): CachedPiM0M1Row | null {
+	return db
+		.prepare(
+			`SELECT cached_m0_bytes, cached_m1_bytes,
+					cached_m0_project_memory_epoch,
+					cached_m0_project_user_profile_version,
+					cached_m0_max_compartment_seq,
+					cached_m0_max_memory_id,
+					cached_m0_max_mutation_id,
+					cached_m0_max_memory_mutation_id,
+					cached_m0_project_docs_hash,
+					cached_m0_materialized_at,
+					cached_m0_session_facts_version,
+					cached_m0_upgrade_state,
+					cached_m0_last_baseline_end_message_id,
+					memory_block_ids
+			   FROM session_meta
+			  WHERE session_id = ?`,
+		)
+		.get(sessionId) as CachedPiM0M1Row | null;
+}
+
+function markersFromCachedPiRow(
+	row: CachedPiM0M1Row,
+	compartmentsForNormalization: readonly PiCompartment[],
+): PiM0SnapshotMarkers | null {
+	if (!row.cached_m0_bytes) return null;
+	if (row.cached_m0_project_memory_epoch === null) return null;
+	if (row.cached_m0_project_user_profile_version === null) return null;
+	if (row.cached_m0_max_compartment_seq === null) return null;
+	if (row.cached_m0_max_memory_id === null) return null;
+	if (row.cached_m0_max_mutation_id === null) return null;
+	if (row.cached_m0_max_memory_mutation_id === null) return null;
+	if (row.cached_m0_session_facts_version === null) return null;
+	if (row.cached_m0_materialized_at === null) return null;
+	if (row.cached_m0_upgrade_state === null) return null;
+	return {
+		maxCompartmentSeq: normalizeCachedMaxCompartmentSeq(
+			row.cached_m0_max_compartment_seq,
+			compartmentsForNormalization,
+		),
+		maxMemoryId: row.cached_m0_max_memory_id,
+		maxMutationId: row.cached_m0_max_mutation_id,
+		maxMemoryMutationId: row.cached_m0_max_memory_mutation_id,
+		projectMemoryEpoch: row.cached_m0_project_memory_epoch,
+		projectUserProfileVersion: row.cached_m0_project_user_profile_version,
+		projectDocsHash: row.cached_m0_project_docs_hash ?? "",
+		materializedAt: row.cached_m0_materialized_at,
+		sessionFactsVersion: row.cached_m0_session_facts_version,
+		upgradeState: row.cached_m0_upgrade_state,
+		lastBaselineEndMessageId:
+			typeof row.cached_m0_last_baseline_end_message_id === "string" &&
+			row.cached_m0_last_baseline_end_message_id.length > 0
+				? row.cached_m0_last_baseline_end_message_id
+				: null,
+	};
+}
+
+function cachedPiRowMatchesSnapshot(args: {
+	row: CachedPiM0M1Row;
+	m0Bytes: Buffer;
+	markers: PiM0SnapshotMarkers;
+	compartmentsForNormalization: readonly PiCompartment[];
+}): boolean {
+	const rowMarkers = markersFromCachedPiRow(
+		args.row,
+		args.compartmentsForNormalization,
+	);
+	if (!rowMarkers) return false;
+	return (
+		bufferEqualsNullable(args.row.cached_m0_bytes, args.m0Bytes) &&
+		rowMarkers.projectMemoryEpoch === args.markers.projectMemoryEpoch &&
+		rowMarkers.projectUserProfileVersion ===
+			args.markers.projectUserProfileVersion &&
+		rowMarkers.maxCompartmentSeq === args.markers.maxCompartmentSeq &&
+		rowMarkers.maxMemoryId === args.markers.maxMemoryId &&
+		rowMarkers.maxMutationId === args.markers.maxMutationId &&
+		rowMarkers.maxMemoryMutationId === args.markers.maxMemoryMutationId &&
+		(rowMarkers.projectDocsHash ?? "") ===
+			(args.markers.projectDocsHash ?? "") &&
+		rowMarkers.materializedAt === args.markers.materializedAt &&
+		rowMarkers.sessionFactsVersion === args.markers.sessionFactsVersion &&
+		(rowMarkers.upgradeState ?? null) === (args.markers.upgradeState ?? null)
+	);
+}
+
+function decodeCachedM1(row: CachedPiM0M1Row, sessionId: string): string {
+	if (!row.cached_m1_bytes) {
+		throw new PiMaterializeContentionError(
+			`missing cached m[1] for ${sessionId}`,
+		);
+	}
+	return decodeCachedM0(row.cached_m1_bytes) ?? PI_M1_PLACEHOLDER;
+}
+
+function applyCachedPiRow(args: {
+	row: CachedPiM0M1Row;
+	state: PiM0M1State;
+	compartmentsForNormalization: readonly PiCompartment[];
+}): { m0: string; m1: string; markers: PiM0SnapshotMarkers } {
+	const markers = markersFromCachedPiRow(
+		args.row,
+		args.compartmentsForNormalization,
+	);
+	const m0 = decodeCachedM0(args.row.cached_m0_bytes);
+	if (!m0 || !markers || !args.row.cached_m1_bytes) {
+		throw new PiMaterializeContentionError(
+			`invalid cached m[0]/m[1] for ${args.state.sessionId}`,
+		);
+	}
+	return {
+		m0,
+		m1: decodeCachedM1(args.row, args.state.sessionId),
+		markers,
+	};
+}
+
+function replayCachedM1Pi(
+	db: ContextDatabase,
+	state: PiM0M1State,
+	compartmentsForNormalization: readonly PiCompartment[],
+): { m0: string; m1: string; markers: PiM0SnapshotMarkers } {
+	const row = readCachedPiM0M1Row(db, state.sessionId);
+	if (!row) {
+		throw new PiMaterializeContentionError(
+			`missing cached m[0]/m[1] for ${state.sessionId}`,
+		);
+	}
+	return applyCachedPiRow({ row, state, compartmentsForNormalization });
+}
+
+function softRefreshCachedM1Pi(args: {
+	state: PiM0M1State;
+	db: ContextDatabase;
+	m0Bytes: Buffer;
+	markers: PiM0SnapshotMarkers;
+	compartmentsForNormalization: readonly PiCompartment[];
+}): {
+	m0: string;
+	m1: string;
+	markers: PiM0SnapshotMarkers;
+	memoryUpdateCount: number;
+	recomputed: boolean;
+} {
+	const preRenderedKeyFilesBlock = preRenderKeyFilesBlockPi(
+		args.state,
+		args.db,
+	);
+	args.db.exec("BEGIN IMMEDIATE");
+	try {
+		const row = readCachedPiM0M1Row(args.db, args.state.sessionId);
+		if (
+			!row ||
+			!cachedPiRowMatchesSnapshot({
+				row,
+				m0Bytes: args.m0Bytes,
+				markers: args.markers,
+				compartmentsForNormalization: args.compartmentsForNormalization,
+			})
+		) {
+			args.db.exec("ROLLBACK");
+			const sibling = readCachedPiM0M1Row(args.db, args.state.sessionId);
+			if (!sibling) {
+				throw new PiMaterializeContentionError(
+					`missing sibling cached m[0]/m[1] for ${args.state.sessionId}`,
+				);
+			}
+			const siblingCompartments = getCompartments(
+				args.db,
+				args.state.sessionId,
+			);
+			return {
+				...applyCachedPiRow({
+					row: sibling,
+					state: args.state,
+					compartmentsForNormalization: siblingCompartments,
+				}),
+				memoryUpdateCount: 0,
+				recomputed: false,
+			};
+		}
+
+		const markers = markersFromCachedPiRow(
+			row,
+			args.compartmentsForNormalization,
+		);
+		if (!markers) {
+			throw new PiMaterializeContentionError(
+				`invalid cached m[0] markers for ${args.state.sessionId}`,
+			);
+		}
+		const rendered = renderM1PiWithMetadata(
+			args.state,
+			args.db,
+			markers,
+			parseMemoryBlockIds(row.memory_block_ids),
+			preRenderedKeyFilesBlock,
+		);
+		const m1Bytes = Buffer.from(rendered.text, "utf8");
+		args.db
+			.prepare(
+				"UPDATE session_meta SET cached_m1_bytes = ? WHERE session_id = ?",
+			)
+			.run(m1Bytes, args.state.sessionId);
+		args.db.exec("COMMIT");
+		return {
+			m0: decodeCachedM0(row.cached_m0_bytes) ?? "",
+			m1: rendered.text,
+			markers,
+			memoryUpdateCount: rendered.memoryUpdateCount,
+			recomputed: true,
+		};
+	} catch (error) {
+		try {
+			args.db.exec("ROLLBACK");
+		} catch {
+			// already rolled back
+		}
+		throw error;
+	}
 }
 
 function findCompartmentBoundaryForSnapshot(
@@ -1273,6 +1687,7 @@ export function injectM0M1Pi(
 	db: ContextDatabase,
 	piMessages: PiAgentMessage[],
 	entryIds?: readonly (string | undefined)[],
+	recomputeM1ThisPass = false,
 ): PiM0M1InjectionResult {
 	// One compartment snapshot for the WHOLE decision: the materialize decision
 	// and every cached-marker reload below normalize against this same set, so a
@@ -1280,51 +1695,55 @@ export function injectM0M1Pi(
 	// the guarded fallback (TOCTOU).
 	const currentCompartments = getCompartments(db, state.sessionId);
 	let decision = mustMaterializePi(state, db, currentCompartments);
-	let m0: string;
-	let markers: PiM0SnapshotMarkers | null;
+	let m0 = "";
+	let m1 = PI_M1_PLACEHOLDER;
+	let markers: PiM0SnapshotMarkers | null = null;
 	let materialized = false;
 	let contentionExhausted = false;
+	let memoryUpdateCount = 0;
+	let m1Recomputed = false;
+	let freshFallbackRenderedMemoryIds: number[] | null = null;
+
 	if (decision.value) {
-		// On contention exhaustion, reuse the cached m[0] rather than throwing
-		// (matches OpenCode injectM0M1). A sibling process mutated state mid-
-		// materialization; serving the slightly-stale cached baseline this pass
-		// is correct and the next pass retries — dropping injection entirely
-		// would lose the whole history block.
+		// On contention exhaustion, reuse the cached m[0]/m[1] pair rather than
+		// throwing (matches OpenCode injectM0M1). A sibling process mutated state
+		// mid-materialization; serving the slightly-stale cached pair this pass is
+		// correct and the next pass retries — dropping injection entirely would lose
+		// the whole history block.
 		try {
 			const result = materializeM0PiWithRetry(state, db);
 			m0 = result.m0;
+			m1 = result.m1;
 			markers = result.snapshotMarkers;
 			materialized = true;
+			m1Recomputed = true;
 		} catch (error) {
 			if (!(error instanceof PiMaterializeContentionError)) throw error;
-			const meta = getOrCreateSessionMeta(db, state.sessionId);
-			const cached = decodeCachedM0(meta.cachedM0Bytes);
-			const cachedMarkers = getCachedMarkers(db, state, currentCompartments);
-			if (cached && cachedMarkers) {
-				// Prefer reusing the cached baseline (matches OpenCode): a sibling
-				// process mutated state mid-materialization; serving the slightly
-				// stale cached m[0] this pass is correct and the next pass retries.
+			try {
+				const cached = replayCachedM1Pi(db, state, currentCompartments);
 				contentionExhausted = true;
-				m0 = cached;
-				markers = cachedMarkers;
+				m0 = cached.m0;
+				m1 = cached.m1;
+				markers = cached.markers;
 				logSession(
 					state.sessionId,
-					"pi m[0] materialization contention exhausted; reusing cached m[0]",
+					"pi m[0] materialization contention exhausted; reusing cached m[0]/m[1]",
 				);
-			} else {
-				// No cached baseline to fall back to — this happens when the cache
-				// was deliberately cleared THIS pass (cache-bust) and then hit
-				// contention. Dropping injection would lose the entire history
-				// block, so render a fresh (non-persisted) m[0] as a last resort.
-				// It is not cached because we couldn't win the materialize lock;
-				// the next pass re-materializes and persists.
+			} catch {
+				// No cached baseline to fall back to — this happens when the cache was
+				// deliberately cleared THIS pass (cache-bust) and then hit contention.
+				// Dropping injection would lose the entire history block, so render a
+				// fresh (non-persisted) m[0]/m[1] pair as a last resort. It is not cached
+				// because we couldn't win the materialize lock; the next pass
+				// re-materializes and persists.
 				const fresh = renderFreshM0PiNonPersisted(state, db);
 				m0 = fresh.m0;
 				markers = fresh.snapshotMarkers;
+				freshFallbackRenderedMemoryIds = fresh.renderedMemoryIds;
 				contentionExhausted = true;
 				logSession(
 					state.sessionId,
-					"pi m[0] materialization contention exhausted with no cached fallback; rendered fresh non-persisted m[0]",
+					"pi m[0] materialization contention exhausted with no cached fallback; rendered fresh non-persisted m[0]/m[1]",
 				);
 			}
 		}
@@ -1337,47 +1756,89 @@ export function injectM0M1Pi(
 			try {
 				const result = materializeM0PiWithRetry(state, db);
 				m0 = result.m0;
+				m1 = result.m1;
 				markers = result.snapshotMarkers;
 				materialized = true;
+				m1Recomputed = true;
 			} catch (error) {
 				if (!(error instanceof PiMaterializeContentionError)) throw error;
-				// Cache was already invalid (no usable cached m[0]/markers to reuse)
-				// AND we lost the materialize lock to a sibling process. Dropping
-				// injection would lose the whole history block, so render a fresh
-				// non-persisted m[0] as a last resort — the next pass re-materializes
-				// and persists. Mirrors the no-cached-fallback branch of the primary
-				// materialize path above.
+				// Cache was already invalid (no usable cached m[0]/markers to reuse) AND
+				// we lost the materialize lock to a sibling process. Dropping injection
+				// would lose the whole history block, so render a fresh non-persisted
+				// m[0]/m[1] as a last resort — the next pass re-materializes and persists.
 				const fresh = renderFreshM0PiNonPersisted(state, db);
 				m0 = fresh.m0;
 				markers = fresh.snapshotMarkers;
+				freshFallbackRenderedMemoryIds = fresh.renderedMemoryIds;
 				contentionExhausted = true;
 				logSession(
 					state.sessionId,
-					"pi m[0] cache_invalid materialization contention exhausted; rendered fresh non-persisted m[0]",
+					"pi m[0] cache_invalid materialization contention exhausted; rendered fresh non-persisted m[0]/m[1]",
 				);
 			}
 		}
 	}
 
-	let m1 = renderM1Pi(state, db, markers);
-	// Forced +15% drift refold — skip when contention exhausted (we're already
-	// reusing a cached m[0]; refolding would just hit the same contention).
+	if (!markers) {
+		throw new PiMaterializeContentionError(
+			`missing m[0] markers for ${state.sessionId}`,
+		);
+	}
+
+	if (materialized) {
+		// m[1] was rendered and persisted atomically inside materializeM0Pi.
+	} else if (contentionExhausted && freshFallbackRenderedMemoryIds) {
+		const freshM1 = renderM1PiWithMetadata(
+			state,
+			db,
+			markers,
+			freshFallbackRenderedMemoryIds,
+			preRenderKeyFilesBlockPi(state, db),
+		);
+		m1 = freshM1.text;
+		memoryUpdateCount = freshM1.memoryUpdateCount;
+		m1Recomputed = true;
+	} else if (contentionExhausted) {
+		// m[1] was replayed with the cached m[0] pair above.
+	} else if (recomputeM1ThisPass) {
+		const refreshed = softRefreshCachedM1Pi({
+			state,
+			db,
+			m0Bytes: Buffer.from(m0, "utf8"),
+			markers,
+			compartmentsForNormalization: currentCompartments,
+		});
+		m0 = refreshed.m0;
+		m1 = refreshed.m1;
+		markers = refreshed.markers;
+		memoryUpdateCount = refreshed.memoryUpdateCount;
+		m1Recomputed = refreshed.recomputed;
+	} else {
+		const replayed = replayCachedM1Pi(db, state, currentCompartments);
+		m0 = replayed.m0;
+		m1 = replayed.m1;
+		markers = replayed.markers;
+	}
+
+	// Forced +15% drift refold — only on Pi's cache-busting recompute gate
+	// (`executedWorkThisPass`) where m[1] was freshly recomputed; defer passes
+	// replay persisted bytes and must never live-read/refold. A large count of
+	// pending memory mutations also forces a refold as a safety valve.
 	if (
 		!materialized &&
 		!contentionExhausted &&
+		m1Recomputed &&
+		recomputeM1ThisPass &&
 		m0.length > 0 &&
-		// Only refold on GENUINE accumulated delta — never when m[1] is just the
-		// empty placeholder (otherwise a tiny baseline refolds every defer pass,
-		// breaking byte-identical-defer cache stability). Matches OpenCode.
-		m1 !== PI_M1_PLACEHOLDER &&
-		m1.length > m0.length * 0.15
+		(memoryUpdateCount > 40 ||
+			(m1 !== PI_M1_PLACEHOLDER && m1.length > m0.length * 0.15))
 	) {
 		decision = { value: true, reason: "drift" };
 		try {
 			const result = materializeM0PiWithRetry(state, db);
 			m0 = result.m0;
+			m1 = result.m1;
 			markers = result.snapshotMarkers;
-			m1 = renderM1Pi(state, db, markers);
 			materialized = true;
 		} catch (error) {
 			if (!(error instanceof PiMaterializeContentionError)) throw error;
@@ -1417,7 +1878,7 @@ export function clearM0M1PiCache(
 	sessionId: string,
 	reason: string,
 ): void {
-	clearCachedM0(db, sessionId);
+	clearCachedM0M1(db, sessionId);
 	setCachedBoundary(db, sessionId, null);
 	logSession(sessionId, `cleared cached m[0] (${reason})`);
 }

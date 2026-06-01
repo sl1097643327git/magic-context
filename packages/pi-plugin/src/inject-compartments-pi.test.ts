@@ -5,10 +5,15 @@ import { join } from "node:path";
 import { appendCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
+	archiveMemory,
 	getMemoriesByProject,
 	insertMemory,
 } from "@magic-context/core/features/magic-context/memory/storage-memory";
-import { getCompartments } from "@magic-context/core/features/magic-context/storage";
+import {
+	getCompartments,
+	queueMemoryMutation,
+	setProjectState,
+} from "@magic-context/core/features/magic-context/storage";
 import {
 	getActiveUserMemories,
 	insertUserMemory,
@@ -223,6 +228,7 @@ describe("trimPiMessagesToBoundary", () => {
 				maxCompartmentSeq: 1,
 				maxMemoryId: 0,
 				maxMutationId: 0,
+				maxMemoryMutationId: 0,
 				projectMemoryEpoch: 0,
 				projectUserProfileVersion: 0,
 				projectDocsHash: "",
@@ -358,7 +364,6 @@ describe("injectM0M1Pi", () => {
 		}
 	});
 
-
 	it("keeps legacy cached max seq 0 when a real seq-0 compartment exists", () => {
 		const db = createTestDb();
 		const cwd = mkdtempSync(join(tmpdir(), "pi-m0m1-legacy-zero-real-"));
@@ -375,9 +380,7 @@ describe("injectM0M1Pi", () => {
 					content: "U: first turn\nseq zero body",
 				},
 			]);
-			injectM0M1Pi(state, db, [userMessage("hello", 10)] as never, [
-				"entry-0",
-			]);
+			injectM0M1Pi(state, db, [userMessage("hello", 10)] as never, ["entry-0"]);
 
 			// Legacy rows persisted 0 both for empty snapshots and for a real seq-0
 			// baseline. With a compartment present, 0 is unambiguous and must remain
@@ -449,7 +452,6 @@ describe("injectM0M1Pi", () => {
 		}
 	});
 
-
 	it("rematerializes instead of reusing cached m[0] when compartment boundary is NULL", () => {
 		const db = createTestDb();
 		const cwd = mkdtempSync(join(tmpdir(), "pi-m0m1-null-boundary-"));
@@ -466,9 +468,7 @@ describe("injectM0M1Pi", () => {
 					content: "U: boundary turn\nboundary body",
 				},
 			]);
-			injectM0M1Pi(state, db, [userMessage("hello", 10)] as never, [
-				"entry-0",
-			]);
+			injectM0M1Pi(state, db, [userMessage("hello", 10)] as never, ["entry-0"]);
 			db.prepare(
 				"UPDATE session_meta SET cached_m0_last_baseline_end_message_id = NULL WHERE session_id = ?",
 			).run(state.sessionId);
@@ -616,7 +616,6 @@ describe("injectM0M1Pi", () => {
 		}
 	});
 
-
 	it("falls back to cached m[0] when BEGIN IMMEDIATE error exposes only SQLITE_BUSY code", () => {
 		const db = createTestDb();
 		const cwd = mkdtempSync(join(tmpdir(), "pi-m0m1-begin-busy-code-"));
@@ -654,6 +653,9 @@ describe("injectM0M1Pi", () => {
 				"<session-history></session-history>",
 			);
 			expect(textOf(messages[1] as never)).toContain(
+				"no new content since last materialization",
+			);
+			expect(textOf(messages[1] as never)).not.toContain(
 				"busy code fallback body",
 			);
 		} finally {
@@ -693,8 +695,251 @@ describe("injectM0M1Pi", () => {
 			expect(textOf(messages[0] as never)).toBe(
 				"<session-history></session-history>",
 			);
-			expect(textOf(messages[1] as never)).toContain("busy fallback body");
+			expect(textOf(messages[1] as never)).toContain(
+				"no new content since last materialization",
+			);
+			expect(textOf(messages[1] as never)).not.toContain("busy fallback body");
 		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("replays byte-identical m[1] on defer and surfaces additive memory on next cache-busting pass", () => {
+		const db = createTestDb();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-m1-additive-stable-"));
+		try {
+			const state = piState("ses-pi-m1-additive-stable", cwd);
+			appendCompartments(db, state.sessionId, [
+				{
+					sequence: 1,
+					startMessage: 1,
+					endMessage: 1,
+					startMessageId: "m0",
+					endMessageId: "m0",
+					title: "large baseline",
+					content: "baseline ".repeat(300),
+				},
+			]);
+			insertMemory(db, {
+				projectPath: state.projectIdentity,
+				category: "ARCHITECTURE",
+				content: "Large baseline memory. ".repeat(300),
+				sourceType: "historian",
+			});
+			const first = [userMessage("hello", 10)];
+			injectM0M1Pi(state, db, first as never, undefined, true);
+			const initialM1 = textOf(first[1] as never);
+
+			insertMemory(db, {
+				projectPath: state.projectIdentity,
+				category: "ARCHITECTURE",
+				content: "New additive memory appears only after a bust.",
+				sourceType: "agent",
+			});
+
+			const deferOne = [userMessage("defer one", 11)];
+			injectM0M1Pi(state, db, deferOne as never, undefined, false);
+			const deferTwo = [userMessage("defer two", 12)];
+			injectM0M1Pi(state, db, deferTwo as never, undefined, false);
+
+			expect(textOf(deferOne[1] as never)).toBe(initialM1);
+			expect(textOf(deferTwo[1] as never)).toBe(initialM1);
+			expect(initialM1).not.toContain("New additive memory");
+
+			const bust = [userMessage("bust", 13)];
+			injectM0M1Pi(state, db, bust as never, undefined, true);
+			expect(textOf(bust[1] as never)).toContain("<new-memories>");
+			expect(textOf(bust[1] as never)).toContain(
+				"New additive memory appears only after a bust.",
+			);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("renders archive removals for m0-resident memory only on cache-busting pass and replays them on defer", () => {
+		const db = createTestDb();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-m1-archive-delta-"));
+		try {
+			const state = piState("ses-pi-m1-archive-delta", cwd);
+			appendCompartments(db, state.sessionId, [
+				{
+					sequence: 1,
+					startMessage: 1,
+					endMessage: 1,
+					startMessageId: "m0",
+					endMessageId: "m0",
+					title: "large baseline",
+					content: "baseline ".repeat(300),
+				},
+			]);
+			const memory = insertMemory(db, {
+				projectPath: state.projectIdentity,
+				category: "ARCHITECTURE",
+				content: "Baseline memory to remove from m0. ".repeat(300),
+				sourceType: "historian",
+			});
+			injectM0M1Pi(
+				state,
+				db,
+				[userMessage("hello", 10)] as never,
+				undefined,
+				true,
+			);
+
+			db.transaction(() => {
+				archiveMemory(db, memory.id);
+				queueMemoryMutation(db, {
+					projectPath: state.projectIdentity,
+					mutationType: "archive",
+					targetMemoryId: memory.id,
+					queuedAt: 10,
+				});
+			})();
+
+			const defer = [userMessage("defer", 11)];
+			injectM0M1Pi(state, db, defer as never, undefined, false);
+			expect(textOf(defer[1] as never)).not.toContain("<memory-updates>");
+
+			const bust = [userMessage("bust", 12)];
+			injectM0M1Pi(state, db, bust as never, undefined, true);
+			const m1 = textOf(bust[1] as never);
+			expect(m1).toContain("<memory-updates>");
+			expect(m1).toContain(
+				"These memories changed since the snapshot below — trust these:",
+			);
+			expect(m1).toContain(`<removed id="${memory.id}"/>`);
+
+			const deferAfterBust = [userMessage("defer after bust", 13)];
+			injectM0M1Pi(state, db, deferAfterBust as never, undefined, false);
+			expect(textOf(deferAfterBust[1] as never)).toBe(m1);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("skips memory mutation deltas for memories trimmed out of m0", () => {
+		const db = createTestDb();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-m1-trimmed-delta-"));
+		try {
+			const state = {
+				...piState("ses-pi-m1-trimmed-delta", cwd),
+				injectionBudgetTokens: 1,
+			};
+			const memory = insertMemory(db, {
+				projectPath: state.projectIdentity,
+				category: "ARCHITECTURE",
+				content: "This memory is too large for a one-token m0 budget.",
+				sourceType: "historian",
+			});
+			injectM0M1Pi(
+				state,
+				db,
+				[userMessage("hello", 10)] as never,
+				undefined,
+				true,
+			);
+			queueMemoryMutation(db, {
+				projectPath: state.projectIdentity,
+				mutationType: "update",
+				targetMemoryId: memory.id,
+				newContent: "Updated but not resident.",
+				queuedAt: 10,
+			});
+
+			const bust = [userMessage("bust", 11)];
+			injectM0M1Pi(state, db, bust as never, undefined, true);
+
+			expect(textOf(bust[1] as never)).not.toContain("<memory-updates>");
+			expect(textOf(bust[1] as never)).not.toContain(
+				"Updated but not resident.",
+			);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("reconcile rematerialization advances the memory mutation cursor and omits memory-updates", () => {
+		const db = createTestDb();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-m1-reconcile-delta-"));
+		try {
+			const state = piState("ses-pi-m1-reconcile-delta", cwd);
+			const memory = insertMemory(db, {
+				projectPath: state.projectIdentity,
+				category: "ARCHITECTURE",
+				content: "Old baseline content.",
+				sourceType: "historian",
+			});
+			injectM0M1Pi(
+				state,
+				db,
+				[userMessage("hello", 10)] as never,
+				undefined,
+				true,
+			);
+			db.prepare(
+				"UPDATE memories SET content = ?, normalized_hash = ?, updated_at = ? WHERE id = ?",
+			).run("Reconciled content.", "reconciled-hash", Date.now(), memory.id);
+			queueMemoryMutation(db, {
+				projectPath: state.projectIdentity,
+				mutationType: "update",
+				targetMemoryId: memory.id,
+				newContent: "Reconciled content.",
+				queuedAt: 10,
+			});
+			setProjectState(db, state.projectIdentity, { projectMemoryEpoch: 1 });
+
+			const bust = [userMessage("bust", 11)];
+			const result = injectM0M1Pi(state, db, bust as never, undefined, true);
+
+			expect(result.m0Materialized).toBe(true);
+			expect(textOf(bust[0] as never)).toContain("Reconciled content.");
+			expect(textOf(bust[1] as never)).not.toContain("<memory-updates>");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("soft m1 refresh CAS rolls back and replays a sibling cached m1 on marker mismatch", () => {
+		const db = createTestDb();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-m1-soft-cas-"));
+		const originalExec = db.exec.bind(db);
+		try {
+			const state = piState("ses-pi-m1-soft-cas", cwd);
+			injectM0M1Pi(
+				state,
+				db,
+				[userMessage("hello", 10)] as never,
+				undefined,
+				true,
+			);
+			let injectedSibling = false;
+			db.exec = ((sql: string) => {
+				if (sql === "BEGIN IMMEDIATE" && !injectedSibling) {
+					injectedSibling = true;
+					db.prepare(
+						"UPDATE session_meta SET cached_m0_bytes = ?, cached_m0_max_memory_id = ?, cached_m1_bytes = ? WHERE session_id = ?",
+					).run(
+						Buffer.from(
+							`<session-history>${"baseline ".repeat(300)}</session-history>`,
+							"utf8",
+						),
+						99,
+						Buffer.from("sibling cached m1", "utf8"),
+						state.sessionId,
+					);
+				}
+				return originalExec(sql);
+			}) as typeof db.exec;
+
+			const bust = [userMessage("bust", 11)];
+			const result = injectM0M1Pi(state, db, bust as never, undefined, true);
+
+			expect(injectedSibling).toBe(true);
+			expect(result.m0Materialized).toBe(false);
+			expect(textOf(bust[1] as never)).toBe("sibling cached m1");
+		} finally {
+			db.exec = originalExec as typeof db.exec;
 			closeQuietly(db);
 		}
 	});

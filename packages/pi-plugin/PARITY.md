@@ -182,6 +182,12 @@ and removes the provider's own integrity token.
 
 ---
 
+## 10. m[1] recompute gate uses Pi pipeline work, not history-refresh flag
+
+OpenCode gates m[1] recompute on `isCacheBustingPass` (`shouldApplyPendingOps || shouldRunHeuristics`); Pi gates on `executedWorkThisPass || rematerialized` — same effective set, different assembly.
+
+---
+
 ## Maintenance
 
 Update this file whenever a deliberate Pi↔OpenCode divergence is introduced or

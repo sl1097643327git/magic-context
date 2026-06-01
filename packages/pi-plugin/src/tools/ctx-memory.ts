@@ -54,8 +54,10 @@ import {
 } from "@magic-context/core/features/magic-context/memory/embedding";
 import { computeNormalizedHash } from "@magic-context/core/features/magic-context/memory/normalize-hash";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
-import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
-import { bumpProjectMemoryEpoch } from "@magic-context/core/features/magic-context/storage";
+import {
+	type ContextDatabase,
+	queueMemoryMutation,
+} from "@magic-context/core/features/magic-context/storage";
 import { log } from "@magic-context/core/shared/logger";
 import { type Static, Type } from "typebox";
 
@@ -309,19 +311,14 @@ export function createCtxMemoryTool(
 				if (!memory || memory.projectPath !== projectIdentity) {
 					return err(`Error: Memory with ID ${params.id} was not found.`);
 				}
-				// Non-additive mutation: bump the durable cross-process memory
-				// epoch so active sessions re-materialize m[0] without the archived
-				// row. (Additive writes deliberately skip this — they surface via
-				// the m[1] maxMemoryId watermark instead, keeping m[0] cache-stable.)
-				// The mutation and the epoch bump MUST be atomic: a crash between
-				// them would leave the row archived but the epoch un-bumped, so
-				// active sessions would keep serving a stale m[0] that still shows
-				// the deleted row, with no signal to re-materialize.
 				deps.db.transaction(() => {
 					archiveMemory(deps.db, params.id as number);
-					bumpProjectMemoryEpoch(deps.db, projectIdentity);
+					queueMemoryMutation(deps.db, {
+						projectPath: projectIdentity,
+						mutationType: "delete",
+						targetMemoryId: params.id as number,
+					});
 				})();
-				invalidateAllMemoryBlockCaches(deps.db);
 				return ok(`Archived memory [ID: ${params.id}].`);
 			}
 
@@ -362,16 +359,17 @@ export function createCtxMemoryTool(
 					);
 				}
 
-				// Non-additive mutation (content rewrite): bump the memory epoch so
-				// active sessions re-materialize m[0] with the rewritten content.
-				// Atomic with the write so a crash can't leave content changed but
-				// the epoch stale (which would keep a stale m[0] cached).
 				deps.db.transaction(() => {
 					updateMemoryContent(deps.db, memory.id, content, normalizedHash);
-					bumpProjectMemoryEpoch(deps.db, projectIdentity);
+					queueMemoryMutation(deps.db, {
+						projectPath: projectIdentity,
+						mutationType: "update",
+						targetMemoryId: memory.id,
+						category: memory.category,
+						newContent: content,
+					});
 				})();
 				queueEmbedding({ deps, projectIdentity, memoryId: memory.id, content });
-				invalidateAllMemoryBlockCaches(deps.db);
 				return ok(`Updated memory [ID: ${memory.id}] in ${memory.category}.`);
 			}
 
@@ -444,6 +442,11 @@ export function createCtxMemoryTool(
 				);
 				const canonicalExisting =
 					duplicate && ids.includes(duplicate.id) ? duplicate : null;
+				if (duplicate && !canonicalExisting) {
+					return err(
+						`Error: Memory content already exists as ID ${duplicate.id}; update or archive existing duplicates instead.`,
+					);
+				}
 
 				// Aggregate stats from all source memories.
 				const mergedSeenCount = sourceMemories.reduce(
@@ -475,7 +478,7 @@ export function createCtxMemoryTool(
 							return [memory.id, ...priorIds];
 						}),
 					),
-				);
+				).sort((left, right) => left - right);
 				const mergedFrom = JSON.stringify(mergedFromIds);
 				const mergedStatus: "active" | "permanent" = sourceMemories.some(
 					(memory) => memory.status === "permanent",
@@ -483,23 +486,17 @@ export function createCtxMemoryTool(
 					? "permanent"
 					: "active";
 
-				// All of merge's row mutations + the epoch bump run in ONE
-				// transaction: insert/update the canonical row, absorb stats,
-				// supersede the source rows, then bump the memory epoch. Atomicity
-				// matters most here — a crash mid-merge could otherwise leave rows
-				// superseded but the canonical row missing, or the epoch un-bumped
-				// so active sessions keep serving a stale m[0]. queueEmbedding is
-				// async/fire-and-forget and stays outside the transaction.
 				let canonicalMemory!: Memory;
 				deps.db.transaction(() => {
+					let canonicalContentChanged = false;
 					if (canonicalExisting) {
 						// One of the source memories already has the merged content.
 						// Update it in place to absorb stats from the others.
 						canonicalMemory = canonicalExisting;
-						if (
+						canonicalContentChanged =
 							canonicalMemory.content !== content ||
-							canonicalMemory.normalizedHash !== normalizedHash
-						) {
+							canonicalMemory.normalizedHash !== normalizedHash;
+						if (canonicalContentChanged) {
 							updateMemoryContent(
 								deps.db,
 								canonicalMemory.id,
@@ -532,9 +529,23 @@ export function createCtxMemoryTool(
 							continue;
 						}
 						supersededMemory(deps.db, memory.id, canonicalMemory.id);
+						queueMemoryMutation(deps.db, {
+							projectPath: memory.projectPath,
+							mutationType: "superseded",
+							targetMemoryId: memory.id,
+							supersededById: canonicalMemory.id,
+						});
 					}
 
-					bumpProjectMemoryEpoch(deps.db, projectIdentity);
+					if (canonicalExisting && canonicalContentChanged) {
+						queueMemoryMutation(deps.db, {
+							projectPath: canonicalMemory.projectPath,
+							mutationType: "update",
+							targetMemoryId: canonicalMemory.id,
+							category,
+							newContent: content,
+						});
+					}
 				})();
 
 				queueEmbedding({
@@ -543,7 +554,6 @@ export function createCtxMemoryTool(
 					memoryId: canonicalMemory.id,
 					content,
 				});
-				invalidateAllMemoryBlockCaches(deps.db);
 				const supersededIds = sourceMemories
 					.map((memory) => memory.id)
 					.filter((id) => id !== canonicalMemory.id);
@@ -560,15 +570,14 @@ export function createCtxMemoryTool(
 				if (!memory || memory.projectPath !== projectIdentity) {
 					return err(`Error: Memory with ID ${params.id} was not found.`);
 				}
-				// Non-additive mutation: bump the memory epoch so active sessions
-				// re-materialize m[0] without the archived row. Atomic with the
-				// archive so a crash can't leave the row archived but the epoch
-				// stale (which would keep a stale m[0] cached).
 				deps.db.transaction(() => {
 					archiveMemory(deps.db, params.id as number, params.reason);
-					bumpProjectMemoryEpoch(deps.db, projectIdentity);
+					queueMemoryMutation(deps.db, {
+						projectPath: projectIdentity,
+						mutationType: "archive",
+						targetMemoryId: params.id as number,
+					});
 				})();
-				invalidateAllMemoryBlockCaches(deps.db);
 				const reasonSuffix = params.reason ? ` (${params.reason})` : "";
 				return ok(`Archived memory [ID: ${params.id}]${reasonSuffix}.`);
 			}
