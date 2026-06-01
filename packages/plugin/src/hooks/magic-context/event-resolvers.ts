@@ -49,6 +49,49 @@ export function resolveContextLimit(
     return baseline;
 }
 
+/**
+ * Like resolveContextLimit, but returns a limit ONLY when it is TRUSTED for the
+ * current model — i.e. it came from a real models.dev hit (or user override) or
+ * a detected-overflow limit. Returns `undefined` when neither is available,
+ * rather than the generic 128K `DEFAULT_CONTEXT_LIMIT`.
+ *
+ * The history-budget resolver needs this distinction: deriving the decay budget
+ * from a bare 128K guess for an UNKNOWN model would shrink history below what
+ * the live-usage back-derivation would yield for a large-context model. So the
+ * budget resolver only trusts a real/detected limit and otherwise falls back to
+ * live-usage. (resolveContextLimit itself must keep returning 128K for pressure
+ * math, which needs a positive denominator.)
+ */
+export function resolveTrustedContextLimit(
+    providerID: string | undefined,
+    modelID: string | undefined,
+    ctx?: { db?: ContextDatabase; sessionID?: string },
+): number | undefined {
+    const fromModelsDev =
+        providerID && modelID ? getModelsDevContextLimit(providerID, modelID) : undefined;
+
+    let detected: number | undefined;
+    if (ctx?.db && ctx.sessionID) {
+        try {
+            const overflow = getOverflowState(ctx.db, ctx.sessionID);
+            if (overflow.detectedContextLimit > 0) {
+                detected = overflow.detectedContextLimit;
+            }
+        } catch {
+            // best-effort; ignore
+        }
+    }
+
+    // A detected (real) limit overrides the cache only when smaller — providers
+    // never under-report. When models.dev has no entry, a detected limit is the
+    // only trusted signal we have.
+    if (typeof fromModelsDev === "number" && fromModelsDev > 0) {
+        if (detected !== undefined && detected < fromModelsDev) return detected;
+        return fromModelsDev;
+    }
+    return detected;
+}
+
 export function resolveCacheTtl(cacheTtl: CacheTtlConfig, modelKey: string | undefined): string {
     if (typeof cacheTtl === "string") {
         return cacheTtl;

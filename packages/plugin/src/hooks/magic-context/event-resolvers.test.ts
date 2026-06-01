@@ -6,6 +6,7 @@ import {
     resolveExecuteThresholdDetail,
     resolveModelKey,
     resolveSessionId,
+    resolveTrustedContextLimit,
 } from "./event-resolvers";
 
 describe("event-resolvers", () => {
@@ -38,6 +39,34 @@ describe("event-resolvers", () => {
 
             //#then
             expect(limit).toBe(128_000);
+        });
+    });
+
+    describe("resolveTrustedContextLimit", () => {
+        // The history-budget resolver uses this to avoid deriving the decay
+        // budget from a bare 128K guess for an UNKNOWN model (which would shrink
+        // history below the live-usage back-derivation for a large-context
+        // model). Trusted = real models.dev hit or detected-overflow only.
+
+        it("returns a real limit for a known model (not undefined)", () => {
+            const limit = resolveTrustedContextLimit("anthropic", "claude-opus-4-5");
+            // Known model resolves to its real models.dev limit (or, if no
+            // models.json is present in CI, undefined — never the 128K guess).
+            if (limit !== undefined) {
+                expect(limit).toBeGreaterThan(0);
+                expect(limit).not.toBe(128_000);
+            }
+        });
+
+        it("returns undefined for an unknown model (NOT the 128K default)", () => {
+            expect(
+                resolveTrustedContextLimit("unknown-provider", "unknown-model-xyz"),
+            ).toBeUndefined();
+        });
+
+        it("returns undefined when provider/model missing", () => {
+            expect(resolveTrustedContextLimit(undefined, "gpt-4o")).toBeUndefined();
+            expect(resolveTrustedContextLimit("anthropic", undefined)).toBeUndefined();
         });
     });
 

@@ -25,7 +25,7 @@ import { canConsumeDeferredOnThisPass } from "./cache-busting-signals";
 import { replayCavemanCompression } from "./caveman-cleanup";
 import { getActiveCompartmentRun, startCompartmentAgent } from "./compartment-runner";
 import { FORCE_MATERIALIZE_PERCENTAGE } from "./compartment-trigger";
-import { resolveExecuteThreshold } from "./event-resolvers";
+import { resolveExecuteThreshold, resolveTrustedContextLimit } from "./event-resolvers";
 import { estimateImageTokensFromDataUrl } from "./image-token-estimate";
 import {
     type PreparedCompartmentInjection,
@@ -39,7 +39,7 @@ import {
     getRawSessionMessageCount,
     readRawSessionMessages,
 } from "./read-session-chunk";
-import { isMidTurn } from "./read-session-db";
+import { findLastAssistantModelFromOpenCodeDb, isMidTurn } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
 
 import { sendIgnoredMessage } from "./send-session-notification";
@@ -504,12 +504,48 @@ export function createTransform(deps: TransformDeps) {
                 );
             }
         }
+        // Resolve the model's stable context limit directly so the history
+        // budget does not depend on volatile live-usage percentage (which is 0
+        // on the first pass after restart). Mirrors how the event handler
+        // computes percentage — same (providerID, modelID) + detected-overflow
+        // override from session_meta.
+        //
+        // Model resolution order: the in-memory live map (seeded above from the
+        // visible message array) first, then a read-only OpenCode-DB recovery
+        // (findLastAssistantModelFromOpenCodeDb) for the case where older
+        // messages — including the last assistant tuple — are NOT in the visible
+        // array (trimmed window). Without the DB fallback a compartmented
+        // session could miss its model on a cold pass and fall back to 60K.
+        //
+        // We use resolveTrustedContextLimit (NOT resolveContextLimit): it
+        // returns a limit only on a real models.dev hit or a detected-overflow
+        // limit, and `undefined` for an unknown model. Passing the generic 128K
+        // default for an unknown large-context model would shrink history below
+        // what the live-usage back-derivation yields — so for unknown models we
+        // deliberately fall through to the live-usage path inside the resolver.
+        let modelForBudget = deps.liveModelBySession?.get(sessionId);
+        if (!modelForBudget) {
+            const recovered = findLastAssistantModelFromOpenCodeDb(sessionId);
+            if (recovered) {
+                modelForBudget = recovered;
+                // Seed the live map so the scheduler / notification / sidebar
+                // paths reuse it this process without re-hitting the DB.
+                deps.liveModelBySession?.set(sessionId, recovered);
+            }
+        }
+        const resolvedContextLimit = modelForBudget
+            ? resolveTrustedContextLimit(modelForBudget.providerID, modelForBudget.modelID, {
+                  db,
+                  sessionID: sessionId,
+              })
+            : undefined;
         const historyBudgetTokens = resolveHistoryBudgetTokens(
             deps.historyBudgetPercentage,
             contextUsageEarly,
             deps.executeThresholdPercentage,
             deps.getModelKey?.(sessionId),
             deps.executeThresholdTokens,
+            resolvedContextLimit,
         );
         const schedulerDecisionEarly = resolveSchedulerDecision(
             deps.scheduler,
@@ -1388,7 +1424,7 @@ function hasEligibleCompartmentHistory(db: ContextDatabase, sessionId: string): 
     }
 }
 
-function resolveHistoryBudgetTokens(
+export function resolveHistoryBudgetTokens(
     historyBudgetPercentage: number | undefined,
     contextUsage: ContextUsage,
     executeThresholdPercentage:
@@ -1397,17 +1433,40 @@ function resolveHistoryBudgetTokens(
         | undefined,
     modelKey: string | undefined,
     executeThresholdTokens?: { default?: number; [modelKey: string]: number | undefined },
+    resolvedContextLimit?: number,
 ): number | undefined {
-    if (!historyBudgetPercentage || contextUsage.percentage <= 0) {
+    if (!historyBudgetPercentage) {
         return undefined;
     }
 
-    const derivedContextLimit = contextUsage.inputTokens / (contextUsage.percentage / 100);
+    // Derive the budget from the model's STABLE context limit, resolved
+    // directly (models.dev + any detected-overflow override). The previous
+    // design back-derived the limit from live usage as inputTokens/percentage,
+    // which collapses to 0/0 on the FIRST transform pass after a restart
+    // (percentage=0, inputTokens=0). When a re-materialize was forced on that
+    // very pass (e.g. the m[1] cache was cleared by a migration), the budget
+    // fell through to the hard-coded 60K default — far below a large model's
+    // real history budget — and the decay renderer archived the oldest
+    // compartments to fit 60K, then stuck there via cache_hit replay. The
+    // resolved limit is available even at percentage=0 (recovered from the
+    // OpenCode DB), so it removes the hole. The live-usage back-derivation is
+    // kept only as a last-resort fallback if a limit couldn't be resolved.
+    let contextLimit = resolvedContextLimit && resolvedContextLimit > 0 ? resolvedContextLimit : 0;
+    if (contextLimit <= 0) {
+        if (contextUsage.percentage <= 0) {
+            return undefined;
+        }
+        contextLimit = contextUsage.inputTokens / (contextUsage.percentage / 100);
+    }
+    if (!Number.isFinite(contextLimit) || contextLimit <= 0) {
+        return undefined;
+    }
+
     return Math.floor(
-        derivedContextLimit *
+        contextLimit *
             (resolveExecuteThreshold(executeThresholdPercentage ?? 65, modelKey, 65, {
                 tokensConfig: executeThresholdTokens,
-                contextLimit: derivedContextLimit,
+                contextLimit,
             }) /
                 100) *
             historyBudgetPercentage,

@@ -103,6 +103,7 @@ import { deriveTriggerBudget } from "@magic-context/core/hooks/magic-context/der
 import {
 	resolveContextLimit,
 	resolveExecuteThreshold,
+	resolveTrustedContextLimit,
 } from "@magic-context/core/hooks/magic-context/event-resolvers";
 import { getVisibleMemoryIds } from "@magic-context/core/hooks/magic-context/inject-compartments";
 import {
@@ -1540,6 +1541,23 @@ export function registerPiContextHandler(
 
 			const sessionMeta = sessionMetaForUsage;
 			const modelKey = liveModelBySession.get(sessionId);
+			// Cold-start stable-limit fallback (parity with OpenCode's
+			// resolveTrustedContextLimit budget path): if Pi hasn't reported a
+			// contextWindow yet (first pass after restart) but the model is
+			// known, resolve a trusted limit from models.dev / detected-overflow
+			// so the history budget doesn't fall through to the 60K default and
+			// over-archive compartments. Trusted-only: an unknown model yields
+			// undefined and we keep the live back-derivation path.
+			if (usageContextLimit === undefined && modelKey) {
+				const { providerID, modelID } = splitModelKeyForPi(modelKey);
+				const trusted = resolveTrustedContextLimit(providerID, modelID, {
+					db: options.db,
+					sessionID: sessionId,
+				});
+				if (trusted !== undefined && trusted > 0) {
+					usageContextLimit = trusted;
+				}
+			}
 			let schedulerDecision: "execute" | "defer";
 			const tScheduler = performance.now();
 			try {
@@ -2215,7 +2233,7 @@ export function resolvePiHistorianTriggerInputs(args: {
 	};
 }
 
-function resolveHistoryBudgetTokensForPi(args: {
+export function resolveHistoryBudgetTokensForPi(args: {
 	historyBudgetPercentage: number | undefined;
 	usagePercentage: number;
 	usageInputTokens: number;
@@ -2233,11 +2251,19 @@ function resolveHistoryBudgetTokensForPi(args: {
 		executeThresholdTokens,
 		modelKey,
 	} = args;
-	if (!historyBudgetPercentage || usagePercentage <= 0) return undefined;
+	if (!historyBudgetPercentage) return undefined;
+	// Prefer the model's STABLE context limit (Pi reports contextWindow; an
+	// overflow-detected limit overrides it). Only fall back to the live-usage
+	// back-derivation when no stable limit is available — and that fallback
+	// needs a positive percentage. The earlier `usagePercentage <= 0` early
+	// return was too aggressive: on the first pass after restart Pi can report
+	// percentage=0 while contextWindow is already known, which forced the
+	// budget through to the hard-coded 60K default and over-archived history
+	// (matches the OpenCode resolveHistoryBudgetTokens fix).
 	const derivedLimit =
 		usageContextLimit && usageContextLimit > 0
 			? usageContextLimit
-			: usageInputTokens > 0
+			: usagePercentage > 0 && usageInputTokens > 0
 				? usageInputTokens / (usagePercentage / 100)
 				: 0;
 	if (!Number.isFinite(derivedLimit) || derivedLimit <= 0) return undefined;
