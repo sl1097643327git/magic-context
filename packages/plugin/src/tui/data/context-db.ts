@@ -348,7 +348,11 @@ export async function consumeTuiMessages(sessionId: string): Promise<TuiMessage[
     }
 }
 
-/** Advance the delivered-message cursor for one active TUI session. */
+/**
+ * Advance the delivered-message cursor for one active TUI session.
+ * Callers must pass only the contiguous handled prefix of the drained batch;
+ * this helper remains empty-safe and monotonic for that prefix.
+ */
 export function markTuiMessagesHandled(sessionId: string, messages: TuiMessage[]): void {
     const previous = lastReceivedNotificationIdBySession.get(sessionId) ?? 0;
     let next = previous;

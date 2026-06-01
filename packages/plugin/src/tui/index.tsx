@@ -789,8 +789,9 @@ const tui: TuiPlugin = async (api, _options, meta) => {
 
             if (getSessionId(api) !== requestedSessionId) return
 
-            const handledMessages: TuiMessage[] = []
-            for (const msg of messages) {
+            const orderedMessages = [...messages].sort((a, b) => a.id - b.id)
+            const handledMessageIds = new Set<number>()
+            for (const msg of orderedMessages) {
                 // Drop any action/dialog whose sessionId doesn't match this TUI's
                 // active session (session-less/global notifications still apply).
                 if (
@@ -807,16 +808,16 @@ const tui: TuiPlugin = async (api, _options, meta) => {
                         variant: (p.variant as "info" | "warning" | "error" | "success") ?? "info",
                         duration: typeof p.duration === "number" ? p.duration : 5000,
                     })
-                    handledMessages.push(msg)
+                    handledMessageIds.add(msg.id)
                 } else if (msg.type === "action") {
                     const action = msg.payload?.action
                     if (action === "show-status-dialog") {
                         if (await showStatusDialog(api, requestedSessionId)) {
-                            handledMessages.push(msg)
+                            handledMessageIds.add(msg.id)
                         }
                     } else if (action === "show-recomp-dialog") {
                         if (await showRecompDialog(api, requestedSessionId)) {
-                            handledMessages.push(msg)
+                            handledMessageIds.add(msg.id)
                         }
                     } else if (action === "show-upgrade-dialog") {
                         const resume =
@@ -827,10 +828,15 @@ const tui: TuiPlugin = async (api, _options, meta) => {
                                   }
                                 : undefined
                         if (showUpgradeDialog(api, resume, requestedSessionId)) {
-                            handledMessages.push(msg)
+                            handledMessageIds.add(msg.id)
                         }
                     }
                 }
+            }
+            const handledPrefixMessages: TuiMessage[] = []
+            for (const msg of orderedMessages) {
+                if (!handledMessageIds.has(msg.id)) break
+                handledPrefixMessages.push(msg)
             }
             // A dialog helper may have awaited more RPC work; re-check before
             // acking so a dispose/reinit or route switch during that await cannot
@@ -838,7 +844,7 @@ const tui: TuiPlugin = async (api, _options, meta) => {
             if (getRpcGeneration() !== pollGeneration) return
             if (getSessionId(api) !== requestedSessionId) return
 
-            markTuiMessagesHandled(requestedSessionId, handledMessages)
+            markTuiMessagesHandled(requestedSessionId, handledPrefixMessages)
         }).catch(() => {
             // Intentional: message polling should never crash the TUI
         }).finally(() => {
