@@ -5,9 +5,13 @@ import { stripPiDroppedPlaceholderMessages } from "./strip-placeholders-pi";
 import { assistantMessage, createTestDb, userMessage } from "./test-utils.test";
 
 describe("stripPiDroppedPlaceholderMessages", () => {
-	it("discovers placeholder-only Pi messages on cache-busting passes", () => {
+	it("discovers and removes ONLY assistant placeholder-only messages, never user-role", () => {
 		const db = createTestDb();
 		try {
+			// A user message reduced to only [dropped §N§] must NOT be removed:
+			// user messages anchor turn boundaries (parity with OpenCode's
+			// strip-content "Never neutralize user-role messages"). Only the
+			// assistant placeholder is stripped.
 			const messages = [
 				userMessage("keep", 1),
 				assistantMessage("[dropped §2§]", 2),
@@ -22,12 +26,18 @@ describe("stripPiDroppedPlaceholderMessages", () => {
 				isCacheBusting: true,
 			});
 
-			expect(result).toEqual({ removed: 2, discovered: 2 });
+			// Only the assistant placeholder (#2) is removed; the all-[dropped]
+			// USER message (#3) is preserved.
+			expect(result).toEqual({ removed: 1, discovered: 1 });
 			expect(messages.map((m) => (m as { role: string }).role)).toEqual([
+				"user",
 				"user",
 				"assistant",
 			]);
-			expect(getStrippedPlaceholderIds(db, "ses-placeholders").size).toBe(2);
+			expect(
+				(messages[1] as { content: { text: string }[] }).content[0].text,
+			).toBe("[dropped §3§]");
+			expect(getStrippedPlaceholderIds(db, "ses-placeholders").size).toBe(1);
 		} finally {
 			closeQuietly(db);
 		}

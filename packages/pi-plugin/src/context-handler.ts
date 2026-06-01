@@ -3331,15 +3331,19 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		db: args.db,
 		sessionId: args.sessionId,
 		messages: args.messages,
-		// Discovery/prune must fire on ANY byte-mutating pass, not just a
-		// history-refresh. `args.isCacheBusting` alone is history-refresh-only;
-		// OpenCode gates discovery on `shouldApplyPendingOps || shouldRunHeuristics`.
-		// `executedWorkThisPass` is Pi's equivalent superset (set by pending-ops
-		// application, heuristic drops, AND reasoning clearing) — every one of
-		// those mutates the wire, so it IS a cache-busting pass and discovering /
-		// pruning there is byte-safe. Without this, a placeholder created on a
-		// drop-only execute pass (no history refresh) would never be discovered.
-		isCacheBusting: args.isCacheBusting || executedWorkThisPass,
+		// Discovery is gated to history-refresh passes ONLY (args.isCacheBusting) —
+		// deliberately NARROWER than OpenCode's `shouldApplyPendingOps ||
+		// shouldRunHeuristics`. The two harnesses diverge in strip SEMANTICS:
+		// OpenCode NEUTRALIZES a placeholder-only message in place (replaces parts
+		// with an empty sentinel, message stays in the array), so discovering on a
+		// fresh-drop execute pass is harmless. Pi REMOVES (splices) the message.
+		// A freshly-dropped tool stub renders as `[dropped §N§]`, which
+		// isDroppedOnlyText matches — so discovering on the same execute pass that
+		// created it would splice out the just-dropped turn and collapse it. We
+		// therefore discover only at history-refresh boundaries (where the array is
+		// rebuilt anyway); a stub created on a drop-only execute pass is tiny and
+		// gets discovered on the next refresh pass. Replay still runs every pass.
+		isCacheBusting: args.isCacheBusting,
 		stableIdByRef: postCommitStableIdByRef,
 		// F4 cutover: when the stable-id scheme just changed, force rediscovery so
 		// previously-stripped placeholders get re-keyed under the new scheme this
