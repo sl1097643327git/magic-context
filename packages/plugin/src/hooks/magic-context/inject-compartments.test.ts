@@ -793,6 +793,39 @@ describe("m[0]/m[1] materialization", () => {
         ).toBe(false);
     });
 
+    it("injectM0M1 does NOT render <project-memory> when projectPath is undefined (memory.enabled=false config bypass guard)", () => {
+        // Regression: when memory.enabled=false the caller passes projectPath
+        // undefined (projectIdentity is deliberately undefined). materializeM0
+        // renders <project-memory> purely on projectPath presence, so the old
+        // `projectIdentity ?? deps.projectPath` fallback re-supplied the launch
+        // path and injected project memories despite the config being OFF. With
+        // the fallback removed, projectPath stays undefined and no memory renders.
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        // Seed memories that WOULD render if the path leaked through.
+        insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "ARCHITECTURE",
+            content: "Should NOT appear when memory disabled",
+        });
+        const state = readStateFromMeta();
+        const messages = [userMessage("m1", "hello")];
+
+        const result = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages,
+            state,
+            projectPath: undefined,
+            projectDirectory,
+        });
+
+        expect(result.injected).toBe(true);
+        const m0 = renderedText(messages[0]);
+        expect(m0).not.toContain("<project-memory>");
+        expect(m0).not.toContain("Should NOT appear when memory disabled");
+    });
+
     it("injectM0M1 still injects history when materialization contention exhausts with NO cached baseline (no throw, no empty history)", () => {
         // Regression for the round-4 BLOCKER: a cache-bust pass clears
         // cachedM0Bytes, then materialization loses the lock on every retry

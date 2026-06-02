@@ -199,6 +199,47 @@ fn restore_memory_status_keeps_epoch_bump_without_mutation_log() {
 }
 
 #[test]
+fn pin_active_to_permanent_bumps_epoch_without_mutation_log() {
+    // active -> permanent reorders the m[0] baseline (selection is
+    // permanent-first under budget pressure), so it must bump the epoch to
+    // invalidate cached m[0]. The old code gated restore on archived-origin
+    // only, so this transition silently invalidated nothing.
+    let mut conn = make_db();
+    let id = insert_memory(&conn, "git:project-a", "active");
+    seed_project_state(&conn, "git:project-a", 9, 0);
+
+    db::update_memory_status(&mut conn, id, "permanent").expect("pin status");
+
+    assert_eq!(memory_epoch(&conn, "git:project-a"), 10);
+    assert!(mutation_log_rows(&conn).is_empty());
+}
+
+#[test]
+fn unpin_permanent_to_active_bumps_epoch_without_mutation_log() {
+    let mut conn = make_db();
+    let id = insert_memory(&conn, "git:project-a", "permanent");
+    seed_project_state(&conn, "git:project-a", 9, 0);
+
+    db::update_memory_status(&mut conn, id, "active").expect("unpin status");
+
+    assert_eq!(memory_epoch(&conn, "git:project-a"), 10);
+    assert!(mutation_log_rows(&conn).is_empty());
+}
+
+#[test]
+fn no_op_status_change_does_not_bump_epoch() {
+    // active -> active changes nothing in the baseline; no bump, no log.
+    let mut conn = make_db();
+    let id = insert_memory(&conn, "git:project-a", "active");
+    seed_project_state(&conn, "git:project-a", 9, 0);
+
+    db::update_memory_status(&mut conn, id, "active").expect("no-op status");
+
+    assert_eq!(memory_epoch(&conn, "git:project-a"), 9);
+    assert!(mutation_log_rows(&conn).is_empty());
+}
+
+#[test]
 fn bulk_archive_memory_status_queues_one_mutation_per_memory_without_epoch_bumps() {
     let mut conn = make_db();
     let a1 = insert_memory(&conn, "git:project-a", "active");

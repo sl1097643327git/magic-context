@@ -738,6 +738,19 @@ export function createTransform(deps: TransformDeps) {
         const projectIdentity = deps.memoryConfig?.enabled
             ? resolveProjectIdentity(compartmentDirectory || process.cwd())
             : undefined;
+        // Session-scoped project identity for note-nudge and auto-search, which
+        // must target the SESSION's project — not the launch cwd. `deps.projectPath`
+        // is resolved once at hook init from the launch directory; on
+        // `opencode -s <id>` started from a different repo it points at the wrong
+        // project, so note nudges and auto-search would query the launch project's
+        // notes/memories. Reuse the memory identity when memory is enabled
+        // (identical value, no extra resolve); otherwise resolve from the session
+        // directory, falling back to the launch identity only when unavailable.
+        // resolveProjectIdentity is per-directory cached, so the common case
+        // (session dir == launch dir) costs nothing extra.
+        const sessionProjectIdentity =
+            projectIdentity ??
+            (sessionDirectory ? resolveProjectIdentity(sessionDirectory) : deps.projectPath);
 
         let pendingCompartmentInjection: PreparedCompartmentInjection | null = null;
         let rebuiltHistoryFromInitialPrepare = false;
@@ -1190,7 +1203,9 @@ export function createTransform(deps: TransformDeps) {
             watermark,
             forceMaterializationPercentage: FORCE_MATERIALIZE_PERCENTAGE,
             hasRecentReduceCall,
-            projectPath: deps.projectPath,
+            // Session-scoped (not launch) identity so note-nudge + auto-search
+            // target the resumed session's real project. See sessionProjectIdentity.
+            projectPath: sessionProjectIdentity,
             sessionDirectory,
             autoSearch: deps.autoSearch,
             // Only forward caveman config when ctx_reduce is disabled — the
@@ -1216,7 +1231,14 @@ export function createTransform(deps: TransformDeps) {
             liveProviderID,
             historyRefreshSessions: deps.historyRefreshSessions,
             m0M1: {
-                projectPath: projectIdentity ?? deps.projectPath,
+                // Memory identity ONLY (drives <project-memory> selection in
+                // materializeM0). Must stay undefined when memory.enabled=false —
+                // falling back to deps.projectPath here re-enabled memory injection
+                // despite the config being off (materializeM0 renders memory purely
+                // on projectPath presence). projectDirectory below independently
+                // drives docs/key-files/history, so dropping the fallback does not
+                // disable those.
+                projectPath: projectIdentity,
                 projectDirectory: sessionDirectory,
                 memoryInjectionBudgetTokens: deps.memoryConfig?.injectionBudgetTokens,
                 historyBudgetTokens,

@@ -2347,18 +2347,22 @@ pub fn update_memory_status(
 ) -> Result<(), rusqlite::Error> {
     // Phase A: resolve the target row before opening a write transaction.
     let target = lookup_memory_mutation_target(conn, memory_id)?;
-    // A restore is any archived -> injectable-status transition. Both `active`
-    // and `permanent` re-enter the m[0] baseline, so both must bump the epoch to
-    // invalidate cached m[0]; gating only on `active` left archived->permanent
-    // restores rendering stale baselines.
-    let is_restore = target.status.as_deref() == Some("archived")
-        && (new_status == "active" || new_status == "permanent");
-    let project_identity = if is_restore {
+    // Any transition that CHANGES which memories enter or how they rank in the
+    // m[0] baseline must bump the epoch to invalidate cached m[0]. That covers
+    // every status change into an injectable status (`active`/`permanent`) from a
+    // different status — including archived->active/permanent (restore) AND
+    // active<->permanent (pin/unpin), since memory selection is permanent-first
+    // under budget pressure, so pinning reorders the rendered set. Gating only on
+    // archived-origin left active<->permanent invalidating nothing.
+    let prior_status = target.status.as_deref();
+    let into_injectable = new_status == "active" || new_status == "permanent";
+    let needs_epoch_bump = into_injectable && prior_status != Some(new_status);
+    let project_identity = if needs_epoch_bump {
         Some(normalize_stored_project_path(&target.project_path))
     } else {
         None
     };
-    let is_archive = new_status == "archived" && target.status.as_deref() != Some("archived");
+    let is_archive = new_status == "archived" && prior_status != Some("archived");
 
     // Phase B: re-check the target row, mutate, and queue/bump in one tx.
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -3723,12 +3727,18 @@ pub fn get_dream_run_memory_changes(
         };
         let created_in_window = created_at >= started_at && created_at <= finished_at;
         let updated_in_window = updated_at >= started_at && updated_at <= finished_at;
-        if created_in_window {
-            detail.written.push(change);
-        } else if superseded.is_some() && updated_in_window {
+        // Classify by FINAL status first so a memory created AND archived/merged
+        // in the SAME run lands in the bucket matching the headline count. The
+        // headline counts (runner.ts) are id-set diffs on the active set, so a
+        // created-then-archived row is NOT net-"written" (it ended archived) and a
+        // created-then-merged row is "merged" — checking created_in_window first
+        // mislabeled both as written. Order: merged → archived → written.
+        if superseded.is_some() && updated_in_window {
             detail.merged.push(change);
         } else if change.status == "archived" && updated_in_window {
             detail.archived.push(change);
+        } else if created_in_window {
+            detail.written.push(change);
         }
     }
     Ok(detail)
