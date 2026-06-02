@@ -1,3 +1,4 @@
+import { estimateTokens } from "../../../hooks/magic-context/read-session-formatting";
 import type { Database } from "../../../shared/sqlite";
 
 export interface FileReadStat {
@@ -9,7 +10,7 @@ export interface FileReadStat {
     editCount: number;
     /** Byte size of the most recent full read output */
     latestReadBytes: number;
-    /** Approximate token count of the most recent full read (~3.5 chars per token) */
+    /** Token count of the most recent full read's output (real Claude tokenizer) */
     latestReadTokens: number;
 }
 
@@ -31,6 +32,7 @@ export function getSessionReadStats(
             SELECT 
                 json_extract(json_extract(data, '$.state'), '$.input.filePath') as file_path,
                 LENGTH(json_extract(json_extract(data, '$.state'), '$.output')) as output_bytes,
+                json_extract(json_extract(data, '$.state'), '$.output') as output_text,
                 p.time_created,
                 ROW_NUMBER() OVER (
                     PARTITION BY json_extract(json_extract(data, '$.state'), '$.input.filePath') 
@@ -57,7 +59,8 @@ export function getSessionReadStats(
         SELECT 
             r.file_path,
             fc.full_read_count,
-            r.output_bytes as latest_read_bytes
+            r.output_bytes as latest_read_bytes,
+            r.output_text as latest_read_text
         FROM full_reads r
         JOIN file_counts fc ON r.file_path = fc.file_path
         WHERE r.rn = 1
@@ -68,6 +71,7 @@ export function getSessionReadStats(
         file_path: string;
         full_read_count: number;
         latest_read_bytes: number;
+        latest_read_text: string | null;
     }>;
 
     if (fullReads.length === 0) return [];
@@ -100,9 +104,10 @@ export function getSessionReadStats(
         spreadAcrossCompartments: 0, // TODO: compute from compartment boundaries if needed
         editCount: editCounts.get(row.file_path) ?? 0,
         latestReadBytes: row.latest_read_bytes ?? 0,
-        // Rough estimate from byte size — we don't have the file content at
-        // this layer. Used only for dreamer's key-file budget-fit filtering,
-        // where approximate bucketing is sufficient. Intentional: bytes/3.5.
-        latestReadTokens: Math.ceil((row.latest_read_bytes ?? 0) / 3.5),
+        // Real Claude tokenizer over the actual read-output text (the read
+        // tool's stored output), used for dreamer's key-file budget-fit
+        // filtering. The output text is already in OpenCode's part row, so
+        // there's no reason to approximate from a byte count.
+        latestReadTokens: estimateTokens(row.latest_read_text ?? ""),
     }));
 }

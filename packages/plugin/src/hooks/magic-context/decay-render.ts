@@ -21,6 +21,7 @@
  */
 
 import { computeBudgetPressure, renderedTier, TIER_COST, type Tier } from "./decay-curve";
+import { estimateTokens } from "./read-session-formatting";
 
 /** Default history budget when a caller doesn't supply one. */
 export const DEFAULT_HISTORY_BUDGET_TOKENS = 60_000;
@@ -104,14 +105,6 @@ function renderOneCompartment(c: DecayRenderCompartment, tier: number): string {
 }
 
 /**
- * Estimate-free coarse token count for the budget-demotion guard. Mirrors the
- * project's char/3.5 proxy so OpenCode and Pi agree without importing a tokenizer.
- */
-function approxTokens(s: string): number {
-    return Math.ceil(s.length / 3.5);
-}
-
-/**
  * Compute the rendered tier for each compartment, given budget pressure derived
  * once from the whole set. `compartments` are in chronological order (oldest
  * first); the decay curve indexes from newest (1 = newest).
@@ -177,8 +170,12 @@ export function renderDecayedCompartments(args: {
     let body = render();
     // Budget guard: the curve already targets the budget, but estimate drift or
     // a very tight budget can overshoot. Demote oldest-first until it fits.
+    // Uses the real Claude tokenizer (estimateTokens) — the SAME estimator as
+    // the materialize tightening loop and trim helpers — so a single budget is
+    // never measured by two different token counts (a char/N proxy here
+    // over-archived CJK/code content the tightening loop measured correctly).
     let guard = compartments.length * 5;
-    while (historyBudgetTokens > 0 && approxTokens(body) > historyBudgetTokens && guard > 0) {
+    while (historyBudgetTokens > 0 && estimateTokens(body) > historyBudgetTokens && guard > 0) {
         let demoted = false;
         for (let i = 0; i < tiers.length; i++) {
             if (tiers[i] < 5) {
