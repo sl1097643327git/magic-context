@@ -3,33 +3,42 @@
  *
  * The same shipped plugin artifact must run under two different runtimes:
  *   - Bun (current OpenCode releases) → uses `bun:sqlite` (built-in, fast)
- *   - Node (OpenCode beta + future Pi plugin) → uses `better-sqlite3`
+ *   - Node / Electron (Pi plugin, OpenCode Desktop) → uses `node:sqlite`
+ *     (`DatabaseSync`, built into Node 22.5+ / Electron 41+, stable-enough and
+ *     flag-free since Node 22.13/23.4).
  *
- * Bun cannot load `better-sqlite3` (oven-sh/bun#4290), and Node has no
- * `bun:sqlite` module. Static imports of either would crash at parse time
- * in the wrong runtime, so we use dynamic imports gated by runtime detection.
+ * Bun has no `node:sqlite`, and Node/Electron have no `bun:sqlite`. Static
+ * imports of either would crash at parse time in the wrong runtime, so we use
+ * dynamic imports gated by runtime detection.
  *
- * The Function-constructor wrapper around `import()` defeats bundler static
- * analysis — without it, esbuild/bun build would try to resolve both modules
- * during the bundle step, including the one that doesn't exist in the build
- * runtime.
+ * Why `node:sqlite` instead of `better-sqlite3`: better-sqlite3 is a native
+ * module requiring per-ABI prebuilds, and Electron's ABI never matches the npm
+ * Node prebuild — which forced a runtime download of an Electron-matched
+ * `.node` binary (a supply-chain + maintenance liability). `node:sqlite` is
+ * built into the runtime, so there is NOTHING to download or rebuild. Both Pi
+ * (plain Node 24) and OpenCode Desktop (Electron 41 → Node 24.14.1) ship it.
  *
- * Both libraries expose ~95% API parity:
- *   - new Database(path, { readonly?: boolean })
+ * API surface we use (common across both backends, modulo the shims below):
+ *   - new Database(path, { readonly?: boolean })   ← we map readonly→readOnly
  *   - db.prepare(sql).run/get/all
  *   - db.exec(multistatement)
- *   - db.transaction(fn) → wrapped function
+ *   - db.transaction(fn) → wrapped function        ← shimmed for node:sqlite
  *   - db.close()
  *
- * The 5% that differs (db.query, db.run, db.close(boolean), Database.open)
- * is either rewritten to common-subset patterns or hidden behind the helpers
- * in `./sqlite-helpers.ts`.
+ * The two backend differences we bridge for node:sqlite:
+ *   1. node:sqlite has no `db.transaction(fn)` helper — we add a savepoint-aware
+ *      shim (below) that matches better-sqlite3/bun semantics.
+ *   2. node:sqlite's constructor option is `readOnly` (camel-case), not
+ *      better-sqlite3/bun's `readonly` — we translate it so call sites are
+ *      unchanged.
+ * Everything else (named params with bare keys, ATTACH under defensive mode,
+ * `run()` → {changes,lastInsertRowid}) is identical and was verified directly.
  */
 
-// Type import only — better-sqlite3's runtime is loaded dynamically below.
-// @types/better-sqlite3 has richer definitions than @types/bun's bun:sqlite
-// types, and bun:sqlite is a structural superset for the API surface we use,
-// so calls typed against BetterSqlite3 work under both runtimes at runtime.
+// Type import only — runtime is loaded dynamically below. @types/better-sqlite3
+// has the richest definitions and is a structural superset of the API surface
+// we use, so calls typed against BetterSqlite3 work under bun:sqlite and
+// node:sqlite at runtime (both expose prepare/run/get/all/exec/close).
 import type BetterSqlite3 from "better-sqlite3";
 
 // Detect Bun via process.versions.bun. Both globalThis.Bun and
@@ -41,80 +50,90 @@ const isBun = typeof process !== "undefined" && typeof process.versions?.bun ===
 
 // IMPORTANT: bundler-evading dynamic imports.
 //
-// We can't write `await import("better-sqlite3")` directly because esbuild/bun
+// We can't write `await import("node:sqlite")` directly because esbuild/bun
 // would try to resolve both modules at build time, and one of them won't exist
-// in the build runtime (bun:sqlite is missing in Node, better-sqlite3 isn't
-// shipped in Bun-only environments). Earlier versions used
-// `new Function("p", "return import(p)")("modname")` to defeat static
-// analysis, but that breaks Pi's vm-based extension loader: a Function
-// constructed at runtime has no module record, so `import()` inside it has
-// no referrer module and Node throws "A dynamic import callback was not
+// in the build runtime (bun:sqlite is missing in Node, node:sqlite is missing
+// in Bun). Earlier versions used `new Function("p", "return import(p)")(...)`
+// to defeat static analysis, but that breaks Pi's vm-based extension loader: a
+// Function constructed at runtime has no module record, so `import()` inside it
+// has no referrer module and Node throws "A dynamic import callback was not
 // specified".
 //
 // The /* @vite-ignore */ + variable indirection pattern hides the specifier
 // from static analyzers while keeping a real referrer module for the
 // dynamic import — Pi's loader, esbuild, and bun build all accept it.
 const bunSpec = "bun:" + "sqlite";
-const betterSpec = "better-" + "sqlite3";
-
-// Under Electron, the npm-installed better-sqlite3 binary has the wrong ABI
-// (it's a Node prebuild but Electron embeds a different NODE_MODULE_VERSION).
-// resolveBetterSqliteNativeBinding() detects this and downloads + caches the
-// matching Electron prebuild, then returns its absolute path so we can pass
-// it to better-sqlite3 via the `nativeBinding` constructor option (a
-// documented public API). Returns null outside Electron OR when the on-disk
-// binary already matches the runtime ABI — in those cases the default
-// bindings() lookup just works.
-const electronNativeBinding = isBun
-    ? null
-    : await (async () => {
-          const mod = await import("./native-binding");
-          return mod.resolveBetterSqliteNativeBinding();
-      })();
+const nodeSpec = "node:" + "sqlite";
 
 const sqliteModule = isBun
     ? await import(/* @vite-ignore */ bunSpec)
-    : await import(/* @vite-ignore */ betterSpec);
+    : await import(/* @vite-ignore */ nodeSpec);
 
-// Different export shapes between the two libraries:
-//   - bun:sqlite     → named export `Database`
-//   - better-sqlite3 → default export
-const RawDatabaseImpl = isBun ? sqliteModule.Database : sqliteModule.default;
+// Different export shapes between the two backends:
+//   - bun:sqlite  → named export `Database` (has its own .transaction, accepts
+//     `{ readonly }`) — usable as-is.
+//   - node:sqlite → named export `DatabaseSync` (no .transaction, option is
+//     `readOnly`) — wrapped below.
+const DatabaseImpl: typeof BetterSqlite3 = isBun
+    ? (sqliteModule.Database as typeof BetterSqlite3)
+    : buildNodeSqliteDatabaseClass(sqliteModule.DatabaseSync);
 
-// When we resolved a non-default Electron-compatible native binding above,
-// transparently inject it into every `new Database(...)` call. This is the
-// public `nativeBinding` constructor option that better-sqlite3 ships
-// specifically for cross-runtime extension scenarios — it makes
-// better-sqlite3 `require()` the binary at the supplied path directly,
-// bypassing the default bindings() resolver.
-//
-// Subclassing keeps the call sites untouched: existing
-// `new Database(filename, { readonly: true })` invocations work as-is.
-// Callers can still override `nativeBinding` explicitly if they need to.
-//
-// The TypeScript type intentionally references @types/better-sqlite3 because
-// its definitions are richer than @types/bun's bun:sqlite types and bun:sqlite
-// is a structural superset for the API surface we use. Calls written against
-// this type work correctly under both runtimes at runtime.
-//
-// @types/better-sqlite3 uses `export = Database` (CommonJS interop), which
-// surfaces in TypeScript as `import Database = require("better-sqlite3")`.
-// We capture the DatabaseConstructor type from the namespace re-export.
-const DatabaseImpl: typeof BetterSqlite3 =
-    electronNativeBinding == null
-        ? (RawDatabaseImpl as typeof BetterSqlite3)
-        : (class DatabaseWithElectronBinding extends (RawDatabaseImpl as typeof BetterSqlite3) {
-              constructor(filename?: string | Buffer, options?: BetterSqlite3.Options) {
-                  // Type narrowing: the surrounding ternary already proved
-                  // electronNativeBinding is non-null in this branch, but
-                  // TypeScript can't follow that across the class boundary.
-                  const fallback = electronNativeBinding as string;
-                  super(filename, {
-                      ...options,
-                      nativeBinding: options?.nativeBinding ?? fallback,
-                  });
-              }
-          } as typeof BetterSqlite3);
+/**
+ * Wrap node:sqlite's `DatabaseSync` so it presents the better-sqlite3/bun
+ * surface the rest of the codebase calls:
+ *   - translate the `{ readonly }` constructor option → node:sqlite's `readOnly`
+ *   - add a `transaction(fn)` helper that matches better-sqlite3 semantics,
+ *     using `db.isTransaction` to pick BEGIN (top-level) vs SAVEPOINT (nested),
+ *     so it composes correctly with manual `BEGIN IMMEDIATE` blocks too.
+ */
+// biome-ignore lint/suspicious/noExplicitAny: node:sqlite has no shipped types here; the public export is cast to the better-sqlite3 shape.
+function buildNodeSqliteDatabaseClass(DatabaseSync: any): typeof BetterSqlite3 {
+    // Single constant savepoint name is correct for arbitrary nesting depth:
+    // SQLite savepoints with the same name stack LIFO — RELEASE / ROLLBACK TO
+    // always target the most recent. node:sqlite is synchronous + single-process
+    // per connection, so there is no concurrent-savepoint hazard.
+    const SAVEPOINT = "mc_tx_sp";
+
+    class NodeSqliteDatabase extends DatabaseSync {
+        constructor(filename?: string | Buffer, options?: BetterSqlite3.Options) {
+            const translated: Record<string, unknown> = { ...options };
+            if (options && "readonly" in options) {
+                translated.readOnly = (options as { readonly?: boolean }).readonly;
+                delete translated.readonly;
+            }
+            super(typeof filename === "string" ? filename : ":memory:", translated);
+        }
+
+        // biome-ignore lint/suspicious/noExplicitAny: mirrors better-sqlite3's generic transaction(fn) signature.
+        transaction<F extends (...args: any[]) => any>(fn: F): F {
+            // biome-ignore lint/suspicious/noExplicitAny: faithful pass-through of this/args to fn.
+            const self = this as any;
+            const wrapped = function (this: unknown, ...args: unknown[]): unknown {
+                const nested = self.isTransaction === true;
+                self.exec(nested ? `SAVEPOINT ${SAVEPOINT}` : "BEGIN");
+                try {
+                    const result = fn.apply(this, args);
+                    self.exec(nested ? `RELEASE ${SAVEPOINT}` : "COMMIT");
+                    return result;
+                } catch (error) {
+                    if (nested) {
+                        // ROLLBACK TO unwinds the savepoint's changes but leaves
+                        // it on the stack; RELEASE then pops it (better-sqlite3
+                        // does both).
+                        self.exec(`ROLLBACK TO ${SAVEPOINT}`);
+                        self.exec(`RELEASE ${SAVEPOINT}`);
+                    } else {
+                        self.exec("ROLLBACK");
+                    }
+                    throw error;
+                }
+            };
+            return wrapped as unknown as F;
+        }
+    }
+
+    return NodeSqliteDatabase as unknown as typeof BetterSqlite3;
+}
 
 export const Database: typeof BetterSqlite3 = DatabaseImpl;
 

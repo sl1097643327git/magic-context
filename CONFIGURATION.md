@@ -69,13 +69,9 @@ The Pi doctor checks: Pi binary + version (requires `>= 0.71.0`), CLI version vs
 
 Both report `PASS X / WARN Y / FAIL Z` summary counts. Use `--force` to auto-fix what doctor can (clears stale plugin cache, repairs config) and `--issue` to produce a sanitized issue report.
 
-### Electron native-binding cache
+### SQLite backend
 
-When OpenCode Desktop (Electron) loads Magic Context for the first time, the plugin downloads an Electron-compatible `better-sqlite3` binary (~1 MB) from the upstream `WiseLibs/better-sqlite3` GitHub release and caches it under `~/.cache/cortexkit/native-bindings/`.
-
-This is needed because `better-sqlite3`'s shipped npm prebuilds target Node's `NODE_MODULE_VERSION` (137 for Node 22), but Electron 41 uses ABI 145 — so the bundled `.node` file is rejected with "compiled against a different Node.js version". The cache is keyed by `<pkgVersion>/electron-v<abi>-<platform>-<arch>` and self-heals across Electron upgrades. The OpenCode TUI (Bun) and Pi (Node CLI) paths are unaffected.
-
-**First-launch network requirement.** If GitHub is unreachable on the very first Electron Desktop launch (corp firewall, offline laptop), Magic Context will fail closed and disable itself for that run, with a clear log message. After one successful launch the cache is populated and offline use is fine. `doctor --force` clears the cache to force a re-fetch on the next launch.
+Magic Context uses the runtime's built-in SQLite: `bun:sqlite` under Bun (OpenCode CLI/TUI) and `node:sqlite` under Node and Electron (Pi, OpenCode Desktop — Electron 41 embeds Node 24.14.1, which ships `node:sqlite` flag-free). There is no native module to install, no per-ABI prebuild, and nothing downloaded at runtime — the store works offline on first launch on every platform.
 
 ---
 

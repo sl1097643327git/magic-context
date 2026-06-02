@@ -143,6 +143,7 @@ async function main() {
     const totalMs = (tEnd - tStart) / 1e6;
 
     console.log(`openDatabase() total: ${fmtMs(totalMs)}`);
+    if (!db) throw new Error("openDatabase() returned null (schema fence / storage unavailable)");
 
     // 4. Verify state
     console.log("\n--- Post-migration state ---");

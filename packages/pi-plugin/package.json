@@ -26,7 +26,7 @@
 		"README.md"
 	],
 	"scripts": {
-		"build": "bun build src/index.ts src/subagent-entry.ts --outdir dist --target node --format esm --external @earendil-works/pi-coding-agent --external @earendil-works/pi-tui --external @huggingface/transformers --external better-sqlite3",
+		"build": "bun build src/index.ts src/subagent-entry.ts --outdir dist --target node --format esm --external @earendil-works/pi-coding-agent --external @earendil-works/pi-tui --external @huggingface/transformers --external node:sqlite",
 		"typecheck": "tsc --noEmit",
 		"test": "bun test",
 		"lint": "biome check src",
@@ -39,7 +39,6 @@
 	"dependencies": {
 		"@huggingface/transformers": "^4.1.0",
 		"ai-tokenizer": "^1.0.6",
-		"better-sqlite3": "^12.9.0",
 		"comment-json": "^4.2.5",
 		"typebox": "^1.1.24",
 		"zod": "^4.1.8"

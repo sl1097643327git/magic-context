@@ -13,8 +13,8 @@
   "exclude": [
     "node_modules",
     "dist",
-    "src/**/*.test.ts",
-    "src/**/__tests__/**",
-    "scripts/experiments"
-  ]
-}
+        "src/**/*.test.ts",
+        "src/**/__tests__/**",
+        "scripts/experiments",
+        "scripts/smoke-node-sqlite.ts"
+    ]}

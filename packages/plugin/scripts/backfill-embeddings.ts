@@ -49,7 +49,7 @@ async function main() {
         config.embedding,
         {
             memoryEnabled: config.memory.enabled,
-            gitCommitEnabled: config.experimental.git_commit_indexing.enabled,
+            gitCommitEnabled: config.memory.git_commit_indexing.enabled,
         },
         directory,
     );

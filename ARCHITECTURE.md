@@ -19,7 +19,7 @@ Injection renders only stored DB content. Disk drift queues a CAS-protected stal
 - Use SQLite-backed durable state from `src/features/magic-context/storage*.ts` for tags, pending ops, compartments (v2: with `p1`–`p4` tiers, `importance`, `episode_type`, `p1_embedding`, `legacy` flag), `compartment_events`, memories, m[0]/m[1] snapshot markers + `m0_mutation_log` + `project_state` epoch counter, dreamer queue state, message-history index (FTS-backed), git-commit index, key-file pinning state, todo-state snapshots, subagent invocation/work metrics, and per-session cache-stability watermarks (`cleared_reasoning_through_tag`, `stripped_placeholder_ids`, `todo_synthetic_*`). (v2: `session_facts` is vestigial — facts are promoted memories.)
 - Use hidden subagents from `src/agents/*.ts` (`historian`, `historian-editor`, `dreamer`, `sidekick`) plus prompt builders in `src/features/magic-context/dreamer/task-prompts.ts`, `src/features/magic-context/sidekick/agent.ts`, `src/features/magic-context/sidekick/core.ts`, and `src/hooks/magic-context/compartment-prompt.ts`.
 - Replay all persistent message mutations (reasoning clearing, structural-noise stripping, placeholder stripping, merged-assistant reasoning stripping, processed-image stripping, system-injected stripping, caveman compression, synthetic-todowrite injection) on every transform pass — including defer passes — so the wire shape stays byte-identical and Anthropic prompt cache survives.
-- Select the SQLite backend at runtime in `src/shared/sqlite.ts` — `bun:sqlite` under Bun, `better-sqlite3` under Node (Pi) and Electron (Desktop). Electron uses `nativeBinding` via `src/shared/native-binding.ts` to load the matching ABI prebuild from the per-session cache directory.
+- Select the SQLite backend at runtime in `src/shared/sqlite.ts` — `bun:sqlite` under Bun, `node:sqlite` (`DatabaseSync`, built-in) under Node (Pi) and Electron (Desktop, Electron 41 → Node 24.14.1). The non-Bun branch wraps `DatabaseSync` to add a savepoint-aware `transaction()` shim and translate the `readonly`→`readOnly` constructor option; everything else (named params, ATTACH, `run()` result shape) is identical. No native module, no prebuild, nothing to download.
 
 ## Layers
 
@@ -59,9 +59,9 @@ Injection renders only stored DB content. Disk drift queues a CAS-protected stal
 - Used by: `src/plugin/tool-registry.ts`.
 
 **Configuration and shared utilities:**
-- Purpose: Centralize config parsing, defaults, path resolution, logging, SDK normalization, RPC transport, runtime SQLite selection, native-binding resolution for Electron, conflict detection, fallback-chain resolution, and harness-aware behavior.
+- Purpose: Centralize config parsing, defaults, path resolution, logging, SDK normalization, RPC transport, runtime SQLite selection, conflict detection, fallback-chain resolution, and harness-aware behavior.
 - Location: `src/config/` and `src/shared/`
-- Contains: Zod schemas, config merging with field-level fallback (`src/config/index.ts`), data-path helpers (`src/shared/data-path.ts`), buffered file logger (`src/shared/logger.ts`), JSONC parser (`src/shared/jsonc-parser.ts`), models.dev cache (`src/shared/models-dev-cache.ts`), embedding provider plumbing under `src/features/magic-context/memory/`, RPC server/client/utils/notifications (`src/shared/rpc-*`), SQLite backend selector (`src/shared/sqlite.ts`), Electron native-binding resolver (`src/shared/native-binding.ts`), harness identifier (`src/shared/harness.ts`), tag-transcript primitive shared with Pi (`src/shared/tag-transcript.ts`), model-fallback chain resolver (`src/shared/resolve-fallbacks.ts`), subagent runner (`src/shared/subagent-runner.ts`, Pi-only), OpenCode-compaction detector (`src/shared/opencode-compaction-detector.ts`), conflict detector/fixer (`src/shared/conflict-detector.ts`, `src/shared/conflict-fixer.ts`), bounded-session-map (`src/shared/bounded-session-map.ts`).
+- Contains: Zod schemas, config merging with field-level fallback (`src/config/index.ts`), data-path helpers (`src/shared/data-path.ts`), buffered file logger (`src/shared/logger.ts`), JSONC parser (`src/shared/jsonc-parser.ts`), models.dev cache (`src/shared/models-dev-cache.ts`), embedding provider plumbing under `src/features/magic-context/memory/`, RPC server/client/utils/notifications (`src/shared/rpc-*`), SQLite backend selector (`src/shared/sqlite.ts`), harness identifier (`src/shared/harness.ts`), tag-transcript primitive shared with Pi (`src/shared/tag-transcript.ts`), model-fallback chain resolver (`src/shared/resolve-fallbacks.ts`), subagent runner (`src/shared/subagent-runner.ts`, Pi-only), OpenCode-compaction detector (`src/shared/opencode-compaction-detector.ts`), conflict detector/fixer (`src/shared/conflict-detector.ts`, `src/shared/conflict-fixer.ts`), bounded-session-map (`src/shared/bounded-session-map.ts`).
 - Depends on: Node built-ins and Zod.
 - Used by: All other layers.
 
@@ -264,11 +264,6 @@ Injection renders only stored DB content. Disk drift queues a CAS-protected stal
 - Purpose: Self-update the cached `@latest` plugin install once per plugin process — OpenCode's plugin cache no longer auto-updates.
 - Location: `src/hooks/auto-update-checker/checker.ts`, `src/hooks/auto-update-checker/cache.ts`, `src/hooks/auto-update-checker/constants.ts`
 - Pattern: Fires from plugin init with on-disk cross-process dedup; rewrites the install-directory dependency entry + `bun.lock` (or runs `npm install` under OpenCode's npm-managed cache).
-
-**Native-binding resolver (Electron):**
-- Purpose: Fetch and cache the matching Electron ABI prebuild of `better-sqlite3` for OpenCode Desktop.
-- Location: `src/shared/native-binding.ts`
-- Pattern: Detect Electron via `process.versions.electron`; download via `nanotar` to `~/.cache/cortexkit/native-bindings/`; pass the resolved `.node` path to the SQLite constructor via `nativeBinding` option. Bun and plain-Node code paths use their native runtimes unmodified.
 
 **Agent prompt pack:**
 - Purpose: Keep hidden-agent identities and prompt text isolated from runtime wiring.
