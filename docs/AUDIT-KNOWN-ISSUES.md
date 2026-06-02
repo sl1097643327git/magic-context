@@ -92,6 +92,31 @@ refinement, not a correctness fix. (OpenCode and Pi behave identically here.)
 
 ---
 
+### A7. Legacy `trimMemoriesToBudget` (`break`) and `renderMemoryBlock` (v1) are dead in v2
+
+`inject-compartments.ts` still defines `trimMemoriesToBudget` (which uses `break`,
+not the V2 `continue`) and `renderMemoryBlock`, reached via
+`prepareCompartmentInjection` → the postprocess `else if (pendingCompartmentInjection)`
+branch. In v2 that branch is **unreachable**: `m0M1Enabled` gates on
+`projectPath || projectDirectory`, and `projectDirectory` (the session directory)
+is always present, so the m[0]/m[1] path always runs and owns the wire. The v1
+`memory_block_cache` it would populate is not injected. Auditors flag the `break`
+as under-filling vs A1's V2 `continue` — true in isolation, but the function does
+not reach the wire. (`renderMemoryBlock` is still used by the historian reference
+block, where it is cosmetic — dedup is content-based.) Do not "fix" the legacy
+`break`; if anything, the dead v1 path is a future deletion candidate.
+
+### A8. m[1] TTL-expiry has no `mustMaterialize` trigger (accepted cache tradeoff)
+
+`materializeM0` snapshots active memories (some with `expires_at`) and pins the
+expiry cutoff to `materializedAt`; `mustMaterialize` has no `expires_at`-based
+trigger. A memory can therefore stay rendered briefly past its TTL until the next
+natural materialization. This is the deliberate cache-stability tradeoff: a live
+`Date.now()` expiry check would mutate m[1] bytes between defer passes and bust
+the prompt cache (the exact bug fixed by freezing the cutoff). TTL precision is
+sacrificed for byte-stable replay; the memory drops on the next cache-busting
+pass. Do not add an expiry trigger to `mustMaterialize`.
+
 ## Growing-data factors (bounded or slow; future cleanup)
 
 These are intentionally listed so a future cleanup/maintenance task can address
