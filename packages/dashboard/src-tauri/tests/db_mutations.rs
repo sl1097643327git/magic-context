@@ -96,7 +96,21 @@ fn create_schema(conn: &Connection) {
             new_content TEXT,
             queued_at INTEGER NOT NULL
         );
-        CREATE TABLE tx_probe (value TEXT NOT NULL);",
+        CREATE TABLE tx_probe (value TEXT NOT NULL);
+        CREATE TABLE notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            content TEXT NOT NULL,
+            session_id TEXT,
+            project_path TEXT,
+            surface_condition TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            last_checked_at INTEGER,
+            ready_at INTEGER,
+            ready_reason TEXT
+        );",
     )
     .expect("create schema");
 }
@@ -639,4 +653,33 @@ fn raw_path_git_resolution_happens_before_immediate_write_transaction() {
         ),
         1
     );
+}
+
+#[test]
+fn get_smart_notes_tolerates_null_project_path_rows() {
+    // Regression: the notes table holds session-scoped notes with a NULL
+    // project_path (most notes). resolve_paths_for_table_filter did
+    // `SELECT DISTINCT project_path` into a non-Option String and threw
+    // "Invalid column type Null at index: 0, name: project_path", crashing the
+    // entire session-detail view. It must skip NULL rows instead.
+    let conn = make_db();
+    // A session note with NULL project_path (the common case) ...
+    conn.execute(
+        "INSERT INTO notes (type, status, content, session_id, project_path, created_at, updated_at)
+         VALUES ('note', 'active', 'session note', 'ses_x', NULL, 1, 1)",
+        [],
+    )
+    .expect("insert null-path note");
+    // ... and a real smart note under a resolved identity.
+    conn.execute(
+        "INSERT INTO notes (type, status, content, session_id, project_path, surface_condition, created_at, updated_at)
+         VALUES ('smart', 'ready', 'smart note', 'ses_y', 'git:abc123', 'when X', 2, 2)",
+        [],
+    )
+    .expect("insert smart note");
+
+    // Must not error on the NULL row, and must return the smart note.
+    let notes = db::get_smart_notes(&conn, "git:abc123").expect("get_smart_notes must not crash");
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].content, "smart note");
 }

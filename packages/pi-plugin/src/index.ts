@@ -448,7 +448,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	const storageDir = getMagicContextStorageDir();
 	const dbPath = join(storageDir, "context.db");
 
-	let db: ContextDatabase | undefined;
+	let db: ContextDatabase | null | undefined;
 	try {
 		db = openDatabase();
 	} catch (err) {

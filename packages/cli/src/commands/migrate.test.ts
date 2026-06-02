@@ -157,6 +157,13 @@ function makeCortexkitDb() {
           end_message_id TEXT DEFAULT '',
           title TEXT NOT NULL,
           content TEXT NOT NULL,
+          p1 TEXT,
+          p2 TEXT,
+          p3 TEXT,
+          p4 TEXT,
+          importance INTEGER NOT NULL DEFAULT 50,
+          episode_type TEXT,
+          legacy INTEGER NOT NULL DEFAULT 0,
           created_at INTEGER NOT NULL,
           harness TEXT NOT NULL DEFAULT 'opencode',
           UNIQUE(session_id, sequence)
@@ -365,13 +372,31 @@ describe("migrateOpenCodeSessionToPi — token & magic-context bridging", () => 
         // Two compartments under the source session.
         // Compartment 0: covers msg_1 → msg_2 (exact boundary match).
         ck.prepare(
-            "INSERT INTO compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, created_at, harness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'opencode')",
-        ).run(sessionId, 0, 1, 2, "msg_1", "msg_2", "Comp 0", "summary 0", 5);
+            "INSERT INTO compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, p1, p2, p3, p4, importance, episode_type, legacy, created_at, harness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'opencode')",
+        ).run(
+            sessionId,
+            0,
+            1,
+            2,
+            "msg_1",
+            "msg_2",
+            "Comp 0",
+            "summary 0",
+            "p1 verbose",
+            "p2 mid",
+            "p3 terse",
+            "p4 anchor",
+            72,
+            "design,bug",
+            0,
+            5,
+        );
         // Compartment 1: end boundary "msg_unknown" doesn't directly map →
-        // must remap to nearest at-or-before.
+        // must remap to nearest at-or-before. Stored as a legacy (v1) row to
+        // confirm the legacy flag is preserved verbatim through migration.
         ck.prepare(
-            "INSERT INTO compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, created_at, harness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'opencode')",
-        ).run(sessionId, 1, 3, 4, "msg_3", "msg_zzzz_unknown", "Comp 1", "summary 1", 6);
+            "INSERT INTO compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, importance, legacy, created_at, harness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'opencode')",
+        ).run(sessionId, 1, 3, 4, "msg_3", "msg_zzzz_unknown", "Comp 1", "summary 1", 50, 1, 6);
 
         ck.prepare(
             "INSERT INTO session_facts (session_id, category, content, created_at, updated_at, harness) VALUES (?, ?, ?, ?, ?, 'opencode')",
@@ -403,12 +428,35 @@ describe("migrateOpenCodeSessionToPi — token & magic-context bridging", () => 
         };
         const piCompartments = ck
             .prepare(
-                "SELECT session_id, sequence, start_message_id, end_message_id, title, content, harness FROM compartments WHERE session_id = ? AND harness = 'pi' ORDER BY sequence",
+                "SELECT session_id, sequence, start_message_id, end_message_id, title, content, p1, p2, p3, p4, importance, episode_type, legacy, harness FROM compartments WHERE session_id = ? AND harness = 'pi' ORDER BY sequence",
             )
-            .all(result.piSessionId) as Row[];
+            .all(result.piSessionId) as Array<
+            Row & {
+                p1: string | null;
+                p2: string | null;
+                p3: string | null;
+                p4: string | null;
+                importance: number;
+                episode_type: string | null;
+                legacy: number;
+            }
+        >;
         expect(piCompartments).toHaveLength(2);
         expect(piCompartments[0].title).toBe("Comp 0");
         expect(piCompartments[1].title).toBe("Comp 1");
+
+        // v2 tier/metadata must survive migration (regression: bespoke INSERT
+        // previously dropped p1-p4/importance/episode_type and forced legacy=0).
+        expect(piCompartments[0].p1).toBe("p1 verbose");
+        expect(piCompartments[0].p2).toBe("p2 mid");
+        expect(piCompartments[0].p3).toBe("p3 terse");
+        expect(piCompartments[0].p4).toBe("p4 anchor");
+        expect(piCompartments[0].importance).toBe(72);
+        expect(piCompartments[0].episode_type).toBe("design,bug");
+        expect(piCompartments[0].legacy).toBe(0);
+        // Legacy v1 row keeps legacy=1 and NULL tiers.
+        expect(piCompartments[1].legacy).toBe(1);
+        expect(piCompartments[1].p1).toBeNull();
 
         // Verify boundary IDs reference real Pi entries in the JSONL.
         const entries = readJsonl(result.outputPath);

@@ -215,9 +215,14 @@ export async function runNpmInstallSafe(
         if (options.signal?.aborted) return false;
         // Use --no-audit --no-fund --no-progress to keep output minimal and
         // avoid noisy network calls during background auto-updates.
+        // stdio: "ignore" (not "pipe"): we never read npm's output, and an
+        // unread "pipe" deadlocks — once npm writes more than the ~64KB OS pipe
+        // buffer it blocks on the write forever, the child never exits, and we
+        // spuriously hit the timeout below. Discarding the streams avoids the
+        // deadlock; failure is still detected via the exit code.
         const proc = spawn("npm", ["install", "--no-audit", "--no-fund", "--no-progress"], {
             cwd: installDir,
-            stdio: "pipe",
+            stdio: "ignore",
         });
 
         const abortProcess = () => {

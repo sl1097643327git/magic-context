@@ -284,10 +284,25 @@ Rules:
 - DO NOT pick prose documentation (README.md, CONTRIBUTING.md, CHANGELOG, LICENSE, *.md/*.mdx/*.rst/*.txt) or lockfiles. Key files are project SOURCE the agent needs repeated orientation context on, not reference docs. Project docs are surfaced through a separate injection path.`;
 }
 
+/**
+ * Documentation / lockfile / non-source paths that must never be persisted as
+ * key files even if the LLM emits them. The Dreamer prompt forbids these, but
+ * a non-compliant or prompt-injected response must be rejected in code too —
+ * key files are stitched into every future prompt, so the persisted set is a
+ * trust boundary, not a suggestion. Matched case-insensitively on the path.
+ */
+const DISALLOWED_KEY_FILE_PATTERN =
+    /(?:^|\/)(?:readme|contributing|changelog|license|licence|code_of_conduct|authors|notice)\b|\.(?:md|mdx|rst|txt|lock)$|(?:^|\/)(?:package-lock\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lock|bun\.lockb|cargo\.lock|poetry\.lock|gemfile\.lock|composer\.lock)$/i;
+
+function isDisallowedKeyFilePath(path: string): boolean {
+    return DISALLOWED_KEY_FILE_PATTERN.test(path);
+}
+
 export function validateLlmOutput(
     raw: string,
     config: V6KeyFilesConfig,
     projectPath: string,
+    candidatePaths?: ReadonlySet<string>,
 ): ValidatedKeyFilesOutput {
     let obj: unknown;
     try {
@@ -321,6 +336,17 @@ export function validateLlmOutput(
             throw new KeyFilesValidationError("bad path");
         if (file.path.startsWith("/") || file.path.includes(".."))
             throw new KeyFilesValidationError(`escape: ${file.path}`);
+        // Enforce the prompt's doc/lockfile ban in code — the persisted key-files
+        // set is injected into every future prompt, so an off-prompt or injected
+        // response must not slip docs/lockfiles through.
+        if (isDisallowedKeyFilePath(file.path))
+            throw new KeyFilesValidationError(`doc/lockfile not allowed as key file: ${file.path}`);
+        // Enforce candidate-set membership: the LLM may only pin files that were
+        // in the read-history-derived candidate set it was shown. Anything else
+        // is fabricated/injected and must be rejected (memory: persistence accepts
+        // only LLM-selected paths from the candidate allow-set).
+        if (candidatePaths && !candidatePaths.has(file.path))
+            throw new KeyFilesValidationError(`not in candidate set: ${file.path}`);
         if (seen.has(file.path)) throw new KeyFilesValidationError(`dup path: ${file.path}`);
         if (seenLower.has(file.path.toLowerCase()))
             throw new KeyFilesValidationError(`case-dup: ${file.path}`);
@@ -537,7 +563,12 @@ export async function runKeyFilesTask(args: {
                 deadline: args.deadline,
                 fallbackModels: args.fallbackModels,
             });
-            validated = validateLlmOutput(raw, args.config, projectPath);
+            validated = validateLlmOutput(
+                raw,
+                args.config,
+                projectPath,
+                new Set(candidates.map((candidate) => candidate.path)),
+            );
         } catch (error) {
             log(`[key-files] LLM validation failed: ${getErrorMessage(error)}`);
             throw error;

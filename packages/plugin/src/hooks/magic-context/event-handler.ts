@@ -86,7 +86,10 @@ export interface EventHandlerDeps {
         commit_cluster_trigger?: { enabled: boolean; min_clusters: number };
     };
     tagger: Tagger;
-    db: ReturnType<typeof import("../../features/magic-context/storage").openDatabase>;
+    // openDatabase() returns Database | null, but the hook only constructs these
+    // deps after it has already null-checked and disabled MC on storage failure,
+    // so by this point db is always a live handle.
+    db: import("../../shared/sqlite").Database;
     client?: unknown;
     getNotificationParams?: (sessionId: string) => NotificationParams;
 }

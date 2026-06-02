@@ -503,30 +503,42 @@ async function runHealthChecks(options: {
     let db: ContextDatabase | null = null;
     try {
         db = options.deps.openDatabase();
-        if (options.deps.isDatabasePersisted(db))
-            add(results, "pass", "openDatabase() opened the shared DB");
-        else
+        if (!db) {
+            // openDatabase() returns null on the schema fence (shared DB newer
+            // than this binary supports). Report and skip DB-dependent checks;
+            // the embedding checks below do not need the DB handle.
             add(
                 results,
                 "fail",
-                "openDatabase() fell back to an in-memory DB; shared DB is broken or unwritable",
+                "openDatabase() returned no handle; the shared DB schema is newer than this binary supports (upgrade Magic Context)",
             );
+        } else {
+            if (options.deps.isDatabasePersisted(db))
+                add(results, "pass", "openDatabase() opened the shared DB");
+            else
+                add(
+                    results,
+                    "fail",
+                    "openDatabase() fell back to an in-memory DB; shared DB is broken or unwritable",
+                );
 
-        const integrity = db.prepare("PRAGMA integrity_check").get() as {
-            integrity_check?: unknown;
-        };
-        if (integrity?.integrity_check === "ok") add(results, "pass", "SQLite integrity_check: ok");
-        else
-            add(
-                results,
-                "fail",
-                `SQLite integrity_check: ${String(integrity?.integrity_check ?? "unknown")}`,
-            );
+            const integrity = db.prepare("PRAGMA integrity_check").get() as {
+                integrity_check?: unknown;
+            };
+            if (integrity?.integrity_check === "ok")
+                add(results, "pass", "SQLite integrity_check: ok");
+            else
+                add(
+                    results,
+                    "fail",
+                    `SQLite integrity_check: ${String(integrity?.integrity_check ?? "unknown")}`,
+                );
 
-        const counts = ROW_COUNT_TABLES.map(
-            (table) => `${table}=${countTable(db as ContextDatabase, table) ?? "n/a"}`,
-        ).join(", ");
-        add(results, "info", `Shared DB row counts: ${counts}`);
+            const counts = ROW_COUNT_TABLES.map(
+                (table) => `${table}=${countTable(db as ContextDatabase, table) ?? "n/a"}`,
+            ).join(", ");
+            add(results, "info", `Shared DB row counts: ${counts}`);
+        }
     } catch (error) {
         add(
             results,

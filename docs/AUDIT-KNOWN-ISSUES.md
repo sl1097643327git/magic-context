@@ -161,6 +161,28 @@ signal a running session; see the dashboard's own path.) Accepted.
 > memory drops on the next materialization); m[1]'s `id > maxMemoryId` filter
 > prevents any double-render. Not a separate bug.
 
+### A11. Key-files pickup after a Dreamer commit is lazy (next natural cache-bust), not eager
+
+When the Dreamer commits new/updated key-files mid-session, OpenCode does NOT
+force a refresh — the new `<key-files>` content is picked up on the next natural
+cache-busting pass (`buildKeyFilesBlock` is re-read fresh whenever m[1] is
+recomputed). This is **deliberate**: key-files live in m[1], so any pickup
+necessarily rewrites the m[1] cache prefix; forcing that on every Dreamer commit
+would bust the Anthropic cache for a low-urgency content change. Lazy pickup is
+the chosen behavior (cache-stability over freshness for an infrequently-changing
+block).
+
+**Not a Pi divergence in v2** (the audit's "Pi eager vs OpenCode lazy" framing
+predates the v2 layout): in v1, key-files lived in the system prompt and Pi's
+Dreamer fired `onAdjunctsRefreshNeeded → systemPromptRefreshSessions` to refresh
+it. In v2 the system block is guidance-only (`system-prompt.ts` explicitly never
+emits `<key-files>`/`<project-docs>`/`<user-profile>`), and that signal targets
+the **system-prompt** refresh set, NOT `historyRefreshSessions` (which drives
+m[1]). So Pi also picks up key-files lazily via m[1]'s natural busts — same
+effective behavior as OpenCode. Pi's lingering system-prompt refresh on Dreamer
+commit is a near-no-op in v2 (guidance text doesn't change), not an extra m[1]
+bust. Accepted on both harnesses.
+
 ## Growing-data factors (bounded or slow; future cleanup)
 
 These are intentionally listed so a future cleanup/maintenance task can address

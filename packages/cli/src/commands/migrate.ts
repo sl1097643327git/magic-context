@@ -146,6 +146,13 @@ interface CortexkitCompartmentRow {
     title: string;
     content: string;
     created_at: number;
+    p1: string | null;
+    p2: string | null;
+    p3: string | null;
+    p4: string | null;
+    importance: number | null;
+    episode_type: string | null;
+    legacy: number;
 }
 
 interface CortexkitSessionFactRow {
@@ -636,6 +643,42 @@ interface CopyMagicContextStateResult {
     lastCompartmentEndPiEntryId?: string;
 }
 
+interface PlannedCompartmentRow {
+    sequence: number;
+    start_message: number;
+    end_message: number;
+    start_message_id: string;
+    end_message_id: string;
+    title: string;
+    content: string;
+    p1: string | null;
+    p2: string | null;
+    p3: string | null;
+    p4: string | null;
+    importance: number | null;
+    episode_type: string | null;
+    legacy: number;
+}
+
+interface PlannedFactRow {
+    category: string;
+    content: string;
+    created_at: number;
+    updated_at: number;
+}
+
+/**
+ * The remapped state to copy, plus a committer that performs all INSERTs
+ * inside a single transaction. The plan is computed without writing so the
+ * caller can (a) read `lastCompartmentEndPiEntryId` for the compaction marker
+ * and (b) write the Pi JSONL file FIRST, then call `commit()` only after the
+ * file persists — so an interruption never leaves orphaned shared-DB rows with
+ * no usable session file.
+ */
+interface CopyMagicContextStatePlan extends CopyMagicContextStateResult {
+    commit: () => void;
+}
+
 interface CompactionMarkerResult {
     written: boolean;
     boundaryEntryId?: string;
@@ -701,11 +744,12 @@ function copyMagicContextState(args: {
     orderedSourceMessageIds: readonly string[];
     now: number;
     dryRun: boolean;
-}): CopyMagicContextStateResult {
+}): CopyMagicContextStatePlan {
     const sourceCompartments = stmt<CortexkitCompartmentRow>(
         args.cortexkitDb,
         `SELECT sequence, start_message, end_message, start_message_id, end_message_id,
-              title, content, created_at
+              title, content, created_at,
+              p1, p2, p3, p4, importance, episode_type, legacy
          FROM compartments
         WHERE session_id = ? AND harness = 'opencode'
      ORDER BY sequence ASC`,
@@ -728,6 +772,13 @@ function copyMagicContextState(args: {
         end_message_id: string;
         title: string;
         content: string;
+        p1: string | null;
+        p2: string | null;
+        p3: string | null;
+        p4: string | null;
+        importance: number | null;
+        episode_type: string | null;
+        legacy: number;
     }> = [];
 
     for (const c of sourceCompartments) {
@@ -755,60 +806,87 @@ function copyMagicContextState(args: {
             end_message_id: endRemap.piEntryId,
             title: c.title,
             content: c.content,
+            p1: c.p1,
+            p2: c.p2,
+            p3: c.p3,
+            p4: c.p4,
+            importance: c.importance,
+            episode_type: c.episode_type,
+            legacy: c.legacy,
         });
     }
 
-    if (args.dryRun) {
-        return {
-            compartmentsCopied: remappedCompartments.length,
-            factsCopied: sourceFacts.length,
-            boundariesApproximated,
-            lastCompartmentEndPiEntryId: remappedCompartments.at(-1)?.end_message_id,
-        };
-    }
-
-    // Insert compartments + facts under (harness='pi', session_id=<new>).
-    // The shared DB schema includes `harness TEXT NOT NULL DEFAULT 'opencode'`
-    // on both tables, and (session_id, sequence) is UNIQUE on compartments —
-    // new Pi session uuid means no conflict.
-    const insertCompartment = stmt(
-        args.cortexkitDb,
-        `INSERT INTO compartments (
-       session_id, sequence, start_message, end_message,
-       start_message_id, end_message_id, title, content,
-       created_at, harness
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pi')`,
-    );
-    for (const c of remappedCompartments) {
-        insertCompartment.run(
-            args.piSessionId,
-            c.sequence,
-            c.start_message,
-            c.end_message,
-            c.start_message_id,
-            c.end_message_id,
-            c.title,
-            c.content,
-            args.now,
-        );
-    }
-
-    const insertFact = stmt(
-        args.cortexkitDb,
-        `INSERT INTO session_facts (
-       session_id, category, content, created_at, updated_at, harness
-     ) VALUES (?, ?, ?, ?, ?, 'pi')`,
-    );
-    for (const f of sourceFacts) {
-        insertFact.run(args.piSessionId, f.category, f.content, f.created_at, f.updated_at);
-    }
-
-    return {
+    const result: CopyMagicContextStateResult = {
         compartmentsCopied: remappedCompartments.length,
         factsCopied: sourceFacts.length,
         boundariesApproximated,
         lastCompartmentEndPiEntryId: remappedCompartments.at(-1)?.end_message_id,
     };
+
+    if (args.dryRun) {
+        return { ...result, commit: () => {} };
+    }
+
+    // Defer all writes into a single transaction the caller runs AFTER the Pi
+    // JSONL file persists. Insert compartments + facts under
+    // (harness='pi', session_id=<new>). The shared DB schema includes
+    // `harness TEXT NOT NULL DEFAULT 'opencode'` on both tables, and
+    // (session_id, sequence) is UNIQUE on compartments — a new Pi session uuid
+    // means no conflict.
+    const commit = () => {
+        const insertCompartment = stmt(
+            args.cortexkitDb,
+            `INSERT INTO compartments (
+       session_id, sequence, start_message, end_message,
+       start_message_id, end_message_id, title, content,
+       p1, p2, p3, p4, importance, episode_type, legacy,
+       created_at, harness
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pi')`,
+        );
+        const insertFact = stmt(
+            args.cortexkitDb,
+            `INSERT INTO session_facts (
+       session_id, category, content, created_at, updated_at, harness
+     ) VALUES (?, ?, ?, ?, ?, 'pi')`,
+        );
+        args.cortexkitDb.exec("BEGIN IMMEDIATE");
+        try {
+            for (const c of remappedCompartments) {
+                insertCompartment.run(
+                    args.piSessionId,
+                    c.sequence,
+                    c.start_message,
+                    c.end_message,
+                    c.start_message_id,
+                    c.end_message_id,
+                    c.title,
+                    c.content,
+                    c.p1,
+                    c.p2,
+                    c.p3,
+                    c.p4,
+                    // Preserve v2 metadata so the decay renderer tiers/decays
+                    // migrated history. Without these, rows land legacy=0 + NULL
+                    // tiers and the renderer falls back to full `content` for every
+                    // tier (no decay, prompt bloat). importance mirrors the schema
+                    // default when absent.
+                    typeof c.importance === "number" ? c.importance : 50,
+                    c.episode_type,
+                    c.legacy,
+                    args.now,
+                );
+            }
+            for (const f of sourceFacts) {
+                insertFact.run(args.piSessionId, f.category, f.content, f.created_at, f.updated_at);
+            }
+            args.cortexkitDb.exec("COMMIT");
+        } catch (error) {
+            args.cortexkitDb.exec("ROLLBACK");
+            throw error;
+        }
+    };
+
+    return { ...result, commit };
 }
 
 function ensureValidOptions(
@@ -893,8 +971,9 @@ export function migrateOpenCodeSessionToPi(
             factsCopied: 0,
             boundariesApproximated: 0,
         };
+        let commitMagicContextState: (() => void) | null = null;
         if (cortexkitDb !== null) {
-            copyResult = copyMagicContextState({
+            const plan = copyMagicContextState({
                 cortexkitDb,
                 sourceSessionId: session.id,
                 piSessionId: buildResult.piSessionId,
@@ -903,6 +982,8 @@ export function migrateOpenCodeSessionToPi(
                 now: now.getTime(),
                 dryRun: Boolean(opts.dryRun),
             });
+            copyResult = plan;
+            commitMagicContextState = plan.commit;
         }
 
         const compactionMarker = insertCompactionMarker(
@@ -918,7 +999,12 @@ export function migrateOpenCodeSessionToPi(
 
         if (!opts.dryRun) {
             if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
+            // Write the Pi JSONL file FIRST, then commit the shared-DB rows in a
+            // single transaction. Ordering + transaction together guarantee we
+            // never leave orphaned compartment/fact rows pointing at a session
+            // file that was never written.
             fs.writeFileSync(outputPath, jsonl);
+            commitMagicContextState?.();
         }
 
         return {

@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import {
     mkdirSync,
     readdirSync,
@@ -20,6 +21,11 @@ export class MagicContextRpcServer {
     private portFilePath: string;
     private portDir: string;
     private startedAt = Date.now();
+    // Unguessable per-process bearer token, published in the (user-private) port
+    // file and required on every non-health RPC call. Defends side-effecting
+    // endpoints (recomp/upgrade/dismiss) against any local process or
+    // browser-origin script that merely discovers/guesses the port.
+    private readonly token = randomBytes(32).toString("hex");
 
     constructor(storageDir: string, directory: string) {
         this.portFilePath = rpcPortFilePath(storageDir, directory);
@@ -65,6 +71,7 @@ export class MagicContextRpcServer {
                             port: this.port,
                             pid: process.pid,
                             started_at: this.startedAt,
+                            token: this.token,
                         }),
                         "utf-8",
                     );
@@ -114,8 +121,10 @@ export class MagicContextRpcServer {
     private dispatch(req: IncomingMessage, res: ServerResponse): void {
         const url = req.url ?? "";
 
-        // CORS headers for same-origin fetch
-        res.setHeader("Access-Control-Allow-Origin", "*");
+        // No wildcard CORS: the only legitimate client is the in-process TUI
+        // client, which is not a browser origin. Omitting
+        // Access-Control-Allow-Origin makes browsers refuse to read responses,
+        // closing the CSRF-style read path a malicious local page could use.
 
         if (req.method === "GET" && url === "/health") {
             res.writeHead(200, { "Content-Type": "application/json" });
@@ -126,6 +135,18 @@ export class MagicContextRpcServer {
         if (req.method !== "POST" || !url.startsWith("/rpc/")) {
             res.writeHead(404);
             res.end("Not Found");
+            return;
+        }
+
+        // Require the per-process bearer token on every side-effecting call.
+        // The legitimate TUI client reads it from the same port file it used to
+        // discover the port; a process that only guessed the port cannot.
+        const auth = req.headers.authorization;
+        const presented = typeof auth === "string" ? auth.replace(/^Bearer\s+/i, "") : "";
+        if (presented !== this.token) {
+            res.writeHead(401, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Unauthorized" }));
+            req.resume();
             return;
         }
 

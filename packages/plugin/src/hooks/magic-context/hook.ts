@@ -34,6 +34,7 @@ import { getErrorMessage } from "../../shared/error-message";
 import { log } from "../../shared/logger";
 import { resolveFallbackChain } from "../../shared/resolve-fallbacks";
 import { isTuiConnected, pushNotification } from "../../shared/rpc-notifications";
+import type { Database } from "../../shared/sqlite";
 import { createMagicContextCommandHandler } from "./command-handler";
 import { deriveHistorianChunkTokens, resolveHistorianContextLimit } from "./derive-budgets";
 import { createEventHandler } from "./event-handler";
@@ -156,12 +157,12 @@ function notifyMagicContextDisabled(client: PluginContext["client"], reason: str
 
 export function createMagicContextHook(deps: MagicContextDeps) {
     const contextUsageMap = new Map<string, { usage: ContextUsage; updatedAt: number }>();
-    let db: ReturnType<typeof openDatabase>;
+    let db: Database;
     try {
-        db = openDatabase();
-        if (!isDatabasePersisted(db)) {
+        const opened = openDatabase();
+        if (!opened || !isDatabasePersisted(opened)) {
             const reason =
-                getDatabasePersistenceError(db) ??
+                (opened ? getDatabasePersistenceError(opened) : null) ??
                 "Failed to initialize the persistent SQLite database.";
             log(
                 "[magic-context] disabling feature because persistent storage is unavailable:",
@@ -170,6 +171,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             notifyMagicContextDisabled(deps.client, reason);
             return null;
         }
+        db = opened;
     } catch (error) {
         const reason = getErrorMessage(error);
         log("[magic-context] hook failed to open storage; disabling feature:", error);

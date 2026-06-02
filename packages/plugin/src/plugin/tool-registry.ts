@@ -8,6 +8,7 @@ import {
     isDatabasePersisted,
     openDatabase,
 } from "../features/magic-context/storage";
+import type { Database } from "../shared/sqlite";
 import { createCtxExpandTools } from "../tools/ctx-expand";
 import { createCtxMemoryTools } from "../tools/ctx-memory";
 import { createCtxNoteTools } from "../tools/ctx-note";
@@ -31,22 +32,26 @@ export function createToolRegistry(args: {
     // disable Magic Context cleanly instead of silently degrading. We never
     // expose ctx_* tools when storage isn't healthy — see openDatabase()
     // for the reasoning.
-    let db: ReturnType<typeof openDatabase>;
+    let db: Database;
     try {
-        db = openDatabase();
+        const opened = openDatabase();
+        // openDatabase returns null on the schema-fence path (DB newer than this
+        // binary) and throws on a fatal open error — handle both as "storage
+        // unavailable, disable tools cleanly".
+        if (!opened || !isDatabasePersisted(opened)) {
+            const reason = getDatabasePersistenceError(opened);
+            console.warn(
+                `[magic-context] persistent storage unavailable; disabling magic-context tools${reason ? `: ${reason}` : ""}`,
+            );
+            return {};
+        }
+        db = opened;
     } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         // console.warn intentional: this runs during plugin init before the file logger is
         // guaranteed to be ready, and storage failure is user-visible enough to warrant stderr.
         console.warn(
             `[magic-context] persistent storage unavailable; disabling magic-context tools: ${reason}`,
-        );
-        return {};
-    }
-    if (!isDatabasePersisted(db)) {
-        const reason = getDatabasePersistenceError(db);
-        console.warn(
-            `[magic-context] persistent storage unavailable; disabling magic-context tools${reason ? `: ${reason}` : ""}`,
         );
         return {};
     }

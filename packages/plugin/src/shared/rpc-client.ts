@@ -17,6 +17,7 @@ type NonRetryableRpcError = Error & { [NON_RETRYABLE_RPC_ERROR]: true };
 
 export class MagicContextRpcClient {
     private port: number | null = null;
+    private token: string | null = null;
     private portDir: string;
     private legacyPortFilePath: string;
     private healthChecked = false;
@@ -46,7 +47,14 @@ export class MagicContextRpcClient {
                     `http://127.0.0.1:${port}/rpc/${method}`,
                     {
                         method: "POST",
-                        headers: { "Content-Type": "application/json" },
+                        headers: {
+                            "Content-Type": "application/json",
+                            // The server requires this per-process token on all
+                            // non-health calls; read from the same port file used
+                            // for discovery. Older servers wrote no token — send
+                            // nothing then (they also require nothing).
+                            ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
+                        },
                         body: JSON.stringify(params),
                     },
                 );
@@ -105,13 +113,14 @@ export class MagicContextRpcClient {
         }
 
         for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-            const port = this.readPortFile();
-            if (port) {
-                const alive = await this.healthCheck(port);
+            const record = this.readPortFile();
+            if (record) {
+                const alive = await this.healthCheck(record.port);
                 if (alive) {
-                    this.port = port;
+                    this.port = record.port;
+                    this.token = record.token ?? null;
                     this.healthChecked = true;
-                    return port;
+                    return record.port;
                 }
             }
 
@@ -123,7 +132,7 @@ export class MagicContextRpcClient {
         return null;
     }
 
-    private readPortFile(): number | null {
+    private readPortFile(): RpcPortFileRecord | null {
         const records: RpcPortFileRecord[] = [];
 
         try {
@@ -139,13 +148,13 @@ export class MagicContextRpcClient {
 
         if (records.length > 0) {
             records.sort((a, b) => b.started_at - a.started_at);
-            return records[0].port;
+            return records[0];
         }
 
         try {
             const record = parseRpcPortFile(readFileSync(this.legacyPortFilePath, "utf-8"));
             if (record?.pid && !isPidAlive(record.pid)) return null;
-            return record?.port ?? null;
+            return record;
         } catch {
             return null;
         }
@@ -174,6 +183,7 @@ export class MagicContextRpcClient {
 
     reset(): void {
         this.port = null;
+        this.token = null;
         this.healthChecked = false;
     }
 }

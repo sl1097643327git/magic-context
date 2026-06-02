@@ -276,6 +276,55 @@ describe("key-files lease peek and validation", () => {
             ),
         ).toThrow("case-dup");
     });
+
+    it("rejects doc/lockfile paths even when readable on disk", () => {
+        const project = tempDir("kf-doc-");
+        writeFileSync(join(project, "README.md"), "# hi");
+        writeFileSync(join(project, "bun.lock"), "{}");
+        for (const path of ["README.md", "docs/guide.mdx", "bun.lock", "package-lock.json"]) {
+            expect(() =>
+                validateLlmOutput(
+                    JSON.stringify({
+                        no_change: false,
+                        files: [{ path, content: "x", approx_token_estimate: 1 }],
+                    }),
+                    { enabled: true, token_budget: 2000, min_reads: 2 },
+                    project,
+                ),
+            ).toThrow("doc/lockfile not allowed");
+        }
+    });
+
+    it("rejects paths outside the candidate allow-set when one is provided", () => {
+        const project = tempDir("kf-allowset-");
+        writeFileSync(join(project, "real.ts"), "a");
+        writeFileSync(join(project, "fabricated.ts"), "b");
+        const allow = new Set(["real.ts"]);
+        // In-set path passes.
+        expect(
+            validateLlmOutput(
+                JSON.stringify({
+                    no_change: false,
+                    files: [{ path: "real.ts", content: "x", approx_token_estimate: 1 }],
+                }),
+                { enabled: true, token_budget: 2000, min_reads: 2 },
+                project,
+                allow,
+            ).files,
+        ).toHaveLength(1);
+        // Out-of-set (fabricated/injected) path is rejected.
+        expect(() =>
+            validateLlmOutput(
+                JSON.stringify({
+                    no_change: false,
+                    files: [{ path: "fabricated.ts", content: "x", approx_token_estimate: 1 }],
+                }),
+                { enabled: true, token_budget: 2000, min_reads: 2 },
+                project,
+                allow,
+            ),
+        ).toThrow("not in candidate set");
+    });
 });
 
 describe("key-files read history", () => {

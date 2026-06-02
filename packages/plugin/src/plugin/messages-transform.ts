@@ -87,14 +87,17 @@ export function createMessagesTransformHandler(args: {
             if (sessionId) {
                 try {
                     const db = openDatabase();
-                    const summary = truncateError(name, code, message);
-                    // Write-if-changed guard: when the same error repeats on
-                    // every transform pass (e.g. persistent schema corruption),
-                    // skip the DB write if lastTransformError already matches.
-                    // Prevents needless WAL churn during degraded operation.
-                    const current = getOrCreateSessionMeta(db, sessionId).lastTransformError;
-                    if (current !== summary) {
-                        updateSessionMeta(db, sessionId, { lastTransformError: summary });
+                    // null = storage unavailable (schema fence); nothing to persist to.
+                    if (db) {
+                        const summary = truncateError(name, code, message);
+                        // Write-if-changed guard: when the same error repeats on
+                        // every transform pass (e.g. persistent schema corruption),
+                        // skip the DB write if lastTransformError already matches.
+                        // Prevents needless WAL churn during degraded operation.
+                        const current = getOrCreateSessionMeta(db, sessionId).lastTransformError;
+                        if (current !== summary) {
+                            updateSessionMeta(db, sessionId, { lastTransformError: summary });
+                        }
                     }
                 } catch (persistError) {
                     // Swallow — if we can't even write the error, we definitely

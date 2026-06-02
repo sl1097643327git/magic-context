@@ -142,6 +142,43 @@ describe("runDeferredV22Backfill", () => {
         expect(failure).toEqual({ row_id: failedId, error_class: "permission_denied" });
     });
 
+    test("merges (does not abort) when two legacy paths collide on (category, normalized_hash) under one identity", async () => {
+        // Regression: two raw legacy paths for the SAME project (e.g. a symlinked
+        // path and the canonical path) both resolve to one git: identity and share
+        // a (category, normalized_hash). A blind UPDATE would trip
+        // UNIQUE(project_path, category, normalized_hash) and abort the batch.
+        const database = makeDb();
+        const firstId = insertMemory(database, "/proj/canonical", "dup-hash");
+        const secondId = insertMemory(database, "/proj/symlinked", "dup-hash");
+        // Give the second (later) row a higher seen_count to verify merge keeps max.
+        database.prepare("UPDATE memories SET seen_count = 9 WHERE id = ?").run(secondId);
+
+        const summary = await runDeferredV22Backfill(database, {
+            resolveIdentity: () => "git:sharedidentity",
+            yieldToEventLoop: async () => {},
+        });
+
+        // Must complete cleanly, not "completed_with_failures" from a constraint abort.
+        expect(summary.status).toBe("completed");
+        // Exactly one surviving row under the shared identity.
+        const survivors = database
+            .prepare(
+                "SELECT id, seen_count FROM memories WHERE project_path = 'git:sharedidentity' AND normalized_hash = 'dup-hash'",
+            )
+            .all() as Array<{ id: number; seen_count: number }>;
+        expect(survivors).toHaveLength(1);
+        // The earlier row survives (UPDATE'd first); seen_count merged to the max (9).
+        expect(survivors[0].id).toBe(firstId);
+        expect(survivors[0].seen_count).toBe(9);
+        // No legacy rows remain.
+        const unresolved = database
+            .prepare(
+                "SELECT COUNT(*) AS count FROM memories WHERE project_path NOT LIKE 'git:%' AND project_path NOT LIKE 'dir:%'",
+            )
+            .get() as { count: number };
+        expect(unresolved.count).toBe(0);
+    });
+
     test("concurrent project_path mutation is a guarded no-op", async () => {
         const database = makeDb();
         const rowId = insertMemory(database, "/race", "race");

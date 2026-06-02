@@ -220,7 +220,9 @@ describe("auto-update-checker/cache", () => {
             expect(spawnMock).toHaveBeenCalledWith(
                 "npm",
                 ["install", "--no-audit", "--no-fund", "--no-progress"],
-                { cwd: "/tmp/opencode", stdio: "pipe" },
+                // stdio: "ignore" (not "pipe") — an unread "pipe" deadlocks when
+                // npm output exceeds the OS pipe buffer; we never read it anyway.
+                { cwd: "/tmp/opencode", stdio: "ignore" },
             );
 
             spawnMock.mockRestore();

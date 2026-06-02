@@ -1694,10 +1694,18 @@ fn resolve_paths_for_table_filter(
     // `table` is a fixed internal literal (never user input), so interpolating
     // it into the DISTINCT query is safe. The set is small (one row per project
     // that ever wrote to the table), bounded by project count, not row count.
-    let mut stmt = conn.prepare(&format!("SELECT DISTINCT project_path FROM {table}"))?;
+    let mut stmt =
+        conn.prepare(&format!("SELECT DISTINCT project_path FROM {table}"))?;
+    // Read as Option<String>: some tables (smart_notes, project_key_files) can
+    // hold legacy rows with a NULL project_path. A non-Option get() throws
+    // "Invalid column type Null" and crashes the whole session-detail view. A
+    // NULL path can never normalize to a resolved identity, so we drop them.
     let all_paths: Vec<String> = stmt
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
+        .query_map([], |row| row.get::<_, Option<String>>(0))?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect();
 
     let normalized_filter = normalize_stored_project_path(project_filter);
     let mut matched: Vec<String> = all_paths

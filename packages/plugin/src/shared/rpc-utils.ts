@@ -5,6 +5,15 @@ export interface RpcPortFileRecord {
     port: number;
     pid: number;
     started_at: number;
+    /**
+     * Per-process bearer token. The server requires it on all non-health RPC
+     * calls so a random local process or browser-origin script that merely
+     * discovers/guesses the port cannot drive side-effecting endpoints
+     * (recomp/upgrade/dismiss). Optional in the type for forward/backward
+     * compatibility with port files written by older builds (treated as "no
+     * auth required" only when the server itself didn't set one).
+     */
+    token?: string;
 }
 
 /**
@@ -56,6 +65,7 @@ export function parseRpcPortFile(content: string, fallbackPid = 0): RpcPortFileR
                 port,
                 pid,
                 started_at: Number.isFinite(startedAt) ? startedAt : 0,
+                token: typeof parsed.token === "string" ? parsed.token : undefined,
             };
         } catch {
             return null;

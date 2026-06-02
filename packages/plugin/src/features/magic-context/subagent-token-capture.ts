@@ -20,7 +20,7 @@ export interface LastAssistantModel {
 }
 
 export interface ChildInvocationRecordInput {
-    db: Database;
+    db: Database | null;
     parentSessionId: string;
     harness: "opencode" | "pi";
     subagent: SubagentKind;
@@ -111,6 +111,10 @@ export function findLastAssistantModel(messages: unknown[]): LastAssistantModel 
 }
 
 export function recordChildInvocation(input: ChildInvocationRecordInput): number | null {
+    // Best-effort telemetry: when storage is unavailable (openDatabase() returned
+    // null on the schema fence), silently skip recording rather than crash the
+    // subagent that was only trying to log its token usage.
+    if (!input.db) return null;
     const tokens = input.tokens ?? sumTokensFromChildMessages(input.messages ?? []);
     const model =
         input.providerId !== undefined || input.modelId !== undefined

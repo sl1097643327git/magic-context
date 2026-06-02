@@ -135,7 +135,7 @@ const plugin: Plugin = async (ctx) => {
     if (pluginConfig.enabled && hooks.magicContext) {
         try {
             const db = openDatabase();
-            if (isDatabasePersisted(db)) {
+            if (db && isDatabasePersisted(db)) {
                 runDeferredV22Backfill(db).catch((err) => {
                     log(`[v22-backfill] background runner failed: ${err}`);
                 });

@@ -22,6 +22,9 @@ type V22BackfillStatus = "pending" | "completed" | "completed_with_failures" | "
 interface LegacyMemoryRow {
     id: number;
     project_path: string;
+    category: string;
+    normalized_hash: string;
+    seen_count: number;
 }
 
 interface ResolvedBackfillRow extends LegacyMemoryRow {
@@ -237,7 +240,7 @@ export async function runDeferredV22Backfill(
     while (true) {
         const batch = db
             .prepare(
-                `SELECT id, project_path
+                `SELECT id, project_path, category, normalized_hash, seen_count
                  FROM memories
                  WHERE id > ?
                    AND project_path NOT LIKE 'git:%'
@@ -279,8 +282,46 @@ export async function runDeferredV22Backfill(
             const verifyMemory = db.prepare(
                 "SELECT project_path FROM memories WHERE id = ? AND project_path = ?",
             );
+            // Detect a row that already lives under the target identity with the
+            // same (category, normalized_hash). Rekeying onto it would violate
+            // UNIQUE(project_path, category, normalized_hash) and abort the whole
+            // batch transaction. This is reachable when one project's memories were
+            // written under multiple raw legacy paths (e.g. symlinked / pre-identity
+            // paths) that all resolve to the same git:/dir: identity.
+            const findCollision = db.prepare(
+                `SELECT id, seen_count FROM memories
+                 WHERE project_path = ? AND category = ? AND normalized_hash = ?
+                 LIMIT 1`,
+            );
+            const bumpSeenCount = db.prepare("UPDATE memories SET seen_count = ? WHERE id = ?");
+            const deleteMemoryRow = db.prepare("DELETE FROM memories WHERE id = ?");
 
             for (const row of resolvedRows) {
+                const collision = findCollision.get(
+                    row.identity,
+                    row.category,
+                    row.normalized_hash,
+                ) as { id: number; seen_count: number } | undefined;
+                if (collision && collision.id !== row.id) {
+                    // Merge into the surviving target: keep the larger seen_count,
+                    // delete the source legacy row. The embedding row FK-cascades on
+                    // delete. The mutation log is unaffected (no render-visible
+                    // change — both rows held identical content).
+                    const mergedSeen = Math.max(collision.seen_count ?? 1, row.seen_count ?? 1);
+                    if (mergedSeen !== (collision.seen_count ?? 1)) {
+                        bumpSeenCount.run(mergedSeen, collision.id);
+                    }
+                    deleteMemoryRow.run(row.id);
+                    changedRows += 1;
+                    changedIdentities.add(row.identity);
+                    upsertRekeyMap(db, row.project_path, row.identity, now);
+                    const legacyRustIdentity = computeLegacyRustDirIdentity(row.project_path);
+                    if (legacyRustIdentity !== row.identity) {
+                        upsertRekeyMap(db, legacyRustIdentity, row.identity, now);
+                    }
+                    deleteFailure(db, row.id);
+                    continue;
+                }
                 const result = updateMemory.run(row.identity, row.id, row.project_path) as {
                     changes?: number;
                 };

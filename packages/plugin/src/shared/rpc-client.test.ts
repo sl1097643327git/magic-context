@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { MagicContextRpcClient } from "./rpc-client";
-import { rpcPortFilePath } from "./rpc-utils";
+import { MagicContextRpcServer } from "./rpc-server";
+import { parseRpcPortFile, rpcPortFilePath } from "./rpc-utils";
 
 interface TestServer {
     port: number;
@@ -114,6 +115,52 @@ describe("MagicContextRpcClient", () => {
         writePortFile(storageDir, directory, second.port);
 
         expect(await client.call<{ value: string }>("value")).toEqual({ value: "second" });
+    });
+
+    test("authenticates against a real server with the published token", async () => {
+        const storageDir = makeTempDir();
+        const directory = "/repo-auth";
+        const server = new MagicContextRpcServer(storageDir, directory);
+        server.handle("ping", async () => ({ pong: true }));
+        await server.start();
+        try {
+            const client = new MagicContextRpcClient(storageDir, directory);
+            // Real round-trip: client must read the token from the port file and
+            // send it as Bearer auth, or the server returns 401.
+            expect(await client.call<{ pong: boolean }>("ping")).toEqual({ pong: true });
+        } finally {
+            server.stop();
+        }
+    });
+
+    test("a request without the token is rejected 401 by the server", async () => {
+        const storageDir = makeTempDir();
+        const directory = "/repo-noauth";
+        const server = new MagicContextRpcServer(storageDir, directory);
+        server.handle("ping", async () => ({ pong: true }));
+        const port = await server.start();
+        try {
+            // Sanity: the port file carries a non-empty token.
+            const record = parseRpcPortFile(
+                readFileSync(rpcPortFilePath(storageDir, directory), "utf-8"),
+            );
+            expect(typeof record?.token).toBe("string");
+            expect((record?.token ?? "").length).toBeGreaterThan(0);
+
+            // A raw fetch with no Authorization header must be rejected.
+            const res = await fetch(`http://127.0.0.1:${port}/rpc/ping`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: "{}",
+            });
+            expect(res.status).toBe(401);
+
+            // Health stays open (no token required) for discovery.
+            const health = await fetch(`http://127.0.0.1:${port}/health`);
+            expect(health.status).toBe(200);
+        } finally {
+            server.stop();
+        }
     });
 
     test("gives up when the port file points at a dead server", async () => {

@@ -1049,14 +1049,25 @@ export function ensureColumn(
  *      raw history reach the model and overflow the context window — the
  *      exact failure mode that broke a real test session.
  *
- * Callers must catch this error and disable Magic Context for that run
- * (server plugin: registers a startup warning + skips the runtime;
- * Pi plugin: logs warning + skips the extension).
+ * Two failure modes, both fail-closed:
+ *   - **Schema fence** (the on-disk DB is newer than this binary supports, e.g.
+ *     a stale process after a rolling upgrade): returns `null`. This is an
+ *     expected, recoverable condition (restart onto the newer binary), so it is
+ *     not exceptional.
+ *   - **Fatal open error** (ABI mismatch, unwritable path, corrupt file):
+ *     throws. The thrown message carries the failure detail for surfacing.
+ *
+ * The return type is therefore `Database | null`, and callers MUST both
+ * null-check the result AND be prepared for a throw (typically a try/catch that
+ * also treats a null result as "storage unavailable"). On either outcome the
+ * caller disables Magic Context for that run (server plugin: registers a
+ * startup warning + skips the runtime; Pi plugin: logs warning + skips the
+ * extension). There is NEVER a silent in-memory fallback.
  */
-export function openDatabase(): Database;
-export function openDatabase(dbPath: string): Database;
-export function openDatabase(options: OpenDatabaseOptions): Database;
-export function openDatabase(dbPathOrOptions?: string | OpenDatabaseOptions): Database {
+export function openDatabase(): Database | null;
+export function openDatabase(dbPath: string): Database | null;
+export function openDatabase(options: OpenDatabaseOptions): Database | null;
+export function openDatabase(dbPathOrOptions?: string | OpenDatabaseOptions): Database | null {
     const options =
         typeof dbPathOrOptions === "string" ? { dbPath: dbPathOrOptions } : dbPathOrOptions;
     const explicitDbPath = options?.dbPath !== undefined;
@@ -1065,7 +1076,7 @@ export function openDatabase(dbPathOrOptions?: string | OpenDatabaseOptions): Da
     const existing = databases.get(dbPath);
     if (existing) {
         if (!enforceSchemaFence(existing, dbPath, latestSupportedVersion)) {
-            return null as unknown as Database;
+            return null;
         }
         if (!persistenceByDatabase.has(existing)) {
             persistenceByDatabase.set(existing, true);
@@ -1082,13 +1093,13 @@ export function openDatabase(dbPathOrOptions?: string | OpenDatabaseOptions): Da
         const db = new Database(dbPath);
         if (!enforceSchemaFence(db, dbPath, latestSupportedVersion)) {
             closeQuietly(db);
-            return null as unknown as Database;
+            return null;
         }
         initializeDatabase(db);
         runMigrations(db);
         if (!enforceSchemaFence(db, dbPath, latestSupportedVersion)) {
             closeQuietly(db);
-            return null as unknown as Database;
+            return null;
         }
         if (!explicitDbPath) {
             try {
@@ -1139,11 +1150,13 @@ export function openDatabase(dbPathOrOptions?: string | OpenDatabaseOptions): Da
     }
 }
 
-export function isDatabasePersisted(db: Database): boolean {
+export function isDatabasePersisted(db: Database | null): boolean {
+    if (!db) return false;
     return persistenceByDatabase.get(db) ?? false;
 }
 
-export function getDatabasePersistenceError(db: Database): string | null {
+export function getDatabasePersistenceError(db: Database | null): string | null {
+    if (!db) return null;
     return persistenceErrorByDatabase.get(db) ?? null;
 }
 
