@@ -365,13 +365,14 @@ describe("promotion", () => {
         });
     });
 
-    // Audit finding #13: getMemoryByHash does NOT filter by status, so a
-    // re-observed fact whose prior instance was archived matches the archived
-    // row, bumps its seen_count, and is NOT revived (stays archived/invisible).
-    // This characterization test documents the CURRENT behavior so we can decide
-    // whether revival-on-re-observation is wanted before changing it.
+    // ACCEPTED BEHAVIOR (audit decision): archiving a memory is a deliberate
+    // dreamer/user suppression, so re-observing the same fact must NOT silently
+    // revive it. getMemoryByHash matches the archived row by (project,category,
+    // hash), bumps its seen_count (recurrence is still recorded), and does not
+    // re-insert or un-archive. Revival happens only through an explicit restore
+    // (which bumps the project epoch). This test locks that contract.
     describe("#given a previously-archived fact is re-observed", () => {
-        it("CURRENT BEHAVIOR: dedupe matches the archived row and does not revive it", () => {
+        it("dedupe matches the archived row and does NOT revive it (archive is deliberate)", () => {
             db = makeMemoryDatabase();
             const content = "Use SQLite for cross-session memory";
             const hash = computeNormalizedHash(content);

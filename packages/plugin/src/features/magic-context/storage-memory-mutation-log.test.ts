@@ -113,23 +113,20 @@ describe("storage-memory-mutation-log", () => {
         expect(getMemoryMutationsForRender(database, "/repo/a", 0, [])).toEqual([]);
     });
 
-    // Audit finding #12: render coalescing is "newest mutation-log id per target",
-    // with no terminal-state precedence. If a memory rendered in m[0] is archived
-    // and then later updated (update does NOT gate on status), the update row has
-    // the higher id and WINS — the m[1] <memory-updates> delta shows the memory as
-    // present/updated even though the canonical table state is archived. This
-    // characterization test documents the CURRENT behavior so we can decide
-    // whether archive/delete should take precedence over a later update before
-    // changing it.
-    test("CURRENT BEHAVIOR: a later update outranks an earlier archive (no terminal precedence)", () => {
+    // A terminal mutation (archive/delete/superseded) takes precedence over a
+    // later non-terminal `update` for the same target, regardless of id order.
+    // Without this, archive-then-update would render the memory as
+    // present/updated in the m[1] <memory-updates> delta even though it left the
+    // active set (an archived row won't reappear in the next m[0] baseline).
+    test("a terminal archive outranks a later update for the same target", () => {
         const database = makeDb();
-        queueMemoryMutation(database, {
+        const archive = queueMemoryMutation(database, {
             projectPath: "/repo/a",
             mutationType: "archive",
             targetMemoryId: 10,
             queuedAt: 100,
         });
-        const update = queueMemoryMutation(database, {
+        queueMemoryMutation(database, {
             projectPath: "/repo/a",
             mutationType: "update",
             targetMemoryId: 10,
@@ -138,11 +135,50 @@ describe("storage-memory-mutation-log", () => {
             queuedAt: 200,
         });
 
-        // Memory 10 was rendered in m[0] (active at materialization), then archived,
-        // then updated. Newest-by-id wins → the render shows the UPDATE, not the archive.
         const rows = getMemoryMutationsForRender(database, "/repo/a", 0, [10]);
         expect(rows).toHaveLength(1);
-        expect(rows[0]).toEqual(update);
-        expect(rows[0]?.mutationType).toBe("update"); // archive is masked
+        expect(rows[0]).toEqual(archive); // terminal wins; update is masked
+        expect(rows[0]?.mutationType).toBe("archive");
+    });
+
+    test("update-then-archive still resolves to the archive (newest terminal)", () => {
+        const database = makeDb();
+        queueMemoryMutation(database, {
+            projectPath: "/repo/a",
+            mutationType: "update",
+            targetMemoryId: 10,
+            newContent: "edited",
+            queuedAt: 100,
+        });
+        const archive = queueMemoryMutation(database, {
+            projectPath: "/repo/a",
+            mutationType: "delete",
+            targetMemoryId: 10,
+            queuedAt: 200,
+        });
+
+        const rows = getMemoryMutationsForRender(database, "/repo/a", 0, [10]);
+        expect(rows).toEqual([archive]);
+    });
+
+    test("multiple updates with no terminal → newest update wins", () => {
+        const database = makeDb();
+        queueMemoryMutation(database, {
+            projectPath: "/repo/a",
+            mutationType: "update",
+            targetMemoryId: 10,
+            newContent: "v1",
+            queuedAt: 100,
+        });
+        const newest = queueMemoryMutation(database, {
+            projectPath: "/repo/a",
+            mutationType: "update",
+            targetMemoryId: 10,
+            newContent: "v2",
+            queuedAt: 200,
+        });
+
+        const rows = getMemoryMutationsForRender(database, "/repo/a", 0, [10]);
+        expect(rows).toEqual([newest]);
     });
 });

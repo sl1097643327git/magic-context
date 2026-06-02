@@ -4,6 +4,18 @@ export type MemoryMutationType = "archive" | "delete" | "update" | "superseded";
 
 const MEMORY_MUTATION_TYPES = new Set<string>(["archive", "delete", "update", "superseded"]);
 
+// Terminal mutations mean the memory LEFT the active set (renders as
+// <removed>/<superseded>). `update` is non-terminal — the memory is still
+// present with new content (renders as <updated>). The render fold gives
+// terminal states precedence over a later `update` so an update queued after an
+// archive/delete cannot resurrect a memory that is gone (archive is deliberate;
+// un-archive happens via an epoch-bump full re-materialize, never via the log).
+const TERMINAL_MUTATION_TYPES = new Set<MemoryMutationType>(["archive", "delete", "superseded"]);
+
+function isTerminalMutation(row: MemoryMutationLogRow): boolean {
+    return TERMINAL_MUTATION_TYPES.has(row.mutationType);
+}
+
 export interface MemoryMutationLogRow {
     id: number;
     projectPath: string;
@@ -118,11 +130,30 @@ export function getMemoryMutationsForRender(
         )
         .all(projectPath, afterId ?? 0, ...uniqueIds) as MemoryMutationLogDbRow[];
 
-    const newestByTarget = new Map<number, MemoryMutationLogRow>();
-    for (const row of rows) {
-        newestByTarget.set(row.target_memory_id, toMemoryMutation(row));
+    // Coalesce to one row per target. Newest-id wins among same-terminality, BUT
+    // a terminal mutation (archive/delete/superseded) always outranks a
+    // non-terminal `update` regardless of id order — otherwise an update queued
+    // after an archive would render the memory as still-present/updated even
+    // though it left the active set (it won't appear in the next m[0] baseline).
+    const chosenByTarget = new Map<number, MemoryMutationLogRow>();
+    for (const dbRow of rows) {
+        const candidate = toMemoryMutation(dbRow);
+        const current = chosenByTarget.get(candidate.targetMemoryId);
+        if (!current) {
+            chosenByTarget.set(candidate.targetMemoryId, candidate);
+            continue;
+        }
+        const currentTerminal = isTerminalMutation(current);
+        const candidateTerminal = isTerminalMutation(candidate);
+        if (currentTerminal && !candidateTerminal) continue; // keep terminal over later update
+        if (!currentTerminal && candidateTerminal) {
+            chosenByTarget.set(candidate.targetMemoryId, candidate); // terminal supersedes update
+            continue;
+        }
+        // Same terminality → newest id wins (rows are ASC, so candidate is newer).
+        chosenByTarget.set(candidate.targetMemoryId, candidate);
     }
-    return [...newestByTarget.values()].sort((left, right) => left.id - right.id);
+    return [...chosenByTarget.values()].sort((left, right) => left.id - right.id);
 }
 
 export function getMaxMemoryMutationId(db: Database, projectPath: string): number | null {
