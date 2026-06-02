@@ -3632,6 +3632,100 @@ fn enrich_dream_run_tokens(conn: &Connection, run: &mut DreamRun) {
     run.tasks_json = serde_json::Value::Array(tasks);
 }
 
+#[derive(Debug, Serialize, Clone)]
+pub struct DreamMemoryChange {
+    pub id: i64,
+    pub category: String,
+    pub content: String,
+    pub status: String,
+}
+
+#[derive(Debug, Serialize, Clone, Default)]
+pub struct DreamRunMemoryDetail {
+    pub written: Vec<DreamMemoryChange>,
+    pub archived: Vec<DreamMemoryChange>,
+    pub merged: Vec<DreamMemoryChange>,
+}
+
+/// Reconstruct WHICH memories a dream run changed, by time-window over the run's
+/// [started_at, finished_at]. `dream_runs` stores only counts (id-set diffs at
+/// run time), so this is the retroactive view for existing runs:
+///   - written  = memories created in the window
+///   - merged   = memories superseded (merged into a canonical) in the window
+///   - archived = memories archived (non-merged) in the window that pre-existed
+/// Exact for `written`; archived/merged can differ by edge cases from the stored
+/// count (e.g. a memory archived then un-archived). A future schema that records
+/// the actual changed ids at run time would make this exact (see note).
+pub fn get_dream_run_memory_changes(
+    conn: &Connection,
+    run_id: i64,
+) -> Result<DreamRunMemoryDetail, String> {
+    let (project_path, started_at, finished_at): (String, i64, i64) = conn
+        .query_row(
+            "SELECT project_path, started_at, finished_at FROM dream_runs WHERE id = ?1",
+            rusqlite::params![run_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|e| e.to_string())?;
+
+    let paths = resolve_paths_for_memory_filter(conn, &project_path).map_err(|e| e.to_string())?;
+    if paths.is_empty() {
+        return Ok(DreamRunMemoryDetail::default());
+    }
+    let placeholders = paths.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+
+    // One query covers all three buckets; classify per row in Rust so the
+    // window/path predicates are written once.
+    let sql = format!(
+        "SELECT id, category, content, status, created_at, updated_at, superseded_by_memory_id
+           FROM memories
+          WHERE project_path IN ({placeholders})
+            AND (
+                  (created_at >= ?{c1} AND created_at <= ?{c2})
+               OR (updated_at >= ?{c1} AND updated_at <= ?{c2})
+            )",
+        c1 = paths.len() + 1,
+        c2 = paths.len() + 2,
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let mut params: Vec<&dyn rusqlite::ToSql> = paths
+        .iter()
+        .map(|p| p as &dyn rusqlite::ToSql)
+        .collect();
+    params.push(&started_at);
+    params.push(&finished_at);
+
+    let mut detail = DreamRunMemoryDetail::default();
+    let mut rows = stmt
+        .query(params.as_slice())
+        .map_err(|e| e.to_string())?;
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        let id: i64 = row.get(0).map_err(|e| e.to_string())?;
+        let category: String = row.get(1).map_err(|e| e.to_string())?;
+        let content: String = row.get(2).map_err(|e| e.to_string())?;
+        let status: String = row.get(3).map_err(|e| e.to_string())?;
+        let created_at: i64 = row.get(4).map_err(|e| e.to_string())?;
+        let updated_at: i64 = row.get(5).map_err(|e| e.to_string())?;
+        let superseded: Option<i64> = row.get(6).map_err(|e| e.to_string())?;
+        let change = DreamMemoryChange {
+            id,
+            category,
+            content,
+            status,
+        };
+        let created_in_window = created_at >= started_at && created_at <= finished_at;
+        let updated_in_window = updated_at >= started_at && updated_at <= finished_at;
+        if created_in_window {
+            detail.written.push(change);
+        } else if superseded.is_some() && updated_in_window {
+            detail.merged.push(change);
+        } else if change.status == "archived" && updated_in_window {
+            detail.archived.push(change);
+        }
+    }
+    Ok(detail)
+}
+
 pub fn get_dream_runs(
     conn: &Connection,
     project_path: Option<&str>,

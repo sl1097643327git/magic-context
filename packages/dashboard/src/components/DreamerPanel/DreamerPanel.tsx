@@ -4,14 +4,17 @@ import {
   formatDateTime,
   formatRelativeTime,
   getDreamQueue,
+  getDreamRunMemoryChanges,
   getDreamRuns,
   getDreamState,
   getProjects,
 } from "../../lib/api";
 import type {
+  DreamMemoryChange,
   DreamQueueEntry,
   DreamRun,
   DreamRunMemoryChanges,
+  DreamRunMemoryDetail,
   DreamRunTask,
   ProjectInfo,
 } from "../../lib/types";
@@ -36,6 +39,26 @@ function formatDuration(ms: number): string {
 
 function formatTaskLabel(name: string): string {
   return name === "smart-notes" ? "smart notes" : name;
+}
+
+function MemoryChangeGroup(props: { label: string; items: DreamMemoryChange[] }) {
+  return (
+    <Show when={props.items.length > 0}>
+      <div class="dream-run-memory-group">
+        <div class="dream-run-memory-group-label">
+          {props.label} ({props.items.length})
+        </div>
+        <For each={props.items}>
+          {(m) => (
+            <div class="dream-run-memory-item">
+              <span class="dream-run-memory-cat">{m.category}</span>
+              <span class="dream-run-memory-content">{m.content}</span>
+            </div>
+          )}
+        </For>
+      </div>
+    </Show>
+  );
 }
 
 // Show input/output directly rather than a single "total". The total summed
@@ -73,6 +96,30 @@ export default function DreamerPanel() {
   const [projects] = createResource(getProjects);
   const [runs, { refetch: refetchRuns }] = createResource(() => getDreamRuns(undefined, 50));
   const [expandedProjects, setExpandedProjects] = createSignal<Set<string>>(new Set());
+
+  // Lazy per-run memory-change detail (which memories were written/archived/
+  // merged), fetched on first expand and cached by run id. The run row stores
+  // only counts; this reconstructs the actual memories via a time-window query.
+  const [expandedRun, setExpandedRun] = createSignal<number | null>(null);
+  const [memoryDetails, setMemoryDetails] = createSignal<Record<number, DreamRunMemoryDetail>>({});
+  const [loadingDetail, setLoadingDetail] = createSignal<number | null>(null);
+
+  const toggleRunDetail = async (runId: number) => {
+    if (expandedRun() === runId) {
+      setExpandedRun(null);
+      return;
+    }
+    setExpandedRun(runId);
+    if (!memoryDetails()[runId] && loadingDetail() !== runId) {
+      setLoadingDetail(runId);
+      try {
+        const detail = await getDreamRunMemoryChanges(runId);
+        setMemoryDetails((prev) => ({ ...prev, [runId]: detail }));
+      } finally {
+        setLoadingDetail((cur) => (cur === runId ? null : cur));
+      }
+    }
+  };
 
   /** Extract project identities from dream state `last_dream_at:<identity>` keys. */
   const knownProjectIds = () => {
@@ -372,7 +419,26 @@ export default function DreamerPanel() {
 
                                 <Show when={hasMemoryChanges(run.memory_changes_json)}>
                                   <div class="dream-run-memory-section">
-                                    <div class="dream-run-memory-title">Memory Changes</div>
+                                    <button
+                                      type="button"
+                                      class="dream-run-memory-title"
+                                      style={{
+                                        cursor: "pointer",
+                                        background: "none",
+                                        border: "none",
+                                        color: "inherit",
+                                        font: "inherit",
+                                        padding: "0",
+                                        display: "flex",
+                                        "align-items": "center",
+                                        gap: "6px",
+                                      }}
+                                      onClick={() => toggleRunDetail(run.id)}
+                                      title="Show which memories changed"
+                                    >
+                                      <span>{expandedRun() === run.id ? "▾" : "▸"}</span>
+                                      <span>Memory Changes</span>
+                                    </button>
                                     <div class="dream-run-memory-grid">
                                       <Show when={(run.memory_changes_json?.written ?? 0) > 0}>
                                         <div class="dream-run-memory-pill">
@@ -399,6 +465,35 @@ export default function DreamerPanel() {
                                         </div>
                                       </Show>
                                     </div>
+                                    <Show when={expandedRun() === run.id}>
+                                      <Show
+                                        when={memoryDetails()[run.id]}
+                                        fallback={
+                                          <div class="dream-run-memory-detail-empty">
+                                            {loadingDetail() === run.id
+                                              ? "Loading…"
+                                              : "No detail available."}
+                                          </div>
+                                        }
+                                      >
+                                        {(detail) => (
+                                          <div class="dream-run-memory-detail">
+                                            <MemoryChangeGroup
+                                              label="Written"
+                                              items={detail().written}
+                                            />
+                                            <MemoryChangeGroup
+                                              label="Merged"
+                                              items={detail().merged}
+                                            />
+                                            <MemoryChangeGroup
+                                              label="Archived"
+                                              items={detail().archived}
+                                            />
+                                          </div>
+                                        )}
+                                      </Show>
+                                    </Show>
                                   </div>
                                 </Show>
                               </section>

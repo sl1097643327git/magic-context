@@ -1114,6 +1114,50 @@ body {
   font-size: 12px;
 }
 
+.dream-run-memory-detail {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dream-run-memory-detail-empty {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.dream-run-memory-group-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.dream-run-memory-item {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 3px 0;
+  font-size: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.dream-run-memory-cat {
+  flex: 0 0 auto;
+  font-family: var(--mono-font);
+  font-size: 10px;
+  color: var(--text-muted);
+  min-width: 120px;
+}
+
+.dream-run-memory-content {
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* ── Textarea (config editor, etc.) ──────────────────── */
 .code-editor {
   width: 100%;

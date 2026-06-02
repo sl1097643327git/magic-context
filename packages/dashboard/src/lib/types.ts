@@ -306,6 +306,19 @@ export interface DreamRunMemoryChanges {
   merged?: number;
 }
 
+export interface DreamMemoryChange {
+  id: number;
+  category: string;
+  content: string;
+  status: string;
+}
+
+export interface DreamRunMemoryDetail {
+  written: DreamMemoryChange[];
+  archived: DreamMemoryChange[];
+  merged: DreamMemoryChange[];
+}
+
 export interface DreamRun {
   id: number;
   project_path: string;

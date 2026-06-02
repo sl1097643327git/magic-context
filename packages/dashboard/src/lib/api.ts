@@ -8,6 +8,7 @@ import type {
   DbHealth,
   DreamQueueEntry,
   DreamRun,
+  DreamRunMemoryDetail,
   DreamStateEntry,
   Harness,
   LogEntry,
@@ -262,6 +263,10 @@ export async function getDreamRuns(projectPath?: string, limit?: number): Promis
     projectPath: projectPath ?? null,
     limit: limit ?? 20,
   });
+}
+
+export async function getDreamRunMemoryChanges(runId: number): Promise<DreamRunMemoryDetail> {
+  return invoke("get_dream_run_memory_changes", { runId });
 }
 
 export async function enqueueDream(projectPath: string, reason: string): Promise<number> {

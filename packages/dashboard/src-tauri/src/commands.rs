@@ -359,6 +359,16 @@ pub fn get_dream_runs(
 }
 
 #[tauri::command(async)]
+pub fn get_dream_run_memory_changes(
+    state: State<'_, AppState>,
+    run_id: i64,
+) -> Result<db::DreamRunMemoryDetail, String> {
+    let path = state.get_db_path()?;
+    let conn = db::open_readonly(&path).map_err(|e| e.to_string())?;
+    db::get_dream_run_memory_changes(&conn, run_id)
+}
+
+#[tauri::command(async)]
 pub fn enqueue_dream(
     state: State<'_, AppState>,
     project_path: String,
