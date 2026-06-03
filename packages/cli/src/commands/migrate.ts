@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path";
@@ -67,6 +67,7 @@ type FileSystemLike = {
     existsSync(path: string): boolean;
     mkdirSync(path: string, options?: { recursive?: boolean }): unknown;
     writeFileSync(path: string, data: string): unknown;
+    unlinkSync(path: string): unknown;
 };
 
 type StatementLike<T = unknown> = {
@@ -180,7 +181,7 @@ function defaultPiSessionsRoot(): string {
 }
 
 function defaultFs(): FileSystemLike {
-    return { existsSync, mkdirSync, writeFileSync };
+    return { existsSync, mkdirSync, writeFileSync, unlinkSync };
 }
 
 function stmt<T>(db: DatabaseLike, sql: string): StatementLike<T> {
@@ -1004,7 +1005,23 @@ export function migrateOpenCodeSessionToPi(
             // never leave orphaned compartment/fact rows pointing at a session
             // file that was never written.
             fs.writeFileSync(outputPath, jsonl);
-            commitMagicContextState?.();
+            try {
+                commitMagicContextState?.();
+            } catch (commitError) {
+                // The JSONL is already on disk but the shared-DB commit failed
+                // (SQLITE_BUSY, disk full, etc.). Without cleanup the orphaned
+                // file shows up in Pi's session picker forever with no
+                // compartments/facts, and a retry generates a NEW piSessionId/
+                // filename so it never overwrites the orphan. Unlink the
+                // just-written file (best-effort) before rethrowing the commit
+                // error — which is the more important one to surface.
+                try {
+                    fs.unlinkSync(outputPath);
+                } catch {
+                    // Cleanup is best-effort; preserve the original commit error.
+                }
+                throw commitError;
+            }
         }
 
         return {

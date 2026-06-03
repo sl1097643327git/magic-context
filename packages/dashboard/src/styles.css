@@ -1127,6 +1127,26 @@ body {
   color: var(--text-muted);
 }
 
+.dream-run-memory-detail-error {
+  color: var(--danger, #d9534f);
+}
+
+.dream-run-memory-detail-retry {
+  margin-left: 6px;
+  padding: 1px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  border: 1px solid var(--border, #444);
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+}
+
+.dream-run-memory-detail-retry:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .dream-run-memory-group-label {
   font-size: 11px;
   text-transform: uppercase;

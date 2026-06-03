@@ -63,7 +63,15 @@ export class MagicContextRpcServer {
                 try {
                     this.warnIfOtherLiveInstance();
                     const dir = dirname(this.portFilePath);
-                    mkdirSync(dir, { recursive: true });
+                    // The port file holds the per-process bearer token that
+                    // gates side-effecting RPC endpoints (recomp/upgrade/
+                    // dismiss). Under the default umask 0o022 a plain write
+                    // lands at 0o644 in a 0o755 dir — world-readable, so any
+                    // local UID could read the token and drive those endpoints,
+                    // defeating the auth defense. Restrict both: dir 0o700,
+                    // file 0o600. renameSync preserves the tmp file's mode, so
+                    // the 0o600 on the write covers the final file.
+                    mkdirSync(dir, { recursive: true, mode: 0o700 });
                     const tmpPath = `${this.portFilePath}.tmp`;
                     writeFileSync(
                         tmpPath,
@@ -73,7 +81,7 @@ export class MagicContextRpcServer {
                             started_at: this.startedAt,
                             token: this.token,
                         }),
-                        "utf-8",
+                        { encoding: "utf-8", mode: 0o600 },
                     );
                     renameSync(tmpPath, this.portFilePath);
                     log(`[rpc] server listening on 127.0.0.1:${this.port}`);

@@ -28,7 +28,7 @@ export interface V22BackfillCommandResult {
     exitCode: number;
 }
 
-function hasV22Command(args: V22BackfillCommandArgs): boolean {
+export function hasV22Command(args: V22BackfillCommandArgs): boolean {
     return (
         args.checkV22Backfill === true ||
         args.retryV22Backfill === true ||

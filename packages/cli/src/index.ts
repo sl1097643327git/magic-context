@@ -38,7 +38,11 @@ function getVersion(): string {
 function valueAfter(args: string[], flag: string): string | null {
     const index = args.indexOf(flag);
     if (index === -1) return null;
-    return args[index + 1] ?? "";
+    // Reject a flag-shaped value so `--rekey-v22-dir-identity --force` doesn't
+    // consume `--force` as the project path (see doctor-pi.ts valueAfter).
+    const next = args[index + 1];
+    if (next === undefined || next.startsWith("--")) return null;
+    return next;
 }
 
 function printUsage(): void {

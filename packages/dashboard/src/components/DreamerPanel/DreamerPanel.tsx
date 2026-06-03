@@ -102,23 +102,45 @@ export default function DreamerPanel() {
   // only counts; this reconstructs the actual memories via a time-window query.
   const [expandedRun, setExpandedRun] = createSignal<number | null>(null);
   const [memoryDetails, setMemoryDetails] = createSignal<Record<number, DreamRunMemoryDetail>>({});
+  const [memoryErrors, setMemoryErrors] = createSignal<Record<number, string>>({});
   const [loadingDetail, setLoadingDetail] = createSignal<number | null>(null);
 
-  const toggleRunDetail = async (runId: number) => {
+  const loadRunDetail = async (runId: number) => {
+    setLoadingDetail(runId);
+    setMemoryErrors((prev) => {
+      const { [runId]: _removed, ...rest } = prev;
+      return rest;
+    });
+    try {
+      const detail = await getDreamRunMemoryChanges(runId);
+      setMemoryDetails((prev) => ({ ...prev, [runId]: detail }));
+    } catch (e) {
+      // Record the failure per run so the panel can show WHY it's empty and,
+      // crucially, NOT silently re-fire the failing call on every re-expand.
+      // The error sentinel gates the auto-fetch; the user retries explicitly.
+      setMemoryErrors((prev) => ({
+        ...prev,
+        [runId]: e instanceof Error ? e.message : String(e),
+      }));
+    } finally {
+      setLoadingDetail((cur) => (cur === runId ? null : cur));
+    }
+  };
+
+  const toggleRunDetail = (runId: number) => {
     if (expandedRun() === runId) {
       setExpandedRun(null);
       return;
     }
     setExpandedRun(runId);
-    if (!memoryDetails()[runId] && loadingDetail() !== runId) {
-      setLoadingDetail(runId);
-      try {
-        const detail = await getDreamRunMemoryChanges(runId);
-        setMemoryDetails((prev) => ({ ...prev, [runId]: detail }));
-      } finally {
-        setLoadingDetail((cur) => (cur === runId ? null : cur));
-      }
+    if (!memoryDetails()[runId] && !memoryErrors()[runId] && loadingDetail() !== runId) {
+      void loadRunDetail(runId);
     }
+  };
+
+  const retryRunDetail = (runId: number) => {
+    if (loadingDetail() === runId) return;
+    void loadRunDetail(runId);
   };
 
   /** Extract project identities from dream state `last_dream_at:<identity>` keys. */
@@ -470,9 +492,28 @@ export default function DreamerPanel() {
                                         when={memoryDetails()[run.id]}
                                         fallback={
                                           <div class="dream-run-memory-detail-empty">
-                                            {loadingDetail() === run.id
-                                              ? "Loading…"
-                                              : "No detail available."}
+                                            <Show
+                                              when={memoryErrors()[run.id]}
+                                              fallback={
+                                                loadingDetail() === run.id
+                                                  ? "Loading…"
+                                                  : "No detail available."
+                                              }
+                                            >
+                                              {(message) => (
+                                                <span class="dream-run-memory-detail-error">
+                                                  Failed to load memory changes: {message()}{" "}
+                                                  <button
+                                                    type="button"
+                                                    class="dream-run-memory-detail-retry"
+                                                    disabled={loadingDetail() === run.id}
+                                                    onClick={() => retryRunDetail(run.id)}
+                                                  >
+                                                    Retry
+                                                  </button>
+                                                </span>
+                                              )}
+                                            </Show>
                                           </div>
                                         }
                                       >

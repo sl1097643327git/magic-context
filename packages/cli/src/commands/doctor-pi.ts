@@ -908,7 +908,13 @@ export async function runDoctor(options: RunDoctorOptions = {}): Promise<number>
 function valueAfter(args: string[], flag: string): string | null {
     const index = args.indexOf(flag);
     if (index === -1) return null;
-    return args[index + 1] ?? "";
+    // Reject a flag-shaped value: `--rekey-v22-dir-identity --force` must NOT
+    // consume `--force` as the project path. Returning null drops the option
+    // (parseDoctorArgs gates on `!== null`) so the doctor proceeds normally
+    // instead of rekeying against a bogus `dir:<hash of cwd/--force>` identity.
+    const next = args[index + 1];
+    if (next === undefined || next.startsWith("--")) return null;
+    return next;
 }
 
 export function parseDoctorArgs(args: string[]): RunDoctorOptions {

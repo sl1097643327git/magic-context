@@ -10,11 +10,16 @@
  * do I want to nuke?" prompt rather than two separate flows.
  */
 import { existsSync, rmSync } from "node:fs";
+import { closeDatabase, openDatabase } from "@magic-context/core/features/magic-context/storage";
 import { getInstalledAdapters } from "../adapters";
 import type { HarnessAdapter } from "../adapters/types";
 import { resolveAdaptersForCommand } from "../lib/harness-select";
 import { confirm, intro, log, outro, selectMany, spinner } from "../lib/prompts";
-import type { V22BackfillCommandArgs } from "../lib/v22-backfill-commands";
+import {
+    hasV22Command,
+    runV22BackfillCommands,
+    type V22BackfillCommandArgs,
+} from "../lib/v22-backfill-commands";
 import { runDoctor as runOpenCodeDoctor } from "./doctor-opencode";
 import { doctor as runPiDoctor } from "./doctor-pi";
 
@@ -39,6 +44,20 @@ export async function runDoctor(options: RunDoctorOptions): Promise<number> {
         return 0;
     }
 
+    // The v22 backfill commands operate on the SHARED cortexkit DB (harness-
+    // agnostic — there is no per-harness shard for backfill state). Run them
+    // exactly ONCE here, not once per adapter: dispatching to both an OpenCode
+    // and a Pi adapter would run the same rekey/retry/check against the same
+    // physical DB twice, producing confusing doubled output (e.g. the second
+    // pass reports "Re-keyed 0 row(s)" because the first already moved them).
+    if (hasV22Command(options)) {
+        const result = await runV22BackfillCommands(
+            { name: "Magic Context", openDatabase, closeDatabase, log },
+            options,
+        );
+        if (result.handled) return result.exitCode;
+    }
+
     let anyFailure = false;
     for (const adapter of adapters) {
         log.step(`Running doctor for ${adapter.displayName}…`);
@@ -50,25 +69,19 @@ export async function runDoctor(options: RunDoctorOptions): Promise<number> {
 
 async function dispatchDoctor(adapter: HarnessAdapter, options: RunDoctorOptions): Promise<number> {
     switch (adapter.kind) {
+        // v22 backfill flags are handled once in runDoctor (shared DB), so the
+        // per-harness doctors below are NOT forwarded them — that's what
+        // prevented the doubled-output bug when both harnesses are installed.
         case "opencode": {
             return runOpenCodeDoctor({
                 force: options.force,
                 issue: options.issue,
-                checkV22Backfill: options.checkV22Backfill,
-                retryV22Backfill: options.retryV22Backfill,
-                rekeyV22DirIdentity: options.rekeyV22DirIdentity,
             });
         }
         case "pi": {
-            // Forward the original argv minus our flags Pi already recognizes.
             const piArgs: string[] = [];
             if (options.force) piArgs.push("--force");
             if (options.issue) piArgs.push("--issue");
-            if (options.checkV22Backfill) piArgs.push("--check-v22-backfill");
-            if (options.retryV22Backfill) piArgs.push("--retry-v22-backfill");
-            if (options.rekeyV22DirIdentity !== undefined) {
-                piArgs.push("--rekey-v22-dir-identity", options.rekeyV22DirIdentity ?? "");
-            }
             return runPiDoctor(piArgs);
         }
     }

@@ -2419,6 +2419,38 @@ pub fn update_memory_content(
     // Phase B: re-check the target row, mutate, clear stale embeddings, and queue once.
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     verify_memory_project_path_unchanged(&tx, memory_id, &target.project_path)?;
+
+    // Pre-check the UNIQUE(project_path, category, normalized_hash) constraint
+    // INSIDE the Immediate transaction (no TOCTOU). If editing this memory's
+    // content makes its hash match another memory in the same project+category,
+    // a plain UPDATE aborts with a raw `UNIQUE constraint failed: ...` string
+    // that surfaces verbatim in the dashboard toast. Mirror the TS plugin's
+    // friendly message so the user knows to merge/archive the duplicate.
+    // `category = ?2` (not `IS`): SQLite's UNIQUE treats NULL categories as
+    // distinct (NULLs never collide), and `category = NULL` is never true — so
+    // a NULL category yields no match here, exactly mirroring the constraint
+    // the real UPDATE would (not) violate. Avoids a false rejection on NULL.
+    let collision_id: Option<i64> = tx
+        .query_row(
+            "SELECT id FROM memories
+             WHERE project_path = ?1 AND category = ?2 AND normalized_hash = ?3 AND id != ?4
+             LIMIT 1",
+            params![target.project_path, target.category, new_hash, memory_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(existing_id) = collision_id {
+        // SqliteFailure(_, Some(msg)) Displays as exactly `msg`, so commands.rs's
+        // `.to_string()` surfaces this friendly text (not a raw SQLite error)
+        // in the dashboard toast. rusqlite 0.31 has no ModuleError variant.
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+            Some(format!(
+                "Memory content already exists as ID {existing_id} in this category; merge or archive the duplicate first."
+            )),
+        ));
+    }
+
     tx.execute(
         "UPDATE memories SET content = ?1, normalized_hash = ?2, updated_at = ?3 WHERE id = ?4",
         params![new_content, new_hash, now_millis(), memory_id],
