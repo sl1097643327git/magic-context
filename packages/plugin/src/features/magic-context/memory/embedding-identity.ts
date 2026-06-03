@@ -26,6 +26,11 @@ export function getEmbeddingProviderIdentity(config: EmbeddingConfig): string {
                   model: config.model.trim(),
                   endpoint: normalizeEndpoint(config.endpoint),
                   apiKeyPresent: Boolean(config.api_key?.trim()),
+                  // input_type changes the embedding vector space (e.g. NIM
+                  // 'query' vs 'passage'), so it participates in identity — a
+                  // change must re-embed. truncate only affects over-long inputs
+                  // and does not change the space, so it is intentionally omitted.
+                  inputType: config.input_type?.trim() || "",
               }
             : {
                   provider: "local",

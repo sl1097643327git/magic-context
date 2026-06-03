@@ -165,6 +165,18 @@ const BaseEmbeddingConfigSchema = z
             .optional()
             .describe("API endpoint URL. Required when provider is openai-compatible."),
         api_key: z.string().optional().describe("API key for remote embedding provider (optional)"),
+        input_type: z
+            .string()
+            .optional()
+            .describe(
+                "Optional input_type sent in the embedding request body. Required by some openai-compatible providers (e.g. NVIDIA NIM expects 'query' or 'passage'). Omitted from the request when unset.",
+            ),
+        truncate: z
+            .string()
+            .optional()
+            .describe(
+                "Optional truncate mode sent in the embedding request body (e.g. NVIDIA NIM accepts 'NONE' | 'START' | 'END'). Omitted from the request when unset.",
+            ),
     })
     .superRefine((data, ctx) => {
         if (data.provider === "openai-compatible" && !data.endpoint?.trim()) {
@@ -194,11 +206,15 @@ export const EmbeddingConfigSchema = BaseEmbeddingConfigSchema.transform((data) 
 
     if (data.provider === "openai-compatible") {
         const apiKey = data.api_key?.trim();
+        const inputType = data.input_type?.trim();
+        const truncate = data.truncate?.trim();
         return {
             provider: "openai-compatible" as const,
             model: data.model?.trim() ?? "",
             endpoint: data.endpoint?.trim() ?? "",
             ...(apiKey ? { api_key: apiKey } : {}),
+            ...(inputType ? { input_type: inputType } : {}),
+            ...(truncate ? { truncate } : {}),
         };
     }
 

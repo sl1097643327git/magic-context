@@ -97,6 +97,8 @@ function createProvider(config: EmbeddingConfig): EmbeddingProvider | null {
             endpoint: config.endpoint,
             model: config.model,
             apiKey: config.api_key,
+            inputType: config.input_type,
+            truncate: config.truncate,
         });
     }
 

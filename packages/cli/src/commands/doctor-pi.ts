@@ -565,6 +565,14 @@ async function runHealthChecks(options: {
         const model = typeof mergedEmbedding.model === "string" ? mergedEmbedding.model.trim() : "";
         const apiKey =
             typeof mergedEmbedding.api_key === "string" ? mergedEmbedding.api_key : undefined;
+        const inputType =
+            typeof mergedEmbedding.input_type === "string"
+                ? mergedEmbedding.input_type.trim()
+                : undefined;
+        const truncateMode =
+            typeof mergedEmbedding.truncate === "string"
+                ? mergedEmbedding.truncate.trim()
+                : undefined;
         if (!endpoint || !model) {
             add(
                 results,
@@ -577,6 +585,8 @@ async function runHealthChecks(options: {
                     endpoint,
                     model,
                     apiKey,
+                    ...(inputType ? { inputType } : {}),
+                    ...(truncateMode ? { truncate: truncateMode } : {}),
                     timeoutMs: 10_000,
                 });
                 const classified = classifyEmbeddingOutcome(outcome);

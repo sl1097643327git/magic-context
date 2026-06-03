@@ -55,6 +55,10 @@ pub struct EmbeddingProbeOptions {
     pub endpoint: String,
     pub model: String,
     pub api_key: Option<String>,
+    /// Optional `input_type` body field — required by some providers (NVIDIA NIM).
+    pub input_type: Option<String>,
+    /// Optional `truncate` body field (e.g. NVIDIA NIM).
+    pub truncate: Option<String>,
     pub timeout_ms: u64,
 }
 
@@ -204,10 +208,27 @@ pub async fn probe_embedding_endpoint(options: EmbeddingProbeOptions) -> Embeddi
         }
     };
 
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": options.model,
         "input": "magic-context probe",
     });
+    // Optional provider-specific fields (e.g. NVIDIA NIM requires input_type).
+    // Added only when set so standard OpenAI endpoints are unaffected.
+    if let Some(map) = body.as_object_mut() {
+        if let Some(input_type) = options.input_type.as_deref().map(str::trim).filter(|s| !s.is_empty())
+        {
+            map.insert(
+                "input_type".to_string(),
+                serde_json::Value::String(input_type.to_string()),
+            );
+        }
+        if let Some(truncate) = options.truncate.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            map.insert(
+                "truncate".to_string(),
+                serde_json::Value::String(truncate.to_string()),
+            );
+        }
+    }
 
     let mut req = client
         .post(&url)
@@ -562,6 +583,8 @@ mod tests {
             endpoint: "example.com/v1".to_string(),
             model: "text-embedding-3-small".to_string(),
             api_key: None,
+            input_type: None,
+            truncate: None,
             timeout_ms: 1000,
         })
         .await;
@@ -577,6 +600,8 @@ mod tests {
             endpoint: "".to_string(),
             model: "text-embedding-3-small".to_string(),
             api_key: None,
+            input_type: None,
+            truncate: None,
             timeout_ms: 1000,
         })
         .await;

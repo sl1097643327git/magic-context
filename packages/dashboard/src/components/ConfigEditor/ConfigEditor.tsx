@@ -870,6 +870,12 @@ function ConfigForm(props: {
                                       const apiKey = String(
                                         getNestedValue(formData(), "embedding.api_key") ?? "",
                                       ).trim();
+                                      const inputType = String(
+                                        getNestedValue(formData(), "embedding.input_type") ?? "",
+                                      ).trim();
+                                      const truncate = String(
+                                        getNestedValue(formData(), "embedding.truncate") ?? "",
+                                      ).trim();
                                       if (!endpoint || !model) {
                                         setEmbeddingTestResult({
                                           ok: false,
@@ -887,7 +893,13 @@ function ConfigForm(props: {
                                         // classification — we surface that unchanged.
                                         const outcome = await invoke<EmbeddingProbeOutcome>(
                                           "test_embedding_endpoint",
-                                          { endpoint, model, apiKey: apiKey || null },
+                                          {
+                                            endpoint,
+                                            model,
+                                            apiKey: apiKey || null,
+                                            inputType: inputType || null,
+                                            truncate: truncate || null,
+                                          },
                                         );
                                         setEmbeddingTestResult(formatProbeOutcome(outcome));
                                       } catch (e: unknown) {

@@ -27,6 +27,11 @@ export interface EmbeddingProbeOptions {
     endpoint: string;
     model: string;
     apiKey?: string;
+    /** Optional `input_type` body field — required by some providers (NVIDIA NIM)
+     *  for the probe to succeed. Omitted from the body when unset. */
+    inputType?: string;
+    /** Optional `truncate` body field (e.g. NVIDIA NIM). Omitted when unset. */
+    truncate?: string;
     /** Milliseconds before aborting the request. Defaults to 10000. */
     timeoutMs?: number;
     /**
@@ -76,7 +81,14 @@ export async function probeEmbeddingEndpoint(
 
     // Use a short fixed probe string. Providers bill by tokens, so minimal
     // input keeps the check cheap even on metered accounts.
-    const body = JSON.stringify({ model: options.model, input: "magic-context probe" });
+    const inputType = options.inputType?.trim();
+    const truncateMode = options.truncate?.trim();
+    const body = JSON.stringify({
+        model: options.model,
+        input: "magic-context probe",
+        ...(inputType ? { input_type: inputType } : {}),
+        ...(truncateMode ? { truncate: truncateMode } : {}),
+    });
 
     let response: Response;
     try {

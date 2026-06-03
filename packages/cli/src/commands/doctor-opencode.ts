@@ -412,6 +412,10 @@ async function checkEmbeddingConfig(magicContextConfigPath: string): Promise<{ i
     const endpoint = typeof embedding?.endpoint === "string" ? embedding.endpoint.trim() : "";
     const model = typeof embedding?.model === "string" ? embedding.model.trim() : "";
     const apiKey = typeof embedding?.api_key === "string" ? embedding.api_key : undefined;
+    const inputType =
+        typeof embedding?.input_type === "string" ? embedding.input_type.trim() : undefined;
+    const truncateMode =
+        typeof embedding?.truncate === "string" ? embedding.truncate.trim() : undefined;
 
     let localIssues = 0;
 
@@ -463,6 +467,8 @@ async function checkEmbeddingConfig(magicContextConfigPath: string): Promise<{ i
             endpoint,
             model,
             apiKey: apiKey,
+            ...(inputType ? { inputType } : {}),
+            ...(truncateMode ? { truncate: truncateMode } : {}),
             timeoutMs: 10_000,
         });
     } catch (error) {

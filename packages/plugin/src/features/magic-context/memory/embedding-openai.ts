@@ -6,6 +6,10 @@ interface OpenAICompatibleEmbeddingProviderOptions {
     endpoint?: string;
     model?: string;
     apiKey?: string;
+    /** Optional `input_type` body field (e.g. NVIDIA NIM 'query'/'passage'). */
+    inputType?: string;
+    /** Optional `truncate` body field (e.g. NVIDIA NIM 'NONE'/'START'/'END'). */
+    truncate?: string;
 }
 
 interface EmbeddingResponseBody {
@@ -55,6 +59,8 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
     private readonly endpoint: string;
     private readonly model: string;
     private readonly apiKey: string;
+    private readonly inputType: string;
+    private readonly truncate: string;
     private initialized = false;
 
     // Circuit breaker state (per provider instance — resets when config
@@ -71,6 +77,8 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
         this.endpoint = normalizeEndpoint(options.endpoint);
         this.model = options.model?.trim() ?? "";
         this.apiKey = options.apiKey?.trim() ?? "";
+        this.inputType = options.inputType?.trim() ?? "";
+        this.truncate = options.truncate?.trim() ?? "";
         this.modelId = getEmbeddingProviderIdentity({
             provider: "openai-compatible",
             endpoint: this.endpoint,
@@ -150,6 +158,12 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
                 body: JSON.stringify({
                     model: this.model,
                     input: texts,
+                    // Optional provider-specific fields (e.g. NVIDIA NIM requires
+                    // input_type; truncate is accepted by several providers).
+                    // Omitted entirely when unset so standard OpenAI endpoints are
+                    // unaffected.
+                    ...(this.inputType ? { input_type: this.inputType } : {}),
+                    ...(this.truncate ? { truncate: this.truncate } : {}),
                 }),
                 signal: internalController.signal,
             });

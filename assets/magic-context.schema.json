@@ -651,6 +651,14 @@
         "api_key": {
           "description": "API key for remote embedding provider (optional)",
           "type": "string"
+        },
+        "input_type": {
+          "description": "Optional input_type sent in the embedding request body. Required by some openai-compatible providers (e.g. NVIDIA NIM expects 'query' or 'passage'). Omitted from the request when unset.",
+          "type": "string"
+        },
+        "truncate": {
+          "description": "Optional truncate mode sent in the embedding request body (e.g. NVIDIA NIM accepts 'NONE' | 'START' | 'END'). Omitted from the request when unset.",
+          "type": "string"
         }
       }
     },

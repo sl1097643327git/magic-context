@@ -24,6 +24,50 @@ function errorResponse(): Response {
     return new Response("internal", { status: 500 });
 }
 
+describe("OpenAICompatibleEmbeddingProvider request body (NVIDIA NIM fields, issue #127)", () => {
+    let fetchSpy: ReturnType<typeof spyOn<typeof globalThis, "fetch">>;
+
+    beforeEach(() => {
+        fetchSpy = spyOn(globalThis, "fetch");
+    });
+    afterEach(() => {
+        fetchSpy.mockRestore();
+    });
+
+    async function capturedBody(
+        provider: OpenAICompatibleEmbeddingProvider,
+    ): Promise<Record<string, unknown>> {
+        fetchSpy.mockImplementation((async () => successResponse()) as FetchLike);
+        await provider.embed("hello");
+        const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
+        return JSON.parse(init.body as string) as Record<string, unknown>;
+    }
+
+    test("includes input_type and truncate when configured", async () => {
+        const provider = new OpenAICompatibleEmbeddingProvider({
+            endpoint: "http://127.0.0.1:65535",
+            model: "nvidia/nv-embed",
+            inputType: "passage",
+            truncate: "END",
+        });
+        const body = await capturedBody(provider);
+        expect(body.input_type).toBe("passage");
+        expect(body.truncate).toBe("END");
+        expect(body.model).toBe("nvidia/nv-embed");
+    });
+
+    test("omits input_type and truncate entirely when unset (standard OpenAI unaffected)", async () => {
+        const provider = new OpenAICompatibleEmbeddingProvider({
+            endpoint: "http://127.0.0.1:65535",
+            model: "text-embedding-3-small",
+        });
+        const body = await capturedBody(provider);
+        expect("input_type" in body).toBe(false);
+        expect("truncate" in body).toBe(false);
+        expect(body.input).toBeDefined();
+    });
+});
+
 describe("OpenAICompatibleEmbeddingProvider circuit breaker", () => {
     let fetchSpy: ReturnType<typeof spyOn<typeof globalThis, "fetch">>;
 

@@ -611,6 +611,8 @@ pub async fn test_embedding_endpoint(
     endpoint: String,
     model: String,
     api_key: Option<String>,
+    input_type: Option<String>,
+    truncate: Option<String>,
 ) -> EmbeddingProbeOutcome {
     // Substitute each field. None of these values are emitted to logs, so
     // resolved values are safe to carry through the probe. We deliberately
@@ -653,10 +655,19 @@ pub async fn test_embedding_endpoint(
         };
     }
 
+    let input_type = input_type
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let truncate = truncate
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
     probe_embedding_endpoint(EmbeddingProbeOptions {
         endpoint,
         model,
         api_key: api_key_val,
+        input_type,
+        truncate,
         timeout_ms: 10_000,
     })
     .await
