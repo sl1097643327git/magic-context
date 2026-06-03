@@ -21,7 +21,6 @@ describe("createEventHandler — instance dispose cleanup", () => {
         });
 
         await handler({
-            // biome-ignore lint/suspicious/noExplicitAny: minimal event shape for the test
             event: {
                 type: "server.instance.disposed",
                 properties: { directory: "/proj/a" },
@@ -40,9 +39,7 @@ describe("createEventHandler — instance dispose cleanup", () => {
             },
         });
 
-        // biome-ignore lint/suspicious/noExplicitAny: minimal event shape for the test
         await handler({ event: { type: "message.updated", properties: {} } as any });
-        // biome-ignore lint/suspicious/noExplicitAny: minimal event shape for the test
         await handler({ event: { type: "session.deleted", properties: {} } as any });
 
         expect(fired).toBe(false);
@@ -59,7 +56,6 @@ describe("createEventHandler — instance dispose cleanup", () => {
         // Must resolve, not reject.
         await expect(
             handler({
-                // biome-ignore lint/suspicious/noExplicitAny: minimal event shape for the test
                 event: {
                     type: "server.instance.disposed",
                     properties: { directory: "/proj/b" },
@@ -81,7 +77,6 @@ describe("createEventHandler — instance dispose cleanup", () => {
             },
         });
 
-        // biome-ignore lint/suspicious/noExplicitAny: minimal event shape for the test
         await handler({ event: { type: "message.updated", properties: {} } as any });
 
         expect(seen).toEqual(["au:message.updated", "mc:message.updated"]);
