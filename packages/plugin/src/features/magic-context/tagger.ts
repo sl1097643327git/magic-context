@@ -58,6 +58,13 @@ export interface Tagger {
         reasoningByteSize?: number,
         toolName?: string | null,
         inputByteSize?: number,
+        /**
+         * Pi-only: fingerprint of the raw message this tag is created for,
+         * persisted on the tag row so a later pass can adopt a fallback-id tag
+         * onto the real SessionEntry id. OpenCode passes undefined → column
+         * stays NULL → no behavior change.
+         */
+        entryFingerprint?: string | null,
     ): number;
     /**
      * Look up the tag number for a non-tool entity.
@@ -96,6 +103,13 @@ export interface Tagger {
      */
     getToolTag(sessionId: string, callId: string, ownerMsgId: string): number | undefined;
     bindTag(sessionId: string, messageId: string, tagNumber: number): void;
+    /**
+     * Remove a stale in-memory assignment key. Used by Pi fallback-tag
+     * adoption after a tag's message_id is migrated from the pi-msg-*
+     * fallback to the real id: the old fallback key must be dropped so it
+     * doesn't linger as an alias to the same tag number.
+     */
+    unbindTag(sessionId: string, messageId: string): void;
     /**
      * Bind a tool tag by composite key. The in-memory map keys this as
      * `${ownerMsgId}\x00${callId}`.
@@ -323,6 +337,7 @@ export function createTagger(): Tagger {
         toolOwnerMessageId: string | null,
         mapKey: string,
         dbExistingLookup: () => number | null,
+        entryFingerprint: string | null = null,
     ): number {
         const sessionAssignments = getSessionAssignments(sessionId);
 
@@ -362,6 +377,7 @@ export function createTagger(): Tagger {
                         toolName,
                         inputByteSize,
                         toolOwnerMessageId,
+                        entryFingerprint,
                     );
                     getUpsertCounterStatement(db).run(sessionId, next, getHarness());
                 })();
@@ -408,6 +424,7 @@ export function createTagger(): Tagger {
         reasoningByteSize: number = 0,
         toolName: string | null = null,
         inputByteSize: number = 0,
+        entryFingerprint: string | null = null,
     ): number {
         // Defense-in-depth: TS narrowing already excludes "tool", but a
         // caller routing through `as any` could still hit this body.
@@ -429,6 +446,7 @@ export function createTagger(): Tagger {
             null,
             messageId,
             () => getTagNumberByMessageId(db, sessionId, messageId),
+            entryFingerprint,
         );
     }
 
@@ -529,6 +547,10 @@ export function createTagger(): Tagger {
 
     function bindTag(sessionId: string, messageId: string, tagNumber: number): void {
         getSessionAssignments(sessionId).set(messageId, tagNumber);
+    }
+
+    function unbindTag(sessionId: string, messageId: string): void {
+        getSessionAssignments(sessionId).delete(messageId);
     }
 
     function bindToolTag(
@@ -703,6 +725,7 @@ export function createTagger(): Tagger {
         getTag,
         getToolTag,
         bindTag,
+        unbindTag,
         bindToolTag,
         getAssignments,
         resetCounter,

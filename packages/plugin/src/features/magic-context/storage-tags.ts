@@ -15,7 +15,7 @@ function getInsertTagStatement(db: Database): PreparedStatement {
     let stmt = insertTagStatements.get(db);
     if (!stmt) {
         stmt = db.prepare(
-            "INSERT INTO tags (session_id, message_id, type, byte_size, reasoning_byte_size, tag_number, tool_name, input_byte_size, harness, tool_owner_message_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO tags (session_id, message_id, type, byte_size, reasoning_byte_size, tag_number, tool_name, input_byte_size, harness, tool_owner_message_id, entry_fingerprint) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         );
         insertTagStatements.set(db, stmt);
     }
@@ -244,6 +244,7 @@ export function insertTag(
     toolName: string | null = null,
     inputByteSize: number = 0,
     toolOwnerMessageId: string | null = null,
+    entryFingerprint: string | null = null,
 ): number {
     getInsertTagStatement(db).run(
         sessionId,
@@ -256,6 +257,7 @@ export function insertTag(
         inputByteSize,
         getHarness(),
         toolOwnerMessageId,
+        entryFingerprint,
     );
 
     return tagNumber;
@@ -306,6 +308,55 @@ export function updateTagMessageId(
     messageId: string,
 ): void {
     getUpdateTagMessageIdStatement(db).run(messageId, sessionId, tagId);
+}
+
+/**
+ * Pi fallback-tag adoption lookup. Find the message-text tag(s) created under a
+ * `pi-msg-*` fallback id for a given (session, entry_fingerprint), so the next
+ * pass can migrate them onto the message's real SessionEntry id. Returns the
+ * candidate rows (tag_number + current message_id) for the caller to apply the
+ * per-part uniqueness guard and race-safe migrate. Scoped to `type='message'`
+ * and the fallback-id shape so a real-id row is never re-adopted.
+ */
+export function findAdoptableFallbackTags(
+    db: Database,
+    sessionId: string,
+    entryFingerprint: string,
+): Array<{ tagNumber: number; messageId: string }> {
+    const rows = db
+        .prepare(
+            `SELECT tag_number AS tagNumber, message_id AS messageId
+             FROM tags
+             WHERE session_id = ?
+               AND type = 'message'
+               AND entry_fingerprint = ?
+               AND message_id LIKE 'pi-msg-%'`,
+        )
+        .all(sessionId, entryFingerprint) as Array<{ tagNumber: number; messageId: string }>;
+    return rows;
+}
+
+/**
+ * Race-safe migrate of a tag's `message_id` from a known old (fallback) value to
+ * a new (real) value. The old value in the WHERE clause is the concurrency fence
+ * (mirrors `adoptNullOwnerToolTag`'s NULL guard): if a sibling process already
+ * migrated or re-keyed the row, `changes === 0` and the caller skips. Returns
+ * true iff exactly this migration applied.
+ */
+export function adoptFallbackTagMessageId(
+    db: Database,
+    sessionId: string,
+    tagNumber: number,
+    oldFallbackMessageId: string,
+    newRealMessageId: string,
+): boolean {
+    const result = db
+        .prepare(
+            `UPDATE tags SET message_id = ?
+             WHERE session_id = ? AND tag_number = ? AND message_id = ?`,
+        )
+        .run(newRealMessageId, sessionId, tagNumber, oldFallbackMessageId);
+    return (result.changes ?? 0) > 0;
 }
 
 /**

@@ -67,6 +67,15 @@ export interface TagTranscriptOptions {
      * consistent across passes.
      */
     skipPrefixInjection?: boolean;
+    /**
+     * Pi-only: map of messageId → raw-message fingerprint. When a NEW message
+     * text tag is created, its fingerprint is persisted on the tag row so a
+     * later pass can adopt the fallback-id tag onto the real SessionEntry id
+     * (keeping tag_number/§N§ stable). OpenCode omits this → tags store NULL
+     * → adoption never fires. Keyed by the bare messageId (not the `:pN`
+     * contentId) since all parts of a message share one fingerprint.
+     */
+    entryFingerprintByMessageId?: ReadonlyMap<string, string>;
 }
 
 export interface TagTranscriptResult {
@@ -191,6 +200,7 @@ export function tagTranscript(
                     db,
                     targets,
                     skipPrefixInjection,
+                    entryFingerprint: options.entryFingerprintByMessageId?.get(messageId) ?? null,
                 });
                 textOrdinal += 1;
                 continue;
@@ -415,6 +425,7 @@ interface TagTextPartArgs {
     db: ContextDatabase;
     targets: Map<number, TagTarget>;
     skipPrefixInjection: boolean;
+    entryFingerprint: string | null;
 }
 
 function tagTextPart(args: TagTextPartArgs): void {
@@ -426,6 +437,10 @@ function tagTextPart(args: TagTextPartArgs): void {
         "message",
         byteSize(text),
         args.db,
+        0,
+        null,
+        0,
+        args.entryFingerprint,
     );
 
     // Persist the original (pre-tagged) source content so caveman

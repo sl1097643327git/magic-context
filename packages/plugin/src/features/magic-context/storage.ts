@@ -188,7 +188,9 @@ export {
     type SubagentTotals,
 } from "./storage-subagent-invocations";
 export {
+    adoptFallbackTagMessageId,
     deleteTagsByMessageId,
+    findAdoptableFallbackTags,
     getActiveTagsBySession,
     getMaxDroppedTagNumber,
     getMaxTagNumberBySession,

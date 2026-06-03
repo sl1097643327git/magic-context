@@ -36,7 +36,7 @@ export function getSchemaFenceRejection(): {
     return lastSchemaFenceRejection;
 }
 
-export const LATEST_SUPPORTED_VERSION = 26;
+export const LATEST_SUPPORTED_VERSION = 27;
 
 export interface OpenDatabaseOptions {
     dbPath?: string;
@@ -258,6 +258,7 @@ export function initializeDatabase(db: Database): void {
       byte_size INTEGER,
       tag_number INTEGER,
       harness TEXT NOT NULL DEFAULT 'opencode',
+      entry_fingerprint TEXT,
       UNIQUE(session_id, tag_number)
     );
 
@@ -760,6 +761,16 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     // column-existence path for fresh DBs and tests that bypass
     // runMigrations.
     ensureColumn(db, "tags", "tool_owner_message_id", "TEXT DEFAULT NULL");
+    // Pi fallback-tag adoption: fingerprint of the raw message a tag was first
+    // created for, so a later pass can migrate the tag's message_id from the
+    // unstable pi-msg-* fallback to the real SessionEntry id without changing
+    // tag_number (hence §N§). NULL on OpenCode and on any tag created before v27.
+    ensureColumn(db, "tags", "entry_fingerprint", "TEXT");
+    db.exec(
+        `CREATE INDEX IF NOT EXISTS idx_tags_pi_adopt
+            ON tags(session_id, entry_fingerprint)
+            WHERE type='message' AND entry_fingerprint IS NOT NULL`,
+    );
     ensureColumn(db, "session_meta", "system_prompt_tokens", "INTEGER DEFAULT 0");
     ensureColumn(db, "session_meta", "compaction_marker_state", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "key_files", "TEXT DEFAULT ''");

@@ -997,6 +997,27 @@ const MIGRATIONS: Migration[] = [
             ).run();
         },
     },
+    {
+        version: 27,
+        description: "tags.entry_fingerprint for Pi fallback-tag adoption",
+        up: (db: Database) => {
+            // Pi tags the in-flight (newest) message under an unstable
+            // pi-msg-${index} fallback id, then its real SessionEntry id one
+            // pass later — re-tagging it and drifting its §N§ prefix. The
+            // fingerprint (computed from the raw message: responseId + ts +
+            // role + toolCallId + firstTextHash) lets the next pass find the
+            // fallback tag and migrate its message_id in place, keeping the
+            // tag_number (hence §N§ and all per-tag state) stable. Nullable:
+            // OpenCode never writes it (real id on pass 1), so its rows stay
+            // NULL and adoption never fires.
+            ensureColumn(db, "tags", "entry_fingerprint", "TEXT");
+            db.exec(
+                `CREATE INDEX IF NOT EXISTS idx_tags_pi_adopt
+                    ON tags(session_id, entry_fingerprint)
+                    WHERE type='message' AND entry_fingerprint IS NOT NULL`,
+            );
+        },
+    },
 ];
 
 /**
