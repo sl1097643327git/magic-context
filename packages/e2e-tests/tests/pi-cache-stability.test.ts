@@ -275,6 +275,16 @@ describe("pi cache stability", () => {
             },
             async (h) => {
                 h.mock.script([
+                    // Warm-up turn. A fresh Pi session starts at stable-id
+                    // scheme 0; the FIRST pass that resolves real SessionEntry
+                    // ids performs the one-time v25 cutover, which forces an
+                    // execute+materialize regardless of pressure. We burn that
+                    // here so the defer-survival assertion below isn't drained
+                    // by the cutover instead of by a real execute decision.
+                    {
+                        text: "warm-up: absorb the one-time stable-id cutover",
+                        usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 10 },
+                    },
                     {
                         text: "low pressure one",
                         usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 10 },
@@ -289,11 +299,36 @@ describe("pi cache stability", () => {
                     },
                 ]);
 
+                // Warm-up turn: lets the stable-id cutover complete (scheme → 1)
+                // before we queue a drop, so the next turn is a genuine defer.
+                const warm = await h.sendPrompt("warm-up turn", { timeoutMs: 60_000 });
+                expect(warm.sessionId).toBeTruthy();
+
                 const firstText = "pi queued drop target should survive one defer pass";
-                const first = await h.sendPrompt(firstText, { timeoutMs: 60_000 });
+                const first = await h.sendPrompt(firstText, {
+                    timeoutMs: 60_000,
+                    continueSession: true,
+                });
                 expect(first.sessionId).toBeTruthy();
                 await h.waitFor(() => h.countTags(first.sessionId!) > 0, { label: "tag ready" });
-                queueDrop(h, first.sessionId!, 1);
+                // Drop the firstText message's tag. Resolve its tag number from
+                // the DB rather than hardcoding — with the warm-up turn ahead of
+                // it, firstText is no longer guaranteed to be tag 1.
+                const dropTag = readDb(h, (db) => {
+                    const row = db
+                        .prepare(
+                            `SELECT t.tag_number AS n FROM tags t
+                             JOIN source_contents sc
+                               ON sc.session_id = t.session_id AND sc.tag_id = t.tag_number
+                             WHERE t.session_id = ? AND t.type = 'message'
+                               AND sc.content LIKE '%queued drop target%'
+                             ORDER BY t.tag_number DESC LIMIT 1`,
+                        )
+                        .get(first.sessionId!) as { n: number } | undefined;
+                    return row?.n;
+                });
+                expect(dropTag).toBeGreaterThan(0);
+                queueDrop(h, first.sessionId!, dropTag!);
 
                 await h.sendPrompt("second turn stays defer and must not drain pending_ops", {
                     timeoutMs: 60_000,
@@ -301,7 +336,9 @@ describe("pi cache stability", () => {
                 });
                 expect(h.countPendingOps(first.sessionId!)).toBe(1);
                 expect(JSON.stringify(h.mock.lastRequest()!.body)).toContain(firstText);
-                expect(JSON.stringify(h.mock.lastRequest()!.body)).not.toContain("truncated §1§");
+                expect(JSON.stringify(h.mock.lastRequest()!.body)).not.toContain(
+                    `truncated §${dropTag}§`,
+                );
 
                 await h.sendPrompt("third turn sees prior high usage and executes drops", {
                     timeoutMs: 60_000,
@@ -309,7 +346,7 @@ describe("pi cache stability", () => {
                 });
                 expect(h.countPendingOps(first.sessionId!)).toBe(0);
                 expect(h.countDroppedTags(first.sessionId!)).toBeGreaterThanOrEqual(1);
-                expect(JSON.stringify(h.mock.lastRequest()!.body)).toContain("truncated §1§");
+                expect(JSON.stringify(h.mock.lastRequest()!.body)).toContain(`truncated §${dropTag}§`);
             },
         );
     }, 180_000);
