@@ -250,6 +250,20 @@ materialization through its own path, so today's upgrade flow is covered.)
 
 ---
 
+## 13. Instance-disposal cleanup: OpenCode `server.instance.disposed`, Pi `session_shutdown`
+
+OpenCode wires the SDK `server.instance.disposed` event to an orderly per-instance
+cleanup (stop the RPC server, unregister the dream-schedule timer, abort the
+auto-update controller), gated on the disposed `directory` resolving to the
+instance's own project identity (Desktop runs many instances per process, each
+disposed independently). Pi has no `server.instance.disposed` event — it does the
+equivalent teardown in its existing `session_shutdown` handler (drain in-flight
+historian, etc.). Neither harness disposes the native ONNX embedding session on
+teardown: forcing onnxruntime-node's destructor makes the Bun N-API exit crash
+worse (tracked upstream at oven-sh/bun#30291); the OS reclaims that memory on exit.
+
+---
+
 ## Schema-fence rejection surface
 
 When the shared cross-harness `context.db` is migrated to a schema newer than
