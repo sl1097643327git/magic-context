@@ -15,7 +15,7 @@ import PerModelField from "./PerModelField";
 
 const CONFIG_TAB_STORAGE_KEY = "magic-context-dashboard.config-tab";
 const MAGIC_CONTEXT_SCHEMA_URL =
-  "https://raw.githubusercontent.com/cortexkit/opencode-magic-context/master/assets/magic-context.schema.json";
+  "https://raw.githubusercontent.com/cortexkit/magic-context/master/assets/magic-context.schema.json";
 const PI_DEFAULT_CONFIG = `{
   "$schema": "${MAGIC_CONTEXT_SCHEMA_URL}",
   "enabled": true
@@ -2211,7 +2211,7 @@ export default function ConfigEditor(props: { models: string[]; piModels: string
                     when={configTarget() === "pi"}
                     fallback={
                       <span style={{ "font-size": "11px" }}>
-                        Run <code>npx @cortexkit/opencode-magic-context setup</code> to
+                        Run <code>npx @cortexkit/magic-context setup</code> to
                         create one
                       </span>
                     }
