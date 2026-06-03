@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+
+use crate::process_ext::NoWindowExt;
 use std::sync::{OnceLock, RwLock};
 use std::time::Duration;
 
@@ -108,6 +110,7 @@ pub fn resolve_project_identity_strict(directory: &Path) -> Result<String, Ident
         .env("LANG", "C")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .no_window()
         .spawn()
         .map_err(|error| match error.kind() {
             std::io::ErrorKind::NotFound => IdentityErrorClass::GitMissing,

@@ -4,6 +4,7 @@ pub mod db;
 pub mod embedding_probe;
 pub mod log_parser;
 pub mod pi_sessions;
+pub mod process_ext;
 pub mod project_identity;
 
 use std::path::PathBuf;

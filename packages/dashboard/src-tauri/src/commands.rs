@@ -1,6 +1,7 @@
 use crate::embedding_probe::{
     probe_embedding_endpoint, substitute_value, EmbeddingProbeOptions, EmbeddingProbeOutcome,
 };
+use crate::process_ext::NoWindowExtTokio;
 use crate::{config, db, log_parser, AppState};
 use tauri::State;
 
@@ -507,6 +508,7 @@ pub async fn get_available_models() -> Vec<String> {
     for bin in &candidates {
         if let Ok(output) = tokio::process::Command::new(bin)
             .arg("models")
+            .no_window()
             .output()
             .await
         {
@@ -568,6 +570,7 @@ pub async fn get_available_pi_models() -> Vec<String> {
     for bin in &candidates {
         if let Ok(output) = tokio::process::Command::new(bin)
             .arg("--list-models")
+            .no_window()
             .output()
             .await
         {
