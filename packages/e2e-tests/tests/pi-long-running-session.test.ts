@@ -10,7 +10,7 @@ import { computeSyntheticCallId } from "../../plugin/src/hooks/magic-context/tod
 import { PiTestHarness } from "../src/pi-harness";
 import type { MockUsage } from "../src/mock-provider/server";
 
-const HISTORIAN_SYSTEM_MARKER = "You condense long AI coding sessions";
+const HISTORIAN_SYSTEM_MARKER = "the hippocampus of a long-running coding agent";
 
 const LOW_USAGE: MockUsage = {
     input_tokens: 1_000,

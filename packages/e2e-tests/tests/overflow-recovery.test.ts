@@ -43,7 +43,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { TestHarness } from "../src/harness";
 
-const HISTORIAN_MARKER = "You condense long AI coding sessions";
+const HISTORIAN_MARKER = "the hippocampus of a long-running coding agent";
 
 function isHistorian(body: Record<string, unknown>): boolean {
     const sys = body.system;

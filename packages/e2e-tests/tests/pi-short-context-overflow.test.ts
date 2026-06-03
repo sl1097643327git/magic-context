@@ -35,7 +35,7 @@ import { PiTestHarness } from "../src/pi-harness";
  * accumulation symptom that prevented JSONL trimming.
  */
 
-const HISTORIAN_MARKER = "You condense long AI coding sessions";
+const HISTORIAN_MARKER = "the hippocampus of a long-running coding agent";
 
 function isHistorian(body: Record<string, unknown>): boolean {
     const sys = body.system;

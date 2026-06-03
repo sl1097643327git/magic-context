@@ -3,7 +3,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { PiTestHarness } from "../src/pi-harness";
 
-const HISTORIAN_SYSTEM_MARKER = "You condense long AI coding sessions";
+const HISTORIAN_SYSTEM_MARKER = "the hippocampus of a long-running coding agent";
 const HISTORIAN_DELAY_MS = 8_000;
 
 function isHistorianRequest(body: Record<string, unknown>): boolean {

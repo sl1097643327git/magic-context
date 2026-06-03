@@ -38,7 +38,7 @@ import { TestHarness } from "../src/harness";
  */
 
 // Historian system prompt marker, see compartment-prompt.ts.
-const HISTORIAN_SYSTEM_MARKER = "You condense long AI coding sessions";
+const HISTORIAN_SYSTEM_MARKER = "the hippocampus of a long-running coding agent";
 
 const HISTORIAN_DELAY_MS = 8_000;
 const MAIN_LATENCY_BUDGET_MS = 5_000;

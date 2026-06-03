@@ -22,7 +22,7 @@ import { TestHarness } from "../src/harness";
  * persisted → in-progress flag is cleared.
  */
 
-const HISTORIAN_SYSTEM_MARKER = "You condense long AI coding sessions";
+const HISTORIAN_SYSTEM_MARKER = "the hippocampus of a long-running coding agent";
 
 function isHistorianRequest(body: Record<string, unknown>): boolean {
     const system = body.system;

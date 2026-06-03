@@ -36,7 +36,7 @@ import { TestHarness } from "../src/harness";
  * canonical state for "did historian publish write a pending blob".
  */
 
-const HISTORIAN_SYSTEM_MARKER = "You condense long AI coding sessions";
+const HISTORIAN_SYSTEM_MARKER = "the hippocampus of a long-running coding agent";
 
 function isHistorianRequest(body: Record<string, unknown>): boolean {
     const system = body.system;

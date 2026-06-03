@@ -78,6 +78,7 @@ echo ""
 PLUGIN_DIR="packages/plugin"
 PI_DIR="packages/pi-plugin"
 CLI_DIR="packages/cli"
+E2E_DIR="packages/e2e-tests"
 
 # Run `bun test` for a package and gate on a TRUE pass, not just "no fail line".
 #
@@ -151,6 +152,45 @@ run_package_tests "cli" "$CLI_DIR"
 
 echo "  [cli] bun build..."
 bun run --cwd "$CLI_DIR" build 2>&1 || { echo "Error: CLI build failed"; exit 1; }
+
+# Host behavior E2E suite (packages/e2e-tests). This is the deep suite that
+# spawns a real `opencode serve` (and resolves Pi from node_modules) against a
+# mock provider — it lives outside the per-package `bun test` runs above and was
+# previously caught only in CI's host-e2e jobs. Running it here means a broken
+# e2e fails the release locally instead of after a full tag → CI round-trip.
+#
+# Split OpenCode (non-pi files) vs Pi (pi-*.test.ts) exactly like CI's two host
+# jobs, so the local gate mirrors what CI enforces. NODE_ENV="" matches the
+# normal runtime the spawned opencode subprocess expects (a stray NODE_ENV=test
+# changes plugin logging/behavior). opencode must be on PATH.
+run_e2e_group() {
+  local label="$1" files="$2" output status
+  echo "  [e2e:$label] bun test..."
+  status=0
+  output=$(cd "$E2E_DIR" && NODE_ENV="" bun test --timeout 600000 $files 2>&1) || status=$?
+  echo "$output"
+  if echo "$output" | grep -qE "[1-9][0-9]* fail"; then
+    echo "Error: e2e ($label) failed (fail count > 0)"
+    exit 1
+  fi
+  if ! echo "$output" | grep -qE "[1-9][0-9]* pass"; then
+    echo "Error: e2e ($label) produced no passing-test summary (crash, timeout, or zero tests collected)"
+    exit 1
+  fi
+  if [ "$status" -ne 0 ]; then
+    echo "  [e2e:$label] note: tests passed but Bun exited $status (known post-completion panic) — tolerated"
+  fi
+}
+
+if ! command -v opencode >/dev/null 2>&1; then
+  echo "Error: 'opencode' not found on PATH — the host E2E suite spawns 'opencode serve'."
+  echo "       Install it (curl -fsSL https://opencode.ai/install | bash) and ensure ~/.opencode/bin is on PATH."
+  exit 1
+fi
+E2E_OC_FILES=$(ls "$E2E_DIR"/tests/*.test.ts | grep -v "/pi-" | sed "s#$E2E_DIR/##" | tr '\n' ' ')
+E2E_PI_FILES=$(ls "$E2E_DIR"/tests/pi-*.test.ts | sed "s#$E2E_DIR/##" | tr '\n' ' ')
+run_e2e_group "opencode" "$E2E_OC_FILES"
+run_e2e_group "pi" "$E2E_PI_FILES"
 
 echo "  ✓ All checks passed"
 echo ""

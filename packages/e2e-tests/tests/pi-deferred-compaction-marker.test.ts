@@ -42,7 +42,7 @@ import { PiTestHarness } from "../src/pi-harness";
  * never called — the JSONL grew unbounded until provider overflow.
  */
 
-const HISTORIAN_SYSTEM_MARKER = "You condense long AI coding sessions";
+const HISTORIAN_SYSTEM_MARKER = "the hippocampus of a long-running coding agent";
 
 interface MarkerRow {
     pending_compaction_marker_state: string | null;
