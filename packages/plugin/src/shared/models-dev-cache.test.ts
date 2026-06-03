@@ -238,7 +238,7 @@ describe("models-dev-cache", () => {
         expect(getModelsDevContextLimit("anthropic", "claude-4")).toBeUndefined();
     });
 
-    test("API cache takes priority over file cache", async () => {
+    test("takes the larger limit when both layers know the model (API larger)", async () => {
         // Seed file layer with one value.
         const opencodeDir = join(tempDir, "opencode");
         mkdirSync(opencodeDir, { recursive: true });
@@ -252,7 +252,7 @@ describe("models-dev-cache", () => {
         // Sanity: file layer returns 100000 before API refresh.
         expect(getModelsDevContextLimit("anthropic", "claude-4")).toBe(100000);
 
-        // Mock client providing DIFFERENT value via API.
+        // Mock client providing a LARGER value via API.
         const mockClient = {
             config: {
                 providers: async () => ({
@@ -271,12 +271,76 @@ describe("models-dev-cache", () => {
         };
         await refreshModelLimitsFromApi(mockClient);
 
-        // API value wins.
+        // Larger (API) value wins.
         expect(getModelsDevContextLimit("anthropic", "claude-4")).toBe(1000000);
 
         const state = getModelsDevCacheState();
         expect(state.apiLoaded).toBe(true);
         expect(state.apiCount).toBe(1);
+    });
+
+    test("file value wins when the live API reports a smaller (wrong) limit (issue #117)", async () => {
+        // The ollama-cloud scenario: models.dev has the correct large window, but
+        // ollama reports its tiny default num_ctx via the live /config/providers
+        // API. The larger, correct file value must win so pressure isn't bogus.
+        const opencodeDir = join(tempDir, "opencode");
+        mkdirSync(opencodeDir, { recursive: true });
+        writeFileSync(
+            join(opencodeDir, "models.json"),
+            JSON.stringify({
+                "ollama-cloud": {
+                    models: { "deepseek-v4-pro": { limit: { context: 1048576 } } },
+                },
+            }),
+        );
+
+        const mockClient = {
+            config: {
+                providers: async () => ({
+                    data: {
+                        providers: [
+                            {
+                                id: "ollama-cloud",
+                                models: {
+                                    // Bogus tiny default num_ctx from ollama.
+                                    "deepseek-v4-pro": { limit: { context: 8192 } },
+                                },
+                            },
+                        ],
+                    },
+                }),
+            },
+        };
+        await refreshModelLimitsFromApi(mockClient);
+
+        // Larger (file/models.dev) value wins, not the tiny live-API value.
+        expect(getModelsDevContextLimit("ollama-cloud", "deepseek-v4-pro")).toBe(1048576);
+    });
+
+    test("matches a tagged ollama model against its tag-less models.dev entry (issue #117)", () => {
+        // ollama invokes cloud models with a tag (deepseek-v4-pro:cloud) while
+        // models.dev stores them tag-less (deepseek-v4-pro).
+        const opencodeDir = join(tempDir, "opencode");
+        mkdirSync(opencodeDir, { recursive: true });
+        writeFileSync(
+            join(opencodeDir, "models.json"),
+            JSON.stringify({
+                "ollama-cloud": {
+                    models: {
+                        "deepseek-v4-pro": { limit: { context: 1048576 } },
+                        // A legitimately-tagged model must still match exactly.
+                        "gemma3:27b": { limit: { context: 131072 } },
+                    },
+                },
+            }),
+        );
+
+        // Tagged invocation falls back to the tag-less entry.
+        expect(getModelsDevContextLimit("ollama-cloud", "deepseek-v4-pro:cloud")).toBe(1048576);
+        // Exact tagged match still wins (no wrongful collapse).
+        expect(getModelsDevContextLimit("ollama-cloud", "gemma3:27b")).toBe(131072);
+        // Unknown tagged model with no tag-less base stays undefined.
+        expect(getModelsDevContextLimit("ollama-cloud", "nonexistent:cloud")).toBeUndefined();
     });
 
     test("refreshModelLimitsFromApi tolerates empty/malformed responses", async () => {

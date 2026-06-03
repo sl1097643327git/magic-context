@@ -298,19 +298,58 @@ export async function refreshModelLimitsFromApi(client: OpencodeClientLike): Pro
  * Returns `undefined` if neither layer knows the model.
  */
 export function getModelsDevContextLimit(providerID: string, modelID: string): number | undefined {
-    const key = `${providerID}/${modelID}`;
-
-    if (apiCache) {
-        const fromApi = apiCache.get(key)?.limit;
-        if (typeof fromApi === "number") return fromApi;
-    }
-
     const now = Date.now();
     if (!fileCache || now - fileLastAttempt > RELOAD_INTERVAL_MS) {
         fileLastAttempt = now;
         fileCache = loadModelsDevMetadataFromFile();
     }
-    return fileCache.get(key)?.limit;
+
+    const fromApi = lookupLimitWithTagFallback(apiCache, providerID, modelID);
+    const fromFile = lookupLimitWithTagFallback(fileCache, providerID, modelID);
+
+    // When BOTH layers know the model, take the LARGER limit. Providers never
+    // under-report their real window, so a suspiciously small value — e.g.
+    // ollama reporting its default `num_ctx` (4k/8k) for a cloud model via the
+    // live `/config/providers` API — must not override the correct, larger
+    // models.dev value. A genuinely smaller real limit (provider actually
+    // rejects at N) is captured separately via the overflow-detection path
+    // (detectedContextLimit), not here. (issue #117)
+    if (typeof fromApi === "number" && typeof fromFile === "number") {
+        return Math.max(fromApi, fromFile);
+    }
+    return fromApi ?? fromFile;
+}
+
+/**
+ * Look up a model's limit in one cache layer, with an ollama-style tag-suffix
+ * fallback.
+ *
+ * models.dev stores some models WITH a colon tag (e.g. `gemma3:27b`,
+ * `deepseek-v3.1:671b`) and ollama-cloud base models WITHOUT one
+ * (`deepseek-v4-pro`). But ollama invokes cloud models with a tag at runtime
+ * (`deepseek-v4-pro:cloud`), so OpenCode reports the tagged id. An exact-only
+ * match therefore misses → falls back to the 128k default → wrong pressure
+ * denominator (issue #117).
+ *
+ * Strategy: exact match first (never collapses a legitimately-tagged model),
+ * then retry once with the last `:tag` segment stripped.
+ */
+function lookupLimitWithTagFallback(
+    cache: Map<string, CachedModelMetadata> | null,
+    providerID: string,
+    modelID: string,
+): number | undefined {
+    if (!cache) return undefined;
+    const exact = cache.get(`${providerID}/${modelID}`)?.limit;
+    if (typeof exact === "number") return exact;
+
+    const colonIdx = modelID.lastIndexOf(":");
+    if (colonIdx > 0) {
+        const baseModel = modelID.slice(0, colonIdx);
+        const fallback = cache.get(`${providerID}/${baseModel}`)?.limit;
+        if (typeof fallback === "number") return fallback;
+    }
+    return undefined;
 }
 
 /** Clear in-memory caches (for testing). */
