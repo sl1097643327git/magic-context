@@ -8,33 +8,6 @@ export interface KeyFileEntry {
 }
 
 /**
- * Get the pinned key files for a session from session_meta.
- * Returns empty array if not set or parse fails.
- */
-export function getKeyFiles(db: Database, sessionId: string): KeyFileEntry[] {
-    try {
-        const row = db
-            .prepare("SELECT key_files FROM session_meta WHERE session_id = ?")
-            .get(sessionId) as { key_files?: string | null } | null;
-
-        if (!row?.key_files) return [];
-
-        const parsed = JSON.parse(row.key_files);
-        if (!Array.isArray(parsed)) return [];
-
-        return parsed.filter(
-            (e: unknown): e is KeyFileEntry =>
-                typeof e === "object" &&
-                e !== null &&
-                typeof (e as KeyFileEntry).filePath === "string" &&
-                typeof (e as KeyFileEntry).tokens === "number",
-        );
-    } catch {
-        return [];
-    }
-}
-
-/**
  * Set the pinned key files for a session.
  */
 export function setKeyFiles(db: Database, sessionId: string, files: KeyFileEntry[]): void {

@@ -1,15 +1,5 @@
-export function isAgentDisabled(agent?: { disable?: boolean } | null): boolean {
-    return agent?.disable === true;
-}
-
 export function isDreamerRunnable(config: { dreamer?: { disable?: boolean } | null }): boolean {
     return !!config.dreamer && config.dreamer.disable !== true;
-}
-
-export function isDreamerScheduled(config: {
-    dreamer?: { disable?: boolean; schedule?: string } | null;
-}): boolean {
-    return isDreamerRunnable(config) && !!config.dreamer?.schedule?.trim();
 }
 
 export function isSidekickRunnable(config: { sidekick?: { disable?: boolean } | null }): boolean {

@@ -1,7 +1,4 @@
-import type { AgentConfig } from "@opencode-ai/sdk";
 import { z } from "zod";
-
-export const MAGIC_CONTEXT_AGENT_OVERRIDE_KEYS = ["historian", "dreamer", "sidekick"] as const;
 
 const PermissionValueSchema = z.enum(["ask", "allow", "deny"]);
 
@@ -46,5 +43,3 @@ export const AgentOverrideConfigSchema = z.object({
         .optional()
         .describe("Fallback model IDs if primary is unavailable"),
 });
-
-export type AgentOverrideConfig = z.infer<typeof AgentOverrideConfigSchema> & Partial<AgentConfig>;

@@ -3,11 +3,6 @@ import type { Database } from "../../../shared/sqlite";
 import { enqueueDream } from "./queue";
 import { getDreamState } from "./storage-dream-state";
 
-export interface DreamScheduleConfig {
-    /** Time range string like "02:00-06:00" */
-    schedule: string;
-}
-
 /** Parse "HH:MM-HH:MM" into start/end minutes since midnight. */
 export function parseScheduleWindow(
     schedule: string,
