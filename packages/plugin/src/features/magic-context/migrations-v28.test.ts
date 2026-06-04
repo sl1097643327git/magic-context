@@ -47,11 +47,11 @@ describe("migration v28 — git sweep coordinator", () => {
                     "idx_git_sweep_coordinator_last_swept",
                 ]),
             );
-            expect(
-                db
-                    .prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1")
-                    .get(),
-            ).toEqual({ version: 28 });
+            // v28 added this table; later migrations may push the max higher.
+            const maxVersion = db
+                .prepare("SELECT MAX(version) AS version FROM schema_migrations")
+                .get() as { version: number };
+            expect(maxVersion.version).toBeGreaterThanOrEqual(28);
         } finally {
             closeQuietly(db);
         }

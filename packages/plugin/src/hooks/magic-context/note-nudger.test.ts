@@ -77,7 +77,8 @@ function makeDb(): Database {
             last_checked_at INTEGER,
             ready_at INTEGER,
             ready_reason TEXT,
-      harness TEXT NOT NULL DEFAULT 'opencode'
+      harness TEXT NOT NULL DEFAULT 'opencode',
+      anchor_ordinal INTEGER
     );
     `);
     dbs.push(db);

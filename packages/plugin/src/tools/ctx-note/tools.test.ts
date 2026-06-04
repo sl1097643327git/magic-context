@@ -18,6 +18,13 @@ function createTestDb(): Database {
       last_checked_at INTEGER,
       ready_at INTEGER,
       ready_reason TEXT,
+      harness TEXT NOT NULL DEFAULT 'opencode',
+      anchor_ordinal INTEGER
+    );
+    CREATE TABLE message_history_index (
+      session_id TEXT PRIMARY KEY,
+      last_indexed_ordinal INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL DEFAULT 0,
       harness TEXT NOT NULL DEFAULT 'opencode'
     );
   `);
@@ -51,6 +58,32 @@ describe("createCtxNoteTools", () => {
         expect(readResult).toContain("## Session Notes");
         expect(readResult).toContain("#1");
         expect(readResult).toContain("Remember the user prefers build on integrate.");
+    });
+
+    it("anchors a note to the live message-tail ordinal and renders it with an expand hint", async () => {
+        db.prepare(
+            "INSERT INTO message_history_index (session_id, last_indexed_ordinal, updated_at) VALUES (?, ?, ?)",
+        ).run("ses-note", 512, 1);
+
+        await tools.ctx_note.execute(
+            { action: "write", content: "Anchored decision" },
+            toolContext(),
+        );
+        const readResult = await tools.ctx_note.execute({ action: "read" }, toolContext());
+
+        expect(readResult).toContain("↳ @msg 512");
+        expect(readResult).toContain("ctx_expand(start=N-x, end=N)");
+    });
+
+    it("omits the anchor (and hint) when the session has no indexed tail yet", async () => {
+        await tools.ctx_note.execute(
+            { action: "write", content: "Unanchored decision" },
+            toolContext(),
+        );
+        const readResult = await tools.ctx_note.execute({ action: "read" }, toolContext());
+
+        expect(readResult).not.toContain("↳ @msg");
+        expect(readResult).not.toContain("ctx_expand(start=N-x");
     });
 
     it("requires content for writes", async () => {

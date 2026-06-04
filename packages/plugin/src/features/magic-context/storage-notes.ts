@@ -17,6 +17,12 @@ export interface Note {
     lastCheckedAt: number | null;
     readyAt: number | null;
     readyReason: string | null;
+    /** Message ordinal of the live tail when the note was written, so the note
+     *  can be traced back to the conversation that produced it. The agent reads
+     *  this as the upper bound and expands `anchorOrdinal - x .. anchorOrdinal`
+     *  via ctx_expand at its own discretion. Null for notes written before this
+     *  was tracked, or when the session had no indexed messages yet. */
+    anchorOrdinal: number | null;
 }
 
 export interface GetNotesOptions {
@@ -55,11 +61,13 @@ interface NoteRow {
     last_checked_at: number | null;
     ready_at: number | null;
     ready_reason: string | null;
+    anchor_ordinal?: number | null;
 }
 
 interface SessionNoteInput {
     sessionId: string;
     content: string;
+    anchorOrdinal?: number | null;
 }
 
 interface SmartNoteInput {
@@ -67,6 +75,7 @@ interface SmartNoteInput {
     sessionId?: string;
     projectPath: string;
     surfaceCondition: string;
+    anchorOrdinal?: number | null;
 }
 
 const NOTE_TYPES = new Set<NoteType>(["session", "smart"]);
@@ -116,6 +125,7 @@ function toNote(row: NoteRow): Note {
         lastCheckedAt: toNullableNumber(row.last_checked_at),
         readyAt: toNullableNumber(row.ready_at),
         readyReason: toNullableString(row.ready_reason),
+        anchorOrdinal: toNullableNumber(row.anchor_ordinal),
     };
 }
 
@@ -195,7 +205,7 @@ export function addNote(
         type === "session"
             ? db
                   .prepare(
-                      "INSERT INTO notes (type, status, content, session_id, created_at, updated_at, harness) VALUES ('session', 'active', ?, ?, ?, ?, ?) RETURNING *",
+                      "INSERT INTO notes (type, status, content, session_id, created_at, updated_at, harness, anchor_ordinal) VALUES ('session', 'active', ?, ?, ?, ?, ?, ?) RETURNING *",
                   )
                   .get(
                       options.content,
@@ -203,10 +213,11 @@ export function addNote(
                       now,
                       now,
                       getHarness(),
+                      (options as SessionNoteInput).anchorOrdinal ?? null,
                   )
             : db
                   .prepare(
-                      "INSERT INTO notes (type, status, content, session_id, project_path, surface_condition, created_at, updated_at, harness) VALUES ('smart', 'pending', ?, ?, ?, ?, ?, ?, ?) RETURNING *",
+                      "INSERT INTO notes (type, status, content, session_id, project_path, surface_condition, created_at, updated_at, harness, anchor_ordinal) VALUES ('smart', 'pending', ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *",
                   )
                   .get(
                       options.content,
@@ -216,6 +227,7 @@ export function addNote(
                       now,
                       now,
                       getHarness(),
+                      (options as SmartNoteInput).anchorOrdinal ?? null,
                   );
 
     if (!isNoteRow(result)) {

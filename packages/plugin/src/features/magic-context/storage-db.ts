@@ -36,7 +36,7 @@ export function getSchemaFenceRejection(): {
     return lastSchemaFenceRejection;
 }
 
-export const LATEST_SUPPORTED_VERSION = 28;
+export const LATEST_SUPPORTED_VERSION = 29;
 
 export interface OpenDatabaseOptions {
     dbPath?: string;
@@ -945,6 +945,8 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     // table_info check needs the table to exist. Order: initializeDatabase()
     // runs before runMigrations(), so notes won't exist yet on a fresh DB
     // here. Migration v6 handles `notes` separately (see migrations.ts).
+    // notes.anchor_ordinal is added by migration v29 for the same reason — it
+    // cannot go here because the table doesn't exist yet on a fresh DB.
 }
 
 /**

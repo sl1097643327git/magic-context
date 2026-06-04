@@ -1046,6 +1046,33 @@ const MIGRATIONS: Migration[] = [
             `);
         },
     },
+    {
+        version: 29,
+        description: "Add anchor_ordinal to notes (traceback to the conversation tail)",
+        up: (db: Database) => {
+            // The notes table is created by migration v1, so the column add lives
+            // in a migration (initializeDatabase runs before runMigrations, so an
+            // ensureColumn there would precede the table on a fresh DB). Nullable:
+            // pre-existing notes keep NULL, which renders without an anchor.
+            //
+            // Guard on table existence: in the real openDatabase flow `notes`
+            // always exists by here (v1 creates it). But isolated migration
+            // tests seed a partial schema at a high version (skipping v1), so a
+            // bare ALTER would throw "no such table" — skip cleanly in that case.
+            const notesExists = db
+                .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='notes'")
+                .get();
+            if (!notesExists) {
+                return;
+            }
+            const columns = db.prepare("PRAGMA table_info(notes)").all() as Array<{
+                name?: string;
+            }>;
+            if (!columns.some((column) => column.name === "anchor_ordinal")) {
+                db.exec("ALTER TABLE notes ADD COLUMN anchor_ordinal INTEGER");
+            }
+        },
+    },
 ];
 
 /**

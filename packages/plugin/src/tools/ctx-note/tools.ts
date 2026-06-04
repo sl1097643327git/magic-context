@@ -1,4 +1,5 @@
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
+import { getLastIndexedOrdinal } from "../../features/magic-context/message-index";
 import {
     addNote,
     dismissNote,
@@ -25,11 +26,28 @@ export interface CtxNoteToolDeps {
     resolveProjectPath?: (directory: string) => string;
 }
 
+/** Capture the live-tail message ordinal so a note can be traced back to the
+ *  conversation that produced it. Best-effort: returns null when there are no
+ *  indexed messages yet (ordinal 0) or the lookup fails, in which case the note
+ *  is stored without an anchor. */
+function captureAnchorOrdinal(db: Database, sessionId: string): number | null {
+    try {
+        const ordinal = getLastIndexedOrdinal(db, sessionId);
+        return ordinal > 0 ? ordinal : null;
+    } catch {
+        return null;
+    }
+}
+
+function anchorSuffix(note: Note): string {
+    return note.anchorOrdinal !== null ? ` ↳ @msg ${note.anchorOrdinal}` : "";
+}
+
 function formatNoteLine(note: Note): string {
     const statusSuffix = note.status === "active" ? "" : ` (${note.status})`;
 
     if (note.type === "session") {
-        return `- **#${note.id}**${statusSuffix}: ${note.content}`;
+        return `- **#${note.id}**${statusSuffix}: ${note.content}${anchorSuffix(note)}`;
     }
 
     const conditionText =
@@ -38,7 +56,7 @@ function formatNoteLine(note: Note): string {
             : (note.surfaceCondition ?? "No condition recorded");
     const conditionLabel = note.status === "ready" ? "Condition met" : "Condition";
 
-    return `- **#${note.id}**${statusSuffix}: ${note.content}\n  ${conditionLabel}: ${conditionText}`;
+    return `- **#${note.id}**${statusSuffix}: ${note.content}${anchorSuffix(note)}\n  ${conditionLabel}: ${conditionText}`;
 }
 
 const DISMISS_FOOTER = '\n\nTo dismiss a stale note: ctx_note(action="dismiss", note_id=N)';
@@ -165,6 +183,13 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                     return "Error: 'content' is required when action is 'write'.";
                 }
 
+                // Anchor the note to the live conversation tail so it can be
+                // traced back later. The agent reads this as the upper bound and
+                // expands `anchorOrdinal - x .. anchorOrdinal` via ctx_expand at
+                // its own discretion. Best-effort: 0 (no indexed messages yet)
+                // stores null and the note simply renders without an anchor.
+                const anchorOrdinal = captureAnchorOrdinal(deps.db, sessionId);
+
                 // Smart note — project-scoped with condition evaluation by dreamer
                 if (args.surface_condition?.trim()) {
                     if (!deps.dreamerEnabled) {
@@ -178,12 +203,13 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                         projectPath: projectIdentity,
                         sessionId,
                         surfaceCondition: args.surface_condition.trim(),
+                        anchorOrdinal,
                     });
                     return `Created smart note #${note.id}. Dreamer will evaluate the condition during nightly runs:\n- Content: ${content}\n- Condition: ${args.surface_condition.trim()}`;
                 }
 
                 // Simple session note
-                const note = addNote(deps.db, "session", { sessionId, content });
+                const note = addNote(deps.db, "session", { sessionId, content, anchorOrdinal });
                 return `Saved session note #${note.id}. Historian will rewrite or deduplicate notes as needed.`;
             }
 
@@ -253,7 +279,14 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                 return "## Notes\n\nNo session notes or smart notes.";
             }
 
-            return sections.join("\n\n") + DISMISS_FOOTER;
+            const body = sections.join("\n\n");
+            // Only surface the anchor hint when at least one note carries one,
+            // so notes written before anchoring (or with no indexed tail) don't
+            // advertise a capability their output doesn't show.
+            const anchorHint = body.includes("↳ @msg ")
+                ? "\n\n↳ @msg N marks the conversation tail when a note was written. To see what led to it: ctx_expand(start=N-x, end=N) (pick x for how far back to look)."
+                : "";
+            return body + anchorHint + DISMISS_FOOTER;
         },
     });
 }
