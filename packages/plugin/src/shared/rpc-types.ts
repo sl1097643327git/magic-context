@@ -77,7 +77,9 @@ export interface SidebarSnapshot {
      * the runtime `RecompProgress` shape from compartment-runner-types.ts.
      */
     recompProgress?: {
-        phase: "recomp" | "migration" | "done" | "failed";
+        /** "recomp" → "Recomp" labels; "upgrade" → "Upgrade" labels. */
+        kind?: "recomp" | "upgrade";
+        phase: "recomp" | "migration" | "done" | "failed" | "skipped";
         processedMessages: number;
         totalMessages: number;
         passCount: number;

@@ -451,6 +451,7 @@ export function buildSidebarSnapshot(
                 const p = liveSessionState?.recompProgressBySession.get(sessionId);
                 if (!p) return null;
                 return {
+                    kind: p.kind ?? "recomp",
                     phase: p.phase,
                     processedMessages: p.processedMessages,
                     totalMessages: p.totalMessages,
@@ -478,6 +479,7 @@ export function buildSidebarSnapshot(
         return {
             ...empty,
             recompProgress: {
+                kind: p.kind ?? "recomp",
                 phase: p.phase,
                 processedMessages: p.processedMessages,
                 totalMessages: p.totalMessages,

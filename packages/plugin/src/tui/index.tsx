@@ -324,11 +324,15 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
 
             {/* Recomp / session-upgrade live progress (full width, only while
                 running or just finished — dogfood 2026-05-30). */}
-            {s().recompProgress && (
+            {s().recompProgress && (() => {
+                const p = s().recompProgress!
+                // Label follows the flow that started the run, so a plain
+                // /ctx-recomp never reads as an "Upgrade" (dogfood 2026-06-04).
+                const verb = p.kind === "upgrade" ? "Upgrade" : "Recomp"
+                return (
                 <box marginTop={1} width="100%" flexDirection="column">
-                    <text fg={t().text}><b>Recomp / Upgrade</b></text>
+                    <text fg={t().text}><b>{verb}</b></text>
                     {(() => {
-                        const p = s().recompProgress!
                         if (p.phase === "recomp") {
                             const frac = p.totalMessages > 0 ? p.processedMessages / p.totalMessages : 0
                             const width = 24
@@ -336,20 +340,23 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                             const bar = p.totalMessages > 0
                                 ? `[${"█".repeat(filled)}${"░".repeat(width - filled)}]`
                                 : "(starting…)"
+                            const activeLabel = p.kind === "upgrade" ? "upgrading" : "comparting"
                             return (
                                 <>
-                                    <R t={t()} l="upgrading" v={p.totalMessages > 0 ? `${bar} ${Math.round(frac * 100)}%` : bar} fg={t().warning} />
+                                    <R t={t()} l={activeLabel} v={p.totalMessages > 0 ? `${bar} ${Math.round(frac * 100)}%` : bar} fg={t().warning} />
                                     {p.note ? <R t={t()} l="Status" v={p.note} fg={t().textMuted} /> : null}
                                     <R t={t()} l="Compartments" v={`${p.compartmentsCreated} (${p.passCount} pass${p.passCount === 1 ? "" : "es"})`} fg={t().textMuted} />
                                 </>
                             )
                         }
                         if (p.phase === "migration") return <R t={t()} l="Status" v={p.note ?? "Migrating memories ⟳"} fg={t().warning} />
-                        if (p.phase === "done") return <R t={t()} l="Status" v="✓ Upgrade complete" fg={t().accent} />
-                        return <R t={t()} l="Status" v={`✗ Failed${p.message ? `: ${p.message}` : ""}`} fg={t().error} />
+                        if (p.phase === "done") return <R t={t()} l="Status" v={`✓ ${verb} complete`} fg={t().accent} />
+                        if (p.phase === "skipped") return <R t={t()} l="Status" v={`${verb} skipped — retry shortly${p.message ? `: ${p.message}` : ""}`} fg={t().textMuted} />
+                        return <R t={t()} l="Status" v={`✗ ${verb} failed${p.message ? `: ${p.message}` : ""}`} fg={t().error} />
                     })()}
                 </box>
-            )}
+                )
+            })()}
 
             {/* 2-column layout */}
             <box flexDirection="row" width="100%" marginTop={1} gap={4}>
@@ -457,7 +464,9 @@ async function showRecompDialog(api: TuiPluginApi, targetSessionId = getSessionI
         <api.ui.DialogConfirm
             title="⚠️ Recomp Confirmation"
             message={[
-                `You have ${count} compartments.`,
+                count === 0
+                    ? "This session has no compartments yet — recomp will build them from raw history."
+                    : `You have ${count} compartments.`,
                 "",
                 "Recomp will regenerate all compartments and facts from raw history.",
                 "This may take a long time and consume significant tokens.",

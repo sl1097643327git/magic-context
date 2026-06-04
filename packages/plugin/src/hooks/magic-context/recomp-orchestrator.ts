@@ -81,6 +81,14 @@ export function isRecompFailure(message: string): boolean {
     return /—\s*(Failed|Skipped)/.test(message);
 }
 
+/** A SKIP (vs a true failure): the run no-op'd because the compartment-state
+ *  lease was busy (incremental historian comparting the tail, or another process
+ *  mutating state). Transient — retrying in a moment succeeds. Matches the
+ *  "— Skipped" heading AND the suffix-less lease/already-running no-op text. */
+export function isRecompSkip(message: string): boolean {
+    return /—\s*Skipped|already mutating compartment state|already running/i.test(message);
+}
+
 /** Positive full-success predicate: the recomp rebuilt the ENTIRE requested
  *  range, headed "## Magic Recomp — Complete". This is stricter than
  *  `!isRecompFailure(...)`: a "— Partial" outcome publishes a valid prefix
@@ -136,9 +144,11 @@ export function setRecompStarting(
     liveSessionState: LiveSessionState,
     sessionId: string,
     note: string,
+    kind: "recomp" | "upgrade" = "recomp",
 ): void {
     liveSessionState.recompProgressBySession.set(sessionId, {
         sessionId,
+        kind,
         phase: "recomp",
         processedMessages: 0,
         totalMessages: 0,
@@ -173,12 +183,15 @@ export function setRecompNote(
 export function setRecompTerminal(
     liveSessionState: LiveSessionState,
     sessionId: string,
-    phase: "done" | "failed",
+    phase: "done" | "failed" | "skipped",
     message: string,
 ): void {
     const existing = liveSessionState.recompProgressBySession.get(sessionId);
     liveSessionState.recompProgressBySession.set(sessionId, {
         sessionId,
+        // Preserve the flow kind set by setRecompStarting so the terminal entry
+        // keeps "Recomp" vs "Upgrade" labeling.
+        kind: existing?.kind ?? "recomp",
         phase,
         processedMessages: existing?.processedMessages ?? 0,
         totalMessages: existing?.totalMessages ?? 0,
@@ -188,10 +201,12 @@ export function setRecompTerminal(
         updatedAt: Date.now(),
         message,
     });
-    if (phase === "done") {
+    // "done" and the transient "skipped" both auto-clear after a grace period;
+    // "failed" persists until the next run so the reason stays visible.
+    if (phase === "done" || phase === "skipped") {
         const t = setTimeout(() => {
             const cur = liveSessionState.recompProgressBySession.get(sessionId);
-            if (cur?.phase === "done") liveSessionState.recompProgressBySession.delete(sessionId);
+            if (cur?.phase === phase) liveSessionState.recompProgressBySession.delete(sessionId);
         }, RECOMP_DONE_GRACE_MS);
         (t as { unref?: () => void }).unref?.();
     }
@@ -228,9 +243,16 @@ function buildRecompDeps(ctx: ManagedRecompContext, sessionId: string) {
         onDeferredMarkerPending: (sid: string) => {
             ctx.liveSessionState.deferredHistoryRefreshSessions.add(sid);
         },
-        // Live progress (was missing on the hook/command path):
+        // Live progress (was missing on the hook/command path). The runner emits
+        // per-pass entries with no `kind` (it doesn't know the user-facing flow);
+        // preserve the kind set by setRecompStarting so labels stay consistent.
         onRecompProgress: (p: RecompProgress) => {
-            ctx.liveSessionState.recompProgressBySession.set(sessionId, p);
+            const prevKind =
+                ctx.liveSessionState.recompProgressBySession.get(sessionId)?.kind ?? "recomp";
+            ctx.liveSessionState.recompProgressBySession.set(sessionId, {
+                ...p,
+                kind: p.kind ?? prevKind,
+            });
         },
     };
 }
@@ -274,13 +296,21 @@ export async function runManagedRecomp(
     options?: { range?: PartialRecompRange },
 ): Promise<string> {
     // Immediate sidebar feedback before any async work (see setRecompStarting).
-    setRecompStarting(ctx.liveSessionState, sessionId, "Starting recomp…");
+    setRecompStarting(ctx.liveSessionState, sessionId, "Starting recomp…", "recomp");
     try {
         const message = await executeContextRecomp(buildRecompDeps(ctx, sessionId), options);
+        // A lease/already-running SKIP is transient (the incremental historian is
+        // briefly mutating compartment state), NOT a hard failure — surface it as
+        // the neutral "skipped" state with retry guidance instead of red "failed".
+        const terminalPhase = isRecompSkip(message)
+            ? "skipped"
+            : isRecompFailure(message)
+              ? "failed"
+              : "done";
         setRecompTerminal(
             ctx.liveSessionState,
             sessionId,
-            isRecompFailure(message) ? "failed" : "done",
+            terminalPhase,
             extractRecompReason(message),
         );
         return message;
@@ -300,7 +330,7 @@ export async function runManagedUpgrade(
     sessionId: string,
 ): Promise<string> {
     // Immediate sidebar feedback before any async work (see setRecompStarting).
-    setRecompStarting(ctx.liveSessionState, sessionId, "Starting upgrade…");
+    setRecompStarting(ctx.liveSessionState, sessionId, "Starting upgrade…", "upgrade");
     try {
         // ── Guard: don't recomp an already-upgraded session ──────────────────
         // Re-running the full recomp on a session whose compartments are all v2
@@ -422,6 +452,8 @@ async function runUpgradeMemoryMigration(
     const prev = ctx.liveSessionState.recompProgressBySession.get(sessionId);
     ctx.liveSessionState.recompProgressBySession.set(sessionId, {
         sessionId,
+        // Memory migration only runs inside the upgrade flow.
+        kind: prev?.kind ?? "upgrade",
         phase: "migration",
         processedMessages: prev?.processedMessages ?? 0,
         totalMessages: prev?.totalMessages ?? 0,

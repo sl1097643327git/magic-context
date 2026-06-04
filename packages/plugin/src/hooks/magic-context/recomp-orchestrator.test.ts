@@ -13,6 +13,7 @@ import {
     extractRecompReason,
     isRecompComplete,
     isRecompFailure,
+    isRecompSkip,
     type ManagedRecompContext,
     runManagedUpgrade,
 } from "./recomp-orchestrator";
@@ -154,6 +155,28 @@ describe("recomp message helpers", () => {
                 "## Magic Recomp — Skipped\n\nAnother process is already mutating compartment state for this session. Wait for it to finish, then try `/ctx-recomp` again.",
             ),
         ).toBe(true);
+    });
+
+    it("isRecompSkip distinguishes a transient lease-busy skip from a hard failure", () => {
+        // A skip is the lease/already-running no-op — transient, retry succeeds.
+        // It must be reported as "skipped" (neutral, auto-clears), NOT red "failed".
+        expect(
+            isRecompSkip(
+                "## Magic Recomp — Skipped\n\nHistorian is already running for this session. Wait for it to finish, then try `/ctx-recomp` again.",
+            ),
+        ).toBe(true);
+        // Suffix-less lease/already-running no-op (no "— Skipped" heading).
+        expect(isRecompSkip("## Magic Recomp\n\nHistorian is already running…")).toBe(true);
+        expect(
+            isRecompSkip(
+                "## Magic Recomp\n\nAnother process is already mutating compartment state",
+            ),
+        ).toBe(true);
+        // A genuine failure or a normal completion is NOT a skip.
+        expect(isRecompSkip("## Magic Recomp — Failed\n\nHistorian returned no output")).toBe(
+            false,
+        );
+        expect(isRecompSkip("## Magic Recomp — Complete\n\nRebuilt 5")).toBe(false);
     });
 
     it("extractRecompReason strips markdown headings and blank lines", () => {

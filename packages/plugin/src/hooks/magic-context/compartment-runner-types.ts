@@ -17,7 +17,20 @@ import type { NotificationParams } from "./send-session-notification";
  */
 export interface RecompProgress {
     sessionId: string;
-    phase: "recomp" | "migration" | "done" | "failed";
+    /** Which user-facing flow this progress belongs to. `/ctx-recomp` rebuilds
+     *  compartments and is labeled "Recomp"; `/ctx-session-upgrade` (legacy→v2 +
+     *  memory migration) is labeled "Upgrade". Without this the sidebar/status
+     *  hardcoded "Upgrade" wording for BOTH, so a plain recomp showed
+     *  "Recomp / ✗ Upgrade failed" — a self-contradiction (dogfood 2026-06-04,
+     *  a 0-compartment session in a project whose other sessions had them).
+     *  Optional + defaults to "recomp" so runner-emitted per-pass entries (which
+     *  don't know the flow) inherit the kind set by setRecompStarting. */
+    kind?: "recomp" | "upgrade";
+    /** "skipped" is a TRANSIENT non-failure outcome: the incremental historian
+     *  briefly held the compartment-state lease (or another process is mutating
+     *  it), so the run no-op'd. It renders neutrally with retry guidance and
+     *  auto-clears, unlike red "failed" which persists. */
+    phase: "recomp" | "migration" | "done" | "failed" | "skipped";
     /** Raw messages processed so far (the recomp loop's `offset`). */
     processedMessages: number;
     /** Total raw messages to reprocess (protected-tail start − 1). */

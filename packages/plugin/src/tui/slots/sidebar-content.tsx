@@ -315,16 +315,25 @@ const RecompProgressSection = (props: {
             : 0
     const pct = () => Math.round(fraction() * 100)
 
+    // "Recomp" vs "Upgrade" wording follows the flow that started this run, so a
+    // plain /ctx-recomp never renders as an "Upgrade" (dogfood 2026-06-04).
+    const verb = () => (props.progress.kind === "upgrade" ? "Upgrade" : "Recomp")
     const label = createMemo(() => {
         switch (props.progress.phase) {
             case "recomp":
-                return { text: "upgrading ⟳", color: props.theme.warning }
+                return {
+                    text: props.progress.kind === "upgrade" ? "upgrading ⟳" : "comparting ⟳",
+                    color: props.theme.warning,
+                }
             case "migration":
                 return { text: "Migrating memories ⟳", color: props.theme.warning }
             case "done":
-                return { text: "✓ Upgrade complete", color: props.theme.success ?? props.theme.accent }
+                return { text: `✓ ${verb()} complete`, color: props.theme.success ?? props.theme.accent }
+            case "skipped":
+                // Transient (lease busy) — neutral, not an error.
+                return { text: `${verb()} skipped — retry shortly`, color: props.theme.textMuted }
             case "failed":
-                return { text: "✗ Upgrade failed", color: props.theme.error }
+                return { text: `✗ ${verb()} failed`, color: props.theme.error }
         }
     })
 
@@ -332,7 +341,7 @@ const RecompProgressSection = (props: {
         <>
             <box width="100%" marginTop={1} flexDirection="row" justifyContent="space-between">
                 <text fg={props.theme.text}>
-                    <b>Recomp</b>
+                    <b>{verb()}</b>
                 </text>
                 <text fg={label().color}>{label().text}</text>
             </box>
@@ -357,8 +366,9 @@ const RecompProgressSection = (props: {
                     dim
                 />
             )}
-            {/* Terminal reason (failed) — kept visible so the user sees WHY. */}
-            {phase() === "failed" && props.progress.message && (
+            {/* Terminal reason (failed/skipped) — kept visible so the user sees
+                WHY (a failure, or the transient "retry shortly" skip cause). */}
+            {(phase() === "failed" || phase() === "skipped") && props.progress.message && (
                 <text fg={props.theme.textMuted}>{props.progress.message}</text>
             )}
         </>
@@ -485,10 +495,10 @@ const SidebarContent = (props: {
                     recompSawPhase = true
                     recompConsecutiveAbsent = 0
                     scheduleRecompTick()
-                } else if (phase === "done" || phase === "failed") {
-                    // Terminal state rendered — stop. The server keeps "done" for
-                    // a grace window and "failed" until the next run, so the
-                    // outcome stays visible without further polling.
+                } else if (phase === "done" || phase === "failed" || phase === "skipped") {
+                    // Terminal state rendered — stop. The server keeps "done"/
+                    // "skipped" for a grace window and "failed" until the next run,
+                    // so the outcome stays visible without further polling.
                     rtrace(`STOP: terminal phase=${phase}`)
                     recompActive = false
                 } else {
