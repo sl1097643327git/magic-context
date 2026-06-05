@@ -121,7 +121,13 @@ If no promotions are warranted, return empty arrays. Always consume reviewed can
             db: args.db,
             parentSessionId: args.parentSessionId,
             harness: "opencode",
-            subagent: "user_memory_review",
+            // subagent: "dreamer" + task: "user memories" so the dashboard's
+            // dream-run token enrichment (filters subagent='dreamer', GROUP BY
+            // task) maps this invocation's tokens to the "user memories" row.
+            // The task name MUST match the phase name pushed by the dreamer
+            // runner. Mirrors the smart-notes precedent.
+            subagent: "dreamer",
+            task: "user memories",
             startedAt,
             status: params.status,
             messages: params.messages,

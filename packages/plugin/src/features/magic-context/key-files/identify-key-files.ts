@@ -6,10 +6,12 @@ import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
 import { getErrorMessage } from "../../../shared/error-message";
+import { getHarness } from "../../../shared/harness";
 import { shouldKeepSubagents } from "../../../shared/keep-subagents";
 import { log } from "../../../shared/logger";
 import type { Database } from "../../../shared/sqlite";
 import { peekLeaseHolderAndExpiry, renewLease } from "../dreamer/lease";
+import { recordChildInvocation } from "../subagent-token-capture";
 import { isAftAvailable } from "./aft-availability";
 import {
     bumpKeyFilesVersion,
@@ -462,7 +464,7 @@ async function runKeyFilesLlm(args: {
     prompt: string;
     deadline: number;
     fallbackModels?: readonly string[];
-}): Promise<string> {
+}): Promise<{ text: string; messages: unknown[] }> {
     const createResponse = await args.client.session.create({
         body: {
             ...(args.parentSessionId ? { parentID: args.parentSessionId } : {}),
@@ -502,7 +504,7 @@ async function runKeyFilesLlm(args: {
         });
         const text = extractLatestAssistantText(messages);
         if (!text) throw new Error("Dreamer returned no key-files output.");
-        return text;
+        return { text, messages };
     } finally {
         if (!shouldKeepSubagents()) {
             await args.client.session
@@ -573,9 +575,34 @@ export async function runKeyFilesTask(args: {
             log(`[key-files] lease renewal threw: ${getErrorMessage(error)}`);
         }
     }, 60_000);
+    // Token telemetry for the key-files LLM call (dashboard "key files" row +
+    // keep_subagents data collection). The task name MUST match the phase name
+    // pushed in the dreamer runner ("key files") so the dashboard maps tokens
+    // to the right row.
+    let invocationRecorded = false;
+    const llmStartedAt = Date.now();
+    const recordKeyFilesInvocation = (params: {
+        status: "completed" | "failed";
+        messages?: unknown[];
+        error?: unknown;
+    }): void => {
+        if (!args.parentSessionId || invocationRecorded) return;
+        invocationRecorded = true;
+        recordChildInvocation({
+            db: args.db,
+            parentSessionId: args.parentSessionId,
+            harness: getHarness(),
+            subagent: "dreamer",
+            task: "key files",
+            startedAt: llmStartedAt,
+            status: params.status,
+            messages: params.messages,
+            error: params.error,
+        });
+    };
     try {
         try {
-            const raw = await runKeyFilesLlm({
+            const { text: raw, messages: llmMessages } = await runKeyFilesLlm({
                 client: args.client,
                 parentSessionId: args.parentSessionId,
                 projectPath,
@@ -583,6 +610,9 @@ export async function runKeyFilesTask(args: {
                 deadline: args.deadline,
                 fallbackModels: args.fallbackModels,
             });
+            // The LLM call completed (tokens spent) — record before validation,
+            // which is post-processing that can fail independently.
+            recordKeyFilesInvocation({ status: "completed", messages: llmMessages });
             validated = validateLlmOutput(
                 raw,
                 args.config,
@@ -590,6 +620,7 @@ export async function runKeyFilesTask(args: {
                 new Set(candidates.map((candidate) => candidate.path)),
             );
         } catch (error) {
+            recordKeyFilesInvocation({ status: "failed", error });
             log(`[key-files] LLM validation failed: ${getErrorMessage(error)}`);
             throw error;
         }
