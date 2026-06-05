@@ -1604,7 +1604,13 @@ function cachedPiRowMatchesSnapshot(args: {
 			(args.markers.projectDocsHash ?? "") &&
 		rowMarkers.materializedAt === args.markers.materializedAt &&
 		rowMarkers.sessionFactsVersion === args.markers.sessionFactsVersion &&
-		(rowMarkers.upgradeState ?? null) === (args.markers.upgradeState ?? null)
+		(rowMarkers.upgradeState ?? null) === (args.markers.upgradeState ?? null) &&
+		// HARD-bust markers (parity with OpenCode cachedRowMatchesState): a sibling
+		// that re-materialized under a new system/tool/model identity must invalidate
+		// this process's cached row so the soft-refresh CAS adopts the sibling's m[0].
+		(rowMarkers.systemHash ?? "") === (args.markers.systemHash ?? "") &&
+		(rowMarkers.toolSetHash ?? "") === (args.markers.toolSetHash ?? "") &&
+		(rowMarkers.modelKey ?? "") === (args.markers.modelKey ?? "")
 	);
 }
 

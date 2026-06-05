@@ -1140,6 +1140,14 @@ function applyMarkersToState(
     state.cachedM0MaterializedAt = markers.materializedAt;
     state.cachedM0SessionFactsVersion = markers.sessionFactsVersion;
     state.cachedM0UpgradeState = markers.upgradeState;
+    // HARD-bust markers must be mirrored into the flat state fields too: the next
+    // pass's mustMaterialize reads state.cachedM0SystemHash/ToolSetHash/ModelKey
+    // directly (not snapshotMarkers). Omitting them here leaves the flat fields at
+    // their pre-materialize values until a DB reload re-syncs them, which would
+    // re-fire the same HARD trigger on the very next pass (double-fold).
+    state.cachedM0SystemHash = markers.systemHash;
+    state.cachedM0ToolSetHash = markers.toolSetHash;
+    state.cachedM0ModelKey = markers.modelKey;
     state.snapshotMarkers = markers;
 }
 
