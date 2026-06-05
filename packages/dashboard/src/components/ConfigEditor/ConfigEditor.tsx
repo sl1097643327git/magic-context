@@ -352,7 +352,6 @@ const SECTION_ICONS: Record<string, string> = {
   "Tags & Cleanup": "🏷️",
   Historian: "📜",
   Memory: "🧠",
-  Experimental: "🧪",
 };
 
 // Fields that should use range sliders (percentage or threshold values)
@@ -487,10 +486,17 @@ function ConfigForm(props: {
     const original = parsed();
     const merged = { ...original, ...formData() };
     // Deep merge for nested objects so we don't blow away sub-keys the form
-    // doesn't currently expose (e.g. user-set values inside `experimental.*`
-    // sub-objects that the UI doesn't render). The shallow `...formData()`
-    // above would otherwise replace the whole sub-tree.
-    for (const key of ["embedding", "memory", "experimental"]) {
+    // doesn't currently expose. The shallow `...formData()` above would
+    // otherwise replace the whole sub-tree. A legacy top-level `experimental`
+    // block (if any) is preserved by the shallow spread and relocated by the
+    // plugin's config migration on next load.
+    for (const key of [
+      "embedding",
+      "memory",
+      "sqlite",
+      "system_prompt_injection",
+      "caveman_text_compression",
+    ]) {
       if (typeof formData()[key] === "object" && formData()[key] != null) {
         merged[key] = {
           ...((original[key] as Record<string, unknown>) ?? {}),
@@ -1667,48 +1673,52 @@ function ConfigForm(props: {
             );
           })()}
 
-          {/* Experimental — opt-in features gated behind `experimental.*` flags.
-              May change between releases. Full-width and rendered last so the
-              "advanced" surface stays at the bottom of the form. Each feature is
-              a master toggle; child controls only appear when the feature is on,
-              keeping the surface compact for users who never enable any of them. */}
+          {/* History & Recall — features graduated out of `experimental.*` in
+              v0.22.0. temporal_awareness is top-level; auto_search and
+              git_commit_indexing live under `memory.*`; caveman is top-level.
+              Full-width, rendered late. Each feature is a master toggle; child
+              controls only appear when the feature is on. */}
           {(() => {
-            const exp = () =>
-              (getNestedValue(formData(), "experimental") as
-                | Record<string, Record<string, unknown> | boolean>
-                | undefined) ?? {};
-            const setExperimentalKey = (key: string, value: unknown) => {
-              handleFieldChange("experimental", { ...exp(), [key]: value });
+            // temporal_awareness — top-level boolean (default ON)
+            const temporalAwareness = () => {
+              const v = getNestedValue(formData(), "temporal_awareness");
+              return v == null ? true : Boolean(v);
             };
 
-            // temporal_awareness — boolean (no children)
-            const temporalAwareness = () => Boolean(exp().temporal_awareness);
-
-            // git_commit_indexing — { enabled, since_days, max_commits }
+            // memory.git_commit_indexing — { enabled, since_days, max_commits }
             const gitCommit = () =>
-              (exp().git_commit_indexing as
+              (getNestedValue(formData(), "memory.git_commit_indexing") as
                 | { enabled?: boolean; since_days?: number; max_commits?: number }
                 | undefined) ?? {};
             const gitCommitEnabled = () => Boolean(gitCommit().enabled);
             const gitCommitSinceDays = () => gitCommit().since_days ?? 365;
             const gitCommitMaxCommits = () => gitCommit().max_commits ?? 2000;
+            const setGitCommit = (patch: Record<string, unknown>) =>
+              handleFieldChange("memory.git_commit_indexing", { ...gitCommit(), ...patch });
 
-            // auto_search — { enabled, score_threshold, min_prompt_chars }
+            // memory.auto_search — { enabled, score_threshold, min_prompt_chars } (default ON)
             const autoSearch = () =>
-              (exp().auto_search as
+              (getNestedValue(formData(), "memory.auto_search") as
                 | { enabled?: boolean; score_threshold?: number; min_prompt_chars?: number }
                 | undefined) ?? {};
-            const autoSearchEnabled = () => Boolean(autoSearch().enabled);
+            const autoSearchEnabled = () => {
+              const v = autoSearch().enabled;
+              return v == null ? true : Boolean(v);
+            };
             const autoSearchScoreThreshold = () => autoSearch().score_threshold ?? 0.55;
             const autoSearchMinChars = () => autoSearch().min_prompt_chars ?? 20;
+            const setAutoSearch = (patch: Record<string, unknown>) =>
+              handleFieldChange("memory.auto_search", { ...autoSearch(), ...patch });
 
-            // caveman_text_compression — { enabled, min_chars }
+            // caveman_text_compression — top-level { enabled, min_chars }
             const caveman = () =>
-              (exp().caveman_text_compression as
+              (getNestedValue(formData(), "caveman_text_compression") as
                 | { enabled?: boolean; min_chars?: number }
                 | undefined) ?? {};
             const cavemanEnabled = () => Boolean(caveman().enabled);
             const cavemanMinChars = () => caveman().min_chars ?? 500;
+            const setCaveman = (patch: Record<string, unknown>) =>
+              handleFieldChange("caveman_text_compression", { ...caveman(), ...patch });
 
             const ctxReduceEnabled = () => {
               const v = getNestedValue(formData(), "ctx_reduce_enabled");
@@ -1718,36 +1728,37 @@ function ConfigForm(props: {
             return (
               <div class="config-card full-width">
                 <div class="config-card-header">
-                  <span class="config-card-icon">🧪</span>
-                  <span class="config-card-title">Experimental</span>
+                  <span class="config-card-icon">🔮</span>
+                  <span class="config-card-title">History &amp; Recall</span>
                 </div>
                 <div class="config-card-content">
                   <div
                     class="config-field-desc"
                     style={{ "margin-bottom": "8px", opacity: "0.85" }}
                   >
-                    Opt-in features that may change between releases. Disabled by default.
+                    Recall and history features. Temporal awareness and auto-search are on by
+                    default; the rest are opt-in.
                   </div>
 
                   {/* Temporal awareness */}
                   <div class="config-field">
                     <div class="config-field-header">
                       <span class="config-field-label">Temporal Awareness</span>
-                      <span class="config-field-key">experimental.temporal_awareness</span>
+                      <span class="config-field-key">temporal_awareness</span>
                     </div>
                     <span class="config-field-desc">
                       Inject elapsed-time markers (e.g. <code>+12m</code>, <code>+3d 4h</code>)
                       between user messages with &gt;5 min gaps, and add{" "}
                       <code>start-date</code>/<code>end-date</code> attributes on rendered
                       compartments. Helps the agent reason about session pacing across long-running
-                      and multi-day sessions.
+                      and multi-day sessions. On by default.
                     </span>
                     <label class="toggle-switch">
                       <input
                         type="checkbox"
                         checked={temporalAwareness()}
                         onChange={(e) =>
-                          setExperimentalKey("temporal_awareness", e.currentTarget.checked)
+                          handleFieldChange("temporal_awareness", e.currentTarget.checked)
                         }
                       />
                       <span class="toggle-slider" />
@@ -1757,114 +1768,25 @@ function ConfigForm(props: {
                     </label>
                   </div>
 
-                  {/* Git commit indexing */}
-                  <div class="config-field">
-                    <div class="config-field-header">
-                      <span class="config-field-label">Git Commit Indexing</span>
-                      <span class="config-field-key">experimental.git_commit_indexing.enabled</span>
-                    </div>
-                    <span class="config-field-desc">
-                      Index <code>HEAD</code> non-merge commits into <code>ctx_search</code> as a
-                      4th source alongside memories, facts, and message history. Useful for
-                      agents recalling regressions, prior fixes, and decisions without running{" "}
-                      <code>git log</code> manually.
-                    </span>
-                    <label class="toggle-switch">
-                      <input
-                        type="checkbox"
-                        checked={gitCommitEnabled()}
-                        onChange={(e) =>
-                          setExperimentalKey("git_commit_indexing", {
-                            ...gitCommit(),
-                            enabled: e.currentTarget.checked,
-                          })
-                        }
-                      />
-                      <span class="toggle-slider" />
-                      <span class="toggle-label">
-                        {gitCommitEnabled() ? "Enabled" : "Disabled"}
-                      </span>
-                    </label>
-                  </div>
-
-                  <Show when={gitCommitEnabled()}>
-                    <div class="config-field">
-                      <div class="config-field-header">
-                        <span class="config-field-label">History Window (days)</span>
-                        <span class="config-field-key">
-                          experimental.git_commit_indexing.since_days
-                        </span>
-                      </div>
-                      <span class="config-field-desc">
-                        Days of HEAD history to index. Older commits are excluded from search.
-                        Range 7–3650, default 365.
-                      </span>
-                      <input
-                        class="config-input"
-                        type="number"
-                        min={7}
-                        max={3650}
-                        value={gitCommitSinceDays()}
-                        onInput={(e) => {
-                          const v = e.currentTarget.value;
-                          setExperimentalKey("git_commit_indexing", {
-                            ...gitCommit(),
-                            since_days: v ? Math.max(7, Math.min(3650, Number(v))) : 365,
-                          });
-                        }}
-                      />
-                    </div>
-                    <div class="config-field">
-                      <div class="config-field-header">
-                        <span class="config-field-label">Max Commits</span>
-                        <span class="config-field-key">
-                          experimental.git_commit_indexing.max_commits
-                        </span>
-                      </div>
-                      <span class="config-field-desc">
-                        Maximum commits kept per project. Oldest evicted when the cap is reached.
-                        Range 100–20000, default 2000.
-                      </span>
-                      <input
-                        class="config-input"
-                        type="number"
-                        min={100}
-                        max={20000}
-                        value={gitCommitMaxCommits()}
-                        onInput={(e) => {
-                          const v = e.currentTarget.value;
-                          setExperimentalKey("git_commit_indexing", {
-                            ...gitCommit(),
-                            max_commits: v ? Math.max(100, Math.min(20000, Number(v))) : 2000,
-                          });
-                        }}
-                      />
-                    </div>
-                  </Show>
-
                   {/* Auto search */}
                   <div class="config-field">
                     <div class="config-field-header">
                       <span class="config-field-label">Auto Search Hint</span>
-                      <span class="config-field-key">experimental.auto_search.enabled</span>
+                      <span class="config-field-key">memory.auto_search.enabled</span>
                     </div>
                     <span class="config-field-desc">
                       On each new user message, run <code>ctx_search</code> in the background and
                       append a compact <code>&lt;ctx-search-hint&gt;</code> block of vague
                       fragments when the top hit clears the score threshold. Does NOT inject full
                       content — just nudges the agent to run <code>ctx_search</code> for the real
-                      result if relevant. Adds one embedding round-trip per new user turn.
+                      result if relevant. Adds one embedding round-trip per new user turn. On by
+                      default.
                     </span>
                     <label class="toggle-switch">
                       <input
                         type="checkbox"
                         checked={autoSearchEnabled()}
-                        onChange={(e) =>
-                          setExperimentalKey("auto_search", {
-                            ...autoSearch(),
-                            enabled: e.currentTarget.checked,
-                          })
-                        }
+                        onChange={(e) => setAutoSearch({ enabled: e.currentTarget.checked })}
                       />
                       <span class="toggle-slider" />
                       <span class="toggle-label">
@@ -1877,9 +1799,7 @@ function ConfigForm(props: {
                     <div class="config-field">
                       <div class="config-field-header">
                         <span class="config-field-label">Score Threshold</span>
-                        <span class="config-field-key">
-                          experimental.auto_search.score_threshold
-                        </span>
+                        <span class="config-field-key">memory.auto_search.score_threshold</span>
                       </div>
                       <span class="config-field-desc">
                         Minimum top-hit score for the hint to fire. Higher = fewer but more
@@ -1894,8 +1814,7 @@ function ConfigForm(props: {
                         value={autoSearchScoreThreshold()}
                         onInput={(e) => {
                           const v = e.currentTarget.value;
-                          setExperimentalKey("auto_search", {
-                            ...autoSearch(),
+                          setAutoSearch({
                             score_threshold: v ? Math.max(0.3, Math.min(0.95, Number(v))) : 0.55,
                           });
                         }}
@@ -1904,9 +1823,7 @@ function ConfigForm(props: {
                     <div class="config-field">
                       <div class="config-field-header">
                         <span class="config-field-label">Min Prompt Chars</span>
-                        <span class="config-field-key">
-                          experimental.auto_search.min_prompt_chars
-                        </span>
+                        <span class="config-field-key">memory.auto_search.min_prompt_chars</span>
                       </div>
                       <span class="config-field-desc">
                         Skip the hint when a user message is shorter than this. Avoids embedding
@@ -1920,9 +1837,82 @@ function ConfigForm(props: {
                         value={autoSearchMinChars()}
                         onInput={(e) => {
                           const v = e.currentTarget.value;
-                          setExperimentalKey("auto_search", {
-                            ...autoSearch(),
+                          setAutoSearch({
                             min_prompt_chars: v ? Math.max(5, Math.min(500, Number(v))) : 20,
+                          });
+                        }}
+                      />
+                    </div>
+                  </Show>
+
+                  {/* Git commit indexing */}
+                  <div class="config-field">
+                    <div class="config-field-header">
+                      <span class="config-field-label">Git Commit Indexing</span>
+                      <span class="config-field-key">memory.git_commit_indexing.enabled</span>
+                    </div>
+                    <span class="config-field-desc">
+                      Index <code>HEAD</code> non-merge commits into <code>ctx_search</code> as a
+                      4th source alongside memories, facts, and message history. Useful for
+                      agents recalling regressions, prior fixes, and decisions without running{" "}
+                      <code>git log</code> manually. Off by default.
+                    </span>
+                    <label class="toggle-switch">
+                      <input
+                        type="checkbox"
+                        checked={gitCommitEnabled()}
+                        onChange={(e) => setGitCommit({ enabled: e.currentTarget.checked })}
+                      />
+                      <span class="toggle-slider" />
+                      <span class="toggle-label">
+                        {gitCommitEnabled() ? "Enabled" : "Disabled"}
+                      </span>
+                    </label>
+                  </div>
+
+                  <Show when={gitCommitEnabled()}>
+                    <div class="config-field">
+                      <div class="config-field-header">
+                        <span class="config-field-label">History Window (days)</span>
+                        <span class="config-field-key">memory.git_commit_indexing.since_days</span>
+                      </div>
+                      <span class="config-field-desc">
+                        Days of HEAD history to index. Older commits are excluded from search.
+                        Range 7–3650, default 365.
+                      </span>
+                      <input
+                        class="config-input"
+                        type="number"
+                        min={7}
+                        max={3650}
+                        value={gitCommitSinceDays()}
+                        onInput={(e) => {
+                          const v = e.currentTarget.value;
+                          setGitCommit({
+                            since_days: v ? Math.max(7, Math.min(3650, Number(v))) : 365,
+                          });
+                        }}
+                      />
+                    </div>
+                    <div class="config-field">
+                      <div class="config-field-header">
+                        <span class="config-field-label">Max Commits</span>
+                        <span class="config-field-key">memory.git_commit_indexing.max_commits</span>
+                      </div>
+                      <span class="config-field-desc">
+                        Maximum commits kept per project. Oldest evicted when the cap is reached.
+                        Range 100–20000, default 2000.
+                      </span>
+                      <input
+                        class="config-input"
+                        type="number"
+                        min={100}
+                        max={20000}
+                        value={gitCommitMaxCommits()}
+                        onInput={(e) => {
+                          const v = e.currentTarget.value;
+                          setGitCommit({
+                            max_commits: v ? Math.max(100, Math.min(20000, Number(v))) : 2000,
                           });
                         }}
                       />
@@ -1933,9 +1923,7 @@ function ConfigForm(props: {
                   <div class="config-field">
                     <div class="config-field-header">
                       <span class="config-field-label">Caveman Text Compression</span>
-                      <span class="config-field-key">
-                        experimental.caveman_text_compression.enabled
-                      </span>
+                      <span class="config-field-key">caveman_text_compression.enabled</span>
                     </div>
                     <span class="config-field-desc">
                       Age-tiered compression for long user/assistant text parts.{" "}
@@ -1946,7 +1934,7 @@ function ConfigForm(props: {
                       Outside the protected tail, oldest 20% of eligible tags get ultra
                       compression, next 20% full, next 20% lite, newest 40% untouched. Always
                       compresses from the original source, so depth shifts are equivalent to
-                      compressing the original text directly.
+                      compressing the original text directly. Off by default.
                     </span>
                     <Show when={ctxReduceEnabled() && cavemanEnabled()}>
                       <div
@@ -1961,12 +1949,7 @@ function ConfigForm(props: {
                       <input
                         type="checkbox"
                         checked={cavemanEnabled()}
-                        onChange={(e) =>
-                          setExperimentalKey("caveman_text_compression", {
-                            ...caveman(),
-                            enabled: e.currentTarget.checked,
-                          })
-                        }
+                        onChange={(e) => setCaveman({ enabled: e.currentTarget.checked })}
                       />
                       <span class="toggle-slider" />
                       <span class="toggle-label">{cavemanEnabled() ? "Enabled" : "Disabled"}</span>
@@ -1977,9 +1960,7 @@ function ConfigForm(props: {
                     <div class="config-field">
                       <div class="config-field-header">
                         <span class="config-field-label">Min Chars</span>
-                        <span class="config-field-key">
-                          experimental.caveman_text_compression.min_chars
-                        </span>
+                        <span class="config-field-key">caveman_text_compression.min_chars</span>
                       </div>
                       <span class="config-field-desc">
                         Text parts shorter than this are left untouched. Range 100–10000,
@@ -1994,14 +1975,174 @@ function ConfigForm(props: {
                         value={cavemanMinChars()}
                         onInput={(e) => {
                           const v = e.currentTarget.value;
-                          setExperimentalKey("caveman_text_compression", {
-                            ...caveman(),
+                          setCaveman({
                             min_chars: v ? Math.max(100, Math.min(10000, Number(v))) : 500,
                           });
                         }}
                       />
                     </div>
                   </Show>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Advanced — power-user / debug knobs. Full-width, rendered last. */}
+          {(() => {
+            const autoUpdate = () => {
+              const v = getNestedValue(formData(), "auto_update");
+              return v == null ? true : Boolean(v);
+            };
+            const keepSubagents = () => Boolean(getNestedValue(formData(), "keep_subagents"));
+            const sqlite = () =>
+              (getNestedValue(formData(), "sqlite") as
+                | { cache_size_mb?: number; mmap_size_mb?: number }
+                | undefined) ?? {};
+            const sqliteCacheMb = () => sqlite().cache_size_mb ?? 64;
+            const sqliteMmapMb = () => sqlite().mmap_size_mb ?? 0;
+            const setSqlite = (patch: Record<string, unknown>) =>
+              handleFieldChange("sqlite", { ...sqlite(), ...patch });
+            const systemPromptInjectionEnabled = () => {
+              const v = getNestedValue(formData(), "system_prompt_injection.enabled");
+              return v == null ? true : Boolean(v);
+            };
+
+            return (
+              <div class="config-card full-width">
+                <div class="config-card-header">
+                  <span class="config-card-icon">🛠️</span>
+                  <span class="config-card-title">Advanced</span>
+                </div>
+                <div class="config-card-content">
+                  <div
+                    class="config-field-desc"
+                    style={{ "margin-bottom": "8px", opacity: "0.85" }}
+                  >
+                    Power-user and debug settings. Most users never need these.
+                  </div>
+
+                  {/* Auto update */}
+                  <div class="config-field">
+                    <div class="config-field-header">
+                      <span class="config-field-label">Auto Update</span>
+                      <span class="config-field-key">auto_update</span>
+                    </div>
+                    <span class="config-field-desc">
+                      Automatically self-update the OpenCode plugin to the latest published version
+                      on startup. On by default. (User-config only — project configs cannot change
+                      it.)
+                    </span>
+                    <label class="toggle-switch">
+                      <input
+                        type="checkbox"
+                        checked={autoUpdate()}
+                        onChange={(e) => handleFieldChange("auto_update", e.currentTarget.checked)}
+                      />
+                      <span class="toggle-slider" />
+                      <span class="toggle-label">{autoUpdate() ? "Enabled" : "Disabled"}</span>
+                    </label>
+                  </div>
+
+                  {/* Keep subagents */}
+                  <div class="config-field">
+                    <div class="config-field-header">
+                      <span class="config-field-label">Keep Subagent Sessions</span>
+                      <span class="config-field-key">keep_subagents</span>
+                    </div>
+                    <span class="config-field-desc">
+                      Retain the child sessions magic-context spawns for its own agents (historian,
+                      dreamer, sidekick, memory migration, key-files, user-memory). By default these
+                      are deleted on success; enable this to keep their full transcript and token
+                      usage for debugging. Kept sessions accumulate until cleared. Off by default.
+                    </span>
+                    <label class="toggle-switch">
+                      <input
+                        type="checkbox"
+                        checked={keepSubagents()}
+                        onChange={(e) => handleFieldChange("keep_subagents", e.currentTarget.checked)}
+                      />
+                      <span class="toggle-slider" />
+                      <span class="toggle-label">{keepSubagents() ? "Enabled" : "Disabled"}</span>
+                    </label>
+                  </div>
+
+                  {/* System prompt injection */}
+                  <div class="config-field">
+                    <div class="config-field-header">
+                      <span class="config-field-label">System Prompt Injection</span>
+                      <span class="config-field-key">system_prompt_injection.enabled</span>
+                    </div>
+                    <span class="config-field-desc">
+                      Inject the magic-context guidance text into the system prompt. On by default.
+                      Disabling it stops the guidance block entirely. To exclude only specific
+                      custom agents, set <code>system_prompt_injection.skip_signatures</code> (a
+                      substring list) in the raw editor.
+                    </span>
+                    <label class="toggle-switch">
+                      <input
+                        type="checkbox"
+                        checked={systemPromptInjectionEnabled()}
+                        onChange={(e) =>
+                          handleFieldChange(
+                            "system_prompt_injection.enabled",
+                            e.currentTarget.checked,
+                          )
+                        }
+                      />
+                      <span class="toggle-slider" />
+                      <span class="toggle-label">
+                        {systemPromptInjectionEnabled() ? "Enabled" : "Disabled"}
+                      </span>
+                    </label>
+                  </div>
+
+                  {/* SQLite tuning */}
+                  <div class="config-field">
+                    <div class="config-field-header">
+                      <span class="config-field-label">SQLite Cache (MB)</span>
+                      <span class="config-field-key">sqlite.cache_size_mb</span>
+                    </div>
+                    <span class="config-field-desc">
+                      Per-connection page-cache size in MB. Higher reduces disk reads on large
+                      databases at the cost of memory. Range 8–1024, default 64.
+                    </span>
+                    <input
+                      class="config-input"
+                      type="number"
+                      min={8}
+                      max={1024}
+                      value={sqliteCacheMb()}
+                      onInput={(e) => {
+                        const v = e.currentTarget.value;
+                        setSqlite({
+                          cache_size_mb: v ? Math.max(8, Math.min(1024, Number(v))) : 64,
+                        });
+                      }}
+                    />
+                  </div>
+                  <div class="config-field">
+                    <div class="config-field-header">
+                      <span class="config-field-label">SQLite mmap (MB)</span>
+                      <span class="config-field-key">sqlite.mmap_size_mb</span>
+                    </div>
+                    <span class="config-field-desc">
+                      Memory-mapped I/O size in MB. 0 disables mmap. Can speed up large reads on
+                      some filesystems. Range 0–4096, default 0.
+                    </span>
+                    <input
+                      class="config-input"
+                      type="number"
+                      min={0}
+                      max={4096}
+                      value={sqliteMmapMb()}
+                      onInput={(e) => {
+                        const v = e.currentTarget.value;
+                        setSqlite({
+                          mmap_size_mb: v ? Math.max(0, Math.min(4096, Number(v))) : 0,
+                        });
+                      }}
+                    />
+                  </div>
                 </div>
               </div>
             );

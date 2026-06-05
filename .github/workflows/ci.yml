@@ -78,6 +78,35 @@ jobs:
       - name: Test
         run: bun run --cwd packages/pi-plugin test
 
+  check-dashboard:
+    name: Check (dashboard)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      # Frontend-only checks (no Rust/Tauri needed). The key gate is the test
+      # step, which runs config-parity.test.ts — it fails the build if the
+      # plugin config schema gains/renames/removes a field the dashboard's
+      # ConfigEditor coverage manifest doesn't account for, so the form can't
+      # silently drift out of sync with the schema again. (Lint is not gated
+      # here yet: the dashboard has pre-existing formatting drift to clean up
+      # separately before a lint gate can go green.)
+      - name: TypeScript typecheck
+        run: bun run --cwd packages/dashboard typecheck
+
+      - name: Test
+        run: bun run --cwd packages/dashboard test
+
+      - name: Build (frontend)
+        run: bun run --cwd packages/dashboard build
+
   e2e-opencode:
     name: E2E (OpenCode, Docker)
     runs-on: ubuntu-latest
