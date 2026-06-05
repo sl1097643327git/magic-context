@@ -299,7 +299,7 @@ describe("injectM0M1Pi", () => {
 		}
 	});
 
-	it("rematerializes m[0] when a new compartment appears", () => {
+	it("rematerializes m[0] when a LEGACY compartment appears (upgrade_state HARD flip)", () => {
 		const db = createTestDb();
 		const cwd = mkdtempSync(join(tmpdir(), "pi-m0m1-compartment-"));
 		try {
@@ -308,9 +308,12 @@ describe("injectM0M1Pi", () => {
 			injectM0M1Pi(state, db, first as never);
 			expect(textOf(first[0] as never)).not.toContain("Compacted setup");
 
-			// Legacy compartment (no paraphrase tiers) WITH a U: line → v2 renders
-			// it at P3 (content kept) per the locked legacy-decay rule. A new
-			// compartment must trigger m[0] re-materialization.
+			// A LEGACY compartment (no p1 tier → legacy=1) flips upgrade_state
+			// "ready"→"legacy", which is a genuine HARD trigger (the session now
+			// needs /ctx-session-upgrade). This is NOT the new-compartment path — a
+			// v2 compartment (with p1) is a SOFT m[1] delta and does NOT re-
+			// materialize m[0] (see the SOFT-delta test below). Asserting the legacy
+			// HARD path here keeps the upgrade-detection contract pinned.
 			appendCompartments(db, state.sessionId, [
 				{
 					sequence: 1,
@@ -332,6 +335,81 @@ describe("injectM0M1Pi", () => {
 			expect(textOf(second[1] as never)).toContain(
 				"no new content since last materialization",
 			);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("SOFT pass: new v2 compartment surfaces in m[1] WITHOUT re-materializing m[0], raw messages trimmed", () => {
+		const db = createTestDb();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-m0m1-soft-delta-"));
+		try {
+			const state = piState("ses-pi-soft-delta", cwd);
+			// First v2 compartment (p1 present → legacy=0, upgrade_state stays
+			// "ready"). Materialize the m[0] baseline.
+			appendCompartments(db, state.sessionId, [
+				{
+					sequence: 0,
+					startMessage: 1,
+					endMessage: 1,
+					startMessageId: "entry-0",
+					endMessageId: "entry-0",
+					title: "First",
+					content: "U: first turn\nfirst compartment body",
+					p1: "U: first turn\nfirst compartment body",
+				},
+			]);
+			const firstPass = [userMessage("hello", 10)];
+			const r0 = injectM0M1Pi(state, db, firstPass as never, ["entry-0"]);
+			expect(r0.m0Materialized).toBe(true);
+			const baselineM0 = textOf(firstPass[0] as never);
+			expect(baselineM0).toContain("first compartment body");
+
+			// Historian publishes a SECOND v2 compartment (the delta). This is the
+			// exact scenario the taxonomy fix targets: it MUST ride m[1], not fold
+			// m[0].
+			appendCompartments(db, state.sessionId, [
+				{
+					sequence: 1,
+					startMessage: 2,
+					endMessage: 2,
+					startMessageId: "entry-1",
+					endMessageId: "entry-1",
+					title: "Delta",
+					content: "U: second turn\nsecond compartment body",
+					p1: "U: second turn\nsecond compartment body",
+				},
+			]);
+
+			// Cache-busting pass (history refresh): recomputeM1ThisPass=true.
+			const secondPass = [
+				userMessage("covered-0", 10), // entry-0 → already baseline
+				userMessage("covered-1", 11), // entry-1 → new compartment, must trim
+				userMessage("keep", 12), // live tail → must survive
+			];
+			const r1 = injectM0M1Pi(
+				state,
+				db,
+				secondPass as never,
+				["entry-0", "entry-1", "keep"],
+				true,
+			);
+
+			// (a) m[0] NOT re-materialized — SOFT, not HARD.
+			expect(r1.m0Materialized).toBe(false);
+			// (b) m[0] bytes byte-identical to the baseline (the whole point of the
+			// split: the stable prefix stays cached).
+			const m0 = textOf(secondPass[0] as never);
+			expect(m0).toBe(baselineM0);
+			expect(m0).not.toContain("second compartment body");
+			// (c) new compartment surfaces in m[1].
+			expect(textOf(secondPass[1] as never)).toContain(
+				"second compartment body",
+			);
+			// (d) raw messages through the new compartment boundary (entry-1) are
+			// trimmed (no duplication) while the live tail survives.
+			expect(r1.skippedVisibleMessages).toBe(2);
+			expect(textOf(secondPass[secondPass.length - 1] as never)).toBe("keep");
 		} finally {
 			closeQuietly(db);
 		}

@@ -3432,13 +3432,14 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	if (args.injection) {
 		try {
 			const tInjection = performance.now();
-			if (args.isCacheBusting || deferredHistoryRefresh) {
-				clearM0M1PiCache(
-					args.db,
-					args.sessionId,
-					args.isCacheBusting ? "history refresh" : "deferred history refresh",
-				);
-			}
+			// NOTE: do NOT clear the m[0]/m[1] cache on a cache-busting pass. A new
+			// compartment is an m[1] DELTA (SOFT), not an m[0] re-materialization
+			// (HARD) — clearing forced mustMaterializePi to first_render and folded
+			// m[0] every history-refresh pass, defeating the whole m[0]/m[1] split
+			// (parity with the OpenCode max_compartment_seq removal). injectM0M1Pi
+			// now keeps cached m[0] and soft-refreshes m[1] with the new compartment;
+			// HARD triggers (model/system/ttl/epoch/docs/upgrade/mutation) still
+			// re-materialize inside mustMaterializePi when genuinely needed.
 			// HARD-bust signals (parity with OpenCode). systemHash + TTL idle derive
 			// from the freshly-read session_meta; modelKey from the volatile live
 			// map. Pi has no tool.definition hook, so toolSetHash is always "" — its
@@ -3476,7 +3477,14 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				args.db,
 				args.messages as Parameters<typeof injectM0M1Pi>[2],
 				args.entryIds,
-				executedWorkThisPass,
+				// recomputeM1ThisPass: recompute m[1] (vs byte-identical replay) on any
+				// cache-busting pass — history refresh (new compartment published),
+				// deferred history refresh, OR executed work (drops/heuristics). A
+				// history-refresh-only pass has executedWorkThisPass=false but MUST
+				// re-render m[1] so the new compartment surfaces; gating on work alone
+				// (the prior behavior, masked by the now-removed cache clear) would
+				// replay stale m[1]. Mirrors OpenCode's isCacheBustingPass gate.
+				args.isCacheBusting || deferredHistoryRefresh || executedWorkThisPass,
 			);
 			// PEEK-then-drain-on-success (Oracle audit Round 8 #6):
 			// only drain `historyRefreshSessions` if the rebuild

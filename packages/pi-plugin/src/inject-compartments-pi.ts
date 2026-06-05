@@ -1727,16 +1727,32 @@ function softRefreshCachedM1Pi(args: {
 			preRenderedKeyFilesBlock,
 		);
 		const m1Bytes = Buffer.from(rendered.text, "utf8");
+		// Advance the persisted trim boundary to the latest compartment now rendered
+		// in m[1]. renderM1 covers compartments seq > cachedM0Seq up to the current
+		// latest, so the visible-message trim must move with it — otherwise the newly
+		// summarized compartment's raw messages stay in the tail (duplication) on
+		// this and every subsequent replay pass. Persisted in the SAME transaction as
+		// cached_m1_bytes so replay passes (which read the boundary from this row)
+		// trim consistently. Mirrors OpenCode caching prepared.compartmentEndMessageId
+		// on each cache-busting pass. Boundary is NOT part of the m[0] CAS identity
+		// (cachedPiRowMatchesSnapshot excludes it), so advancing it cannot spuriously
+		// invalidate a sibling's cached m[0].
+		const latestCompartment = args.compartmentsForNormalization.at(-1);
+		const advancedBoundary =
+			latestCompartment?.endMessageId &&
+			latestCompartment.endMessageId.length > 0
+				? latestCompartment.endMessageId
+				: markers.lastBaselineEndMessageId;
 		args.db
 			.prepare(
-				"UPDATE session_meta SET cached_m1_bytes = ? WHERE session_id = ?",
+				"UPDATE session_meta SET cached_m1_bytes = ?, cached_m0_last_baseline_end_message_id = ? WHERE session_id = ?",
 			)
-			.run(m1Bytes, args.state.sessionId);
+			.run(m1Bytes, advancedBoundary, args.state.sessionId);
 		args.db.exec("COMMIT");
 		return {
 			m0: decodeCachedM0(row.cached_m0_bytes) ?? "",
 			m1: rendered.text,
-			markers,
+			markers: { ...markers, lastBaselineEndMessageId: advancedBoundary },
 			memoryUpdateCount: rendered.memoryUpdateCount,
 			recomputed: true,
 		};
