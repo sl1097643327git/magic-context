@@ -212,6 +212,30 @@ function seedMemory(content: string, category = "PROJECT_RULES"): number {
     });
 }
 
+/**
+ * Queue a non-additive memory mutation (the supersede-delta path). Mirrors the
+ * production `queueMemoryMutation` columns exactly — this is what `ctx_memory`
+ * update/archive/delete records instead of bumping the project epoch, so the
+ * change reconciles via the m[1] <memory-updates> delta rather than a HARD m[0]
+ * refold. For `update` we also flip the underlying row content so a later m[0]
+ * re-materialize would reconcile to the new value.
+ */
+function queueMemoryUpdate(targetId: number, newContent: string): void {
+    writeContextDb((db) => {
+        db.prepare(
+            `INSERT INTO memory_mutation_log
+                (project_path, mutation_type, target_memory_id, superseded_by_id, category, new_content, queued_at)
+             VALUES (?, 'update', ?, NULL, NULL, ?, ?)`,
+        ).run(projectIdentity(), targetId, newContent, Date.now());
+        db.prepare("UPDATE memories SET content = ?, normalized_hash = ?, updated_at = ? WHERE id = ?").run(
+            newContent,
+            computeNormalizedHash(newContent),
+            Date.now(),
+            targetId,
+        );
+    });
+}
+
 /** Emit a single ctx_reduce tool call on the first main-agent request that exposes it. */
 function emitCtxReduceOnce(drop: string): void {
     let emitted = false;
@@ -497,6 +521,69 @@ describe("cache invariants — m[0]/m[1] taxonomy (B class)", () => {
                 if (busts.length > 0) {
                     console.error(
                         `[cache-invariant:B10-additive-memory] ${busts.length} bust(s):\n${formatBustReport(busts)}`,
+                    );
+                }
+                expect(busts.length).toBe(0);
+            }, 220_000);
+        });
+    });
+
+    describe("#given a non-additive memory mutation (B11 — supersede-delta)", () => {
+        describe("#when a rendered memory is updated and an execute pass reconciles it", () => {
+            it("#then a <memory-updates> delta rides m[1] and m[0] stays byte-identical (stale-but-frozen)", async () => {
+                //#given — seed a memory and materialize m[0] WITH it in the
+                // baseline (so it's a rendered memory the mutation can target).
+                const sessionId = await h.createSession();
+                const memId = seedMemory(
+                    "B11 original rule: deploys go through the staging pipeline first.",
+                );
+                setDefer("B11 warm 1");
+                await h.sendPrompt(sessionId, "B11 turn 1: warmup.");
+                h.mock.setDefault({ text: "B11 high", usage: EXECUTE_USAGE });
+                await h.sendPrompt(sessionId, "B11 turn 2: high usage marks next pass execute.");
+                setDefer("B11 materialize");
+                await h.sendPrompt(sessionId, "B11 turn 3: execute pass materializes m[0] with the memory.");
+
+                const m0Baseline = extractM0(mainAgentRequests(h.mock.requests()).at(-1)!.body);
+                expect(m0Baseline).toContain("B11 original rule");
+
+                //#when — a non-additive mutation (update). This queues a
+                // memory_mutation_log row WITHOUT bumping the project epoch, so
+                // m[0] must NOT re-materialize: the stale baseline still shows the
+                // ORIGINAL text, and m[1] carries a <memory-updates> correction.
+                // Turn 4 records high usage so turn 5 is the cache-busting pass.
+                h.mock.setDefault({ text: "B11 pressure", usage: EXECUTE_USAGE });
+                await h.sendPrompt(sessionId, "B11 turn 4: high usage marks the next pass execute.");
+                queueMemoryUpdate(memId, "B11 revised rule: deploys go straight to production with a feature flag.");
+                setDefer("B11 reconcile");
+                await h.sendPrompt(sessionId, "B11 turn 5: execute pass renders the memory-updates delta.");
+
+                //#then
+                const requests = mainAgentRequests(h.mock.requests());
+                const reconcileReq = requests.find((r) => extractM1(r.body)?.includes("<memory-updates>"));
+                expect(reconcileReq).toBeDefined();
+                const m1 = extractM1(reconcileReq!.body)!;
+                const m0 = extractM0(reconcileReq!.body)!;
+                // Delta invariant: m[1] carries the correction targeting this id.
+                expect(m1).toContain("<memory-updates>");
+                expect(m1).toContain(`<updated id="${memId}">`);
+                expect(m1).toContain("B11 revised rule");
+                // Stale-but-frozen invariant: m[0] is byte-identical and STILL
+                // shows the original text (the mutation did NOT HARD-refold m[0]).
+                expect(m0).toContain("B11 original rule");
+                expect(m0).not.toContain("B11 revised rule");
+                expect(m0).toBe(m0Baseline!);
+
+                // Trailing pure-defer replay pair must be byte-stable.
+                setDefer("B11 replay 1");
+                await h.sendPrompt(sessionId, "B11 turn 6: defer replay.");
+                setDefer("B11 replay 2");
+                await h.sendPrompt(sessionId, "B11 turn 7: defer replay again.");
+                const replayPair = mainAgentRequests(h.mock.requests()).slice(-2);
+                const busts = findBusts(replayPair);
+                if (busts.length > 0) {
+                    console.error(
+                        `[cache-invariant:B11-supersede-delta] ${busts.length} bust(s):\n${formatBustReport(busts)}`,
                     );
                 }
                 expect(busts.length).toBe(0);
