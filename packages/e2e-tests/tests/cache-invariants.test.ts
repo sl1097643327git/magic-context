@@ -27,7 +27,12 @@
  * classes are layered on in sibling describe blocks as the suite grows.
  */
 
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { realpathSync } from "node:fs";
+import { join, resolve as pathResolve } from "node:path";
+import { computeNormalizedHash } from "../../plugin/src/features/magic-context/memory/normalize-hash";
+import { resolveProjectIdentity } from "../../plugin/src/features/magic-context/memory/project-identity";
 import {
     extractM0,
     extractM1,
@@ -172,6 +177,39 @@ afterEach(async () => {
 
 function setDefer(text: string): void {
     h.mock.setDefault({ text, usage: DEFER_USAGE });
+}
+
+/** Project identity the plugin resolves at runtime for the harness workdir. */
+function projectIdentity(): string {
+    return resolveProjectIdentity(realpathSync(pathResolve(h.opencode.env.workdir)));
+}
+
+function writeContextDb<T>(fn: (db: Database) => T): T {
+    const dbPath = join(h.opencode.env.dataDir, "cortexkit", "magic-context", "context.db");
+    const db = new Database(dbPath);
+    try {
+        db.query("PRAGMA busy_timeout = 5000").run();
+        return fn(db);
+    } finally {
+        db.close();
+    }
+}
+
+/** Seed an active project-scoped memory directly. Returns its row id. */
+function seedMemory(content: string, category = "PROJECT_RULES"): number {
+    return writeContextDb((db) => {
+        const now = Date.now();
+        const info = db
+            .prepare(
+                `INSERT INTO memories (
+                    project_path, category, content, normalized_hash,
+                    source_session_id, source_type, seen_count, retrieval_count,
+                    first_seen_at, created_at, updated_at, last_seen_at, status
+                ) VALUES (?, ?, ?, ?, NULL, 'historian', 5, 0, ?, ?, ?, ?, 'active')`,
+            )
+            .run(projectIdentity(), category, content, computeNormalizedHash(content), now, now, now, now);
+        return Number(info.lastInsertRowid);
+    });
 }
 
 /** Emit a single ctx_reduce tool call on the first main-agent request that exposes it. */
@@ -396,6 +434,69 @@ describe("cache invariants — m[0]/m[1] taxonomy (B class)", () => {
                 if (busts.length > 0) {
                     console.error(
                         `[cache-invariant:B9-soft-publish] ${busts.length} bust(s):\n${formatBustReport(busts)}`,
+                    );
+                }
+                expect(busts.length).toBe(0);
+            }, 220_000);
+        });
+    });
+
+    describe("#given an additive memory write after m[0] materialized (B10 — maxMemoryId is not a HARD trigger)", () => {
+        describe("#when a new memory is added and an execute pass surfaces it", () => {
+            it("#then it rides m[1] <new-memories> and m[0] stays byte-identical (SOFT)", async () => {
+                //#given — seed a baseline memory, then force m[0] to materialize
+                // WITH that memory in the baseline (early execute pass). This
+                // freezes cachedM0MaxMemoryId at the baseline's id.
+                const sessionId = await h.createSession();
+                seedMemory("B10 baseline rule: prefer the project's own tools over shell fallbacks.");
+                setDefer("B10 warm 1");
+                await h.sendPrompt(sessionId, "B10 turn 1: warmup.");
+                h.mock.setDefault({ text: "B10 high", usage: EXECUTE_USAGE });
+                await h.sendPrompt(sessionId, "B10 turn 2: high usage marks next pass execute.");
+                setDefer("B10 materialize");
+                await h.sendPrompt(sessionId, "B10 turn 3: execute pass materializes m[0] with baseline memory.");
+
+                const m0Baseline = extractM0(mainAgentRequests(h.mock.requests()).at(-1)!.body);
+                expect(m0Baseline).toContain("B10 baseline rule");
+
+                //#when — add a NEW memory after the baseline froze, then drive an
+                // execute pass to surface it. The execute DECISION for a turn is
+                // read from the PREVIOUS turn's recorded usage, so turn 4 records
+                // high usage to make turn 5 the cache-busting (execute) pass.
+                // maxMemoryId advances when the new memory is seeded, but it must
+                // NOT re-materialize m[0] (not a HARD trigger); the new memory is
+                // an m[1] delta via the readNewMemoriesForM1 watermark.
+                h.mock.setDefault({ text: "B10 pressure", usage: EXECUTE_USAGE });
+                await h.sendPrompt(sessionId, "B10 turn 4: high usage marks the next pass execute.");
+                seedMemory("B10 fresh rule: always run the full gate before a release.");
+                setDefer("B10 surface");
+                await h.sendPrompt(sessionId, "B10 turn 5: execute pass surfaces the new memory.");
+
+                //#then
+                const requests = mainAgentRequests(h.mock.requests());
+                const surfaceReq = requests.find((r) => extractM1(r.body)?.includes("B10 fresh rule"));
+                expect(surfaceReq).toBeDefined();
+                const m1 = extractM1(surfaceReq!.body)!;
+                const m0 = extractM0(surfaceReq!.body)!;
+                // Delta invariant: the new memory rides m[1] <new-memories>.
+                expect(m1).toContain("<new-memories>");
+                expect(m1).toContain("B10 fresh rule");
+                // SOFT invariant: m[0] still holds ONLY the baseline memory; the
+                // new one was NOT folded into the m[0] baseline.
+                expect(m0).toContain("B10 baseline rule");
+                expect(m0).not.toContain("B10 fresh rule");
+                expect(m0).toBe(m0Baseline!);
+
+                // Trailing pure-defer replay pair must be byte-stable.
+                setDefer("B10 replay 1");
+                await h.sendPrompt(sessionId, "B10 turn 6: defer replay.");
+                setDefer("B10 replay 2");
+                await h.sendPrompt(sessionId, "B10 turn 7: defer replay again.");
+                const replayPair = mainAgentRequests(h.mock.requests()).slice(-2);
+                const busts = findBusts(replayPair);
+                if (busts.length > 0) {
+                    console.error(
+                        `[cache-invariant:B10-additive-memory] ${busts.length} bust(s):\n${formatBustReport(busts)}`,
                     );
                 }
                 expect(busts.length).toBe(0);
