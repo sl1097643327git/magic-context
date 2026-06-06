@@ -236,6 +236,21 @@ function queueMemoryUpdate(targetId: number, newContent: string): void {
     });
 }
 
+/**
+ * Bump the project memory epoch — the cross-process HARD-bust signal an external
+ * (dashboard) memory mutation or a session upgrade fires. Unlike the in-session
+ * supersede-delta path (B11), this MUST force a full m[0] re-materialization.
+ */
+function bumpProjectEpoch(): void {
+    writeContextDb((db) => {
+        db.prepare(
+            `INSERT INTO project_state (project_path, project_memory_epoch)
+             VALUES (?, 1)
+             ON CONFLICT(project_path) DO UPDATE SET project_memory_epoch = project_memory_epoch + 1`,
+        ).run(projectIdentity());
+    });
+}
+
 /** Emit a single ctx_reduce tool call on the first main-agent request that exposes it. */
 function emitCtxReduceOnce(drop: string): void {
     let emitted = false;
@@ -588,6 +603,79 @@ describe("cache invariants — m[0]/m[1] taxonomy (B class)", () => {
                 }
                 expect(busts.length).toBe(0);
             }, 220_000);
+        });
+    });
+
+    describe("#given a genuine HARD trigger — project epoch bump (B12 — the fold direction)", () => {
+        describe("#when a memory rode m[1], then the epoch bumps", () => {
+            it("#then m[0] re-materializes folding the delta in, m[1] resets, and defer re-stabilizes", async () => {
+                //#given — get a memory riding m[1] (the B10 setup): materialize an
+                // empty m[0], then add a memory and surface it as an m[1] delta.
+                const sessionId = await h.createSession();
+                setDefer("B12 warm 1");
+                await h.sendPrompt(sessionId, "B12 turn 1: warmup.");
+                h.mock.setDefault({ text: "B12 high", usage: EXECUTE_USAGE });
+                await h.sendPrompt(sessionId, "B12 turn 2: high usage marks next pass execute.");
+                setDefer("B12 materialize-empty");
+                await h.sendPrompt(sessionId, "B12 turn 3: execute pass materializes empty m[0].");
+
+                h.mock.setDefault({ text: "B12 pressure", usage: EXECUTE_USAGE });
+                await h.sendPrompt(sessionId, "B12 turn 4: high usage marks next pass execute.");
+                seedMemory("B12 delta rule: keep the cache prefix byte-identical across defer passes.");
+                setDefer("B12 surface");
+                await h.sendPrompt(sessionId, "B12 turn 5: execute pass surfaces the memory into m[1].");
+
+                let requests = mainAgentRequests(h.mock.requests());
+                const surfaceReq = requests.find((r) => extractM1(r.body)?.includes("B12 delta rule"));
+                expect(surfaceReq).toBeDefined();
+                // Pre-bump: memory is in m[1], NOT in the empty m[0].
+                expect(extractM0(surfaceReq!.body)).toContain("<session-history></session-history>");
+                expect(extractM1(surfaceReq!.body)).toContain("B12 delta rule");
+
+                //#when — a HARD trigger fires (epoch bump = external/dashboard
+                // mutation). Turn 6 records high usage so turn 7 is cache-busting;
+                // mustMaterialize must re-materialize m[0] on the epoch change.
+                h.mock.setDefault({ text: "B12 hard-pressure", usage: EXECUTE_USAGE });
+                await h.sendPrompt(sessionId, "B12 turn 6: high usage marks the next pass execute.");
+                bumpProjectEpoch();
+                setDefer("B12 refold");
+                await h.sendPrompt(sessionId, "B12 turn 7: execute pass HARD-refolds m[0].");
+
+                //#then — the memory has folded INTO the m[0] baseline, and m[1]
+                // reset to the empty placeholder (delta reconciled away).
+                requests = mainAgentRequests(h.mock.requests());
+                const refoldReq = requests.find(
+                    (r, i) =>
+                        i > requests.indexOf(surfaceReq!) &&
+                        (extractM0(r.body)?.includes("B12 delta rule") ?? false),
+                );
+                expect(refoldReq).toBeDefined();
+                const m0 = extractM0(refoldReq!.body)!;
+                const m1 = extractM1(refoldReq!.body)!;
+                // Fold invariant: the memory is now in the m[0] baseline...
+                expect(m0).toContain("B12 delta rule");
+                // ...and m[1] reset to the empty placeholder (no <new-memories>).
+                expect(m1).toContain("(no new content since last materialization)");
+                expect(m1).not.toContain("B12 delta rule");
+
+                // After the one-time HARD fold, defer passes re-stabilize: the new
+                // m[0]+m[1] replay byte-identical across the trailing defer pair.
+                const refoldIdx = requests.indexOf(refoldReq!);
+                setDefer("B12 replay 1");
+                await h.sendPrompt(sessionId, "B12 turn 8: defer replay after refold.");
+                setDefer("B12 replay 2");
+                await h.sendPrompt(sessionId, "B12 turn 9: defer replay again.");
+                const after = mainAgentRequests(h.mock.requests()).slice(refoldIdx);
+                expect(new Set(after.map((r) => extractM0(r.body))).size).toBe(1);
+                const replayPair = mainAgentRequests(h.mock.requests()).slice(-2);
+                const busts = findBusts(replayPair);
+                if (busts.length > 0) {
+                    console.error(
+                        `[cache-invariant:B12-hard-refold] ${busts.length} bust(s):\n${formatBustReport(busts)}`,
+                    );
+                }
+                expect(busts.length).toBe(0);
+            }, 240_000);
         });
     });
 });
