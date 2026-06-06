@@ -167,11 +167,15 @@ function renderSessionRefCompartment(c: ReferenceCompartment): string {
         (c.episodeType ? ` episode_type="${escapeXmlAttr(c.episodeType)}"` : "") +
         ` importance="${importance}"`;
 
-    // Tier presence: v2 rows have a non-null/undefined p1; legacy rows have NULL
-    // (stored) or undefined (in-flight candidate). Loose != catches both.
+    // Tier presence: a row is v2-tiered ONLY when `p1` is a non-empty string
+    // (matches the compartment parser's contract + the NEEDS_UPGRADE predicate
+    // `legacy=1 OR p1 IS NULL OR p1=''`). Legacy rows (NULL p1) AND malformed
+    // pseudo-v2 rows (`p1=''` from an interrupted upgrade) both fall through to
+    // flat `content` — otherwise the reference block emitted empty <p1>/<p2>/<p3>
+    // and lost the row's continuity/calibration content.
     // Tier bodies are XML-escaped: user/assistant text containing <, >, & would
     // otherwise produce malformed XML in the historian's reference-input prompt.
-    if (c.p1 != null) {
+    if (typeof c.p1 === "string" && c.p1.length > 0) {
         // v2 tiered row: show all four paraphrase tiers exactly as stored. p4 may be
         // empty (self-closing) per the three valid P4 shapes.
         const p4 = c.p4 && c.p4.length > 0 ? `<p4>\n${escapeXmlContent(c.p4)}\n</p4>` : "<p4/>";

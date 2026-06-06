@@ -12,7 +12,11 @@ import {
     getOrCreateSessionMeta,
     updateSessionMeta,
 } from "../../features/magic-context/storage-meta";
-import { clearHistorianFailureState } from "../../features/magic-context/storage-meta-persisted";
+import {
+    clearDetectedContextLimit,
+    clearEmergencyRecovery,
+    clearHistorianFailureState,
+} from "../../features/magic-context/storage-meta-persisted";
 import { clearSidebarSnapshotCache } from "../../plugin/sidebar-snapshot-cache";
 import type { PluginContext } from "../../plugin/types";
 import { sessionLog } from "../../shared/logger";
@@ -304,6 +308,18 @@ export function createEventHook(args: {
                     // erase the first valid usage sample from the new model.
                     clearHistorianFailureState(args.db, assistantInfo.sessionID);
                     clearPersistedReasoningWatermark(args.db, assistantInfo.sessionID);
+                    // Clear the prior model's detected-overflow limit and the
+                    // emergency-recovery flag. The transform has its OWN model-change
+                    // branch that clears these, but it never fires on a mid-session
+                    // switch: this handler updates liveModelBySession first, so by the
+                    // time the transform runs, its knownModel already equals the new
+                    // model. transform.ts explicitly delegates mid-session switches to
+                    // "the first message.updated to trigger hook-handler clearing" —
+                    // so the detected-limit + recovery clears must live HERE too, else
+                    // the old model's limit leaks into the new model's pressure math
+                    // (e.g. a 120K detected limit kept after switching to a 1M model).
+                    clearDetectedContextLimit(args.db, assistantInfo.sessionID);
+                    clearEmergencyRecovery(args.db, assistantInfo.sessionID);
                     updateSessionMeta(args.db, assistantInfo.sessionID, {
                         clearedReasoningThroughTag: 0,
                         observedSafeInputTokens: 0,

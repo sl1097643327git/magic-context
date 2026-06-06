@@ -79,16 +79,22 @@ not "Deleted," so there is no misleading success semantic. The mutation-type is
 `delete` (vs `archive`) only to distinguish agent-intent in the log; both render
 as "removed" in m[1]. Do not change `delete` to a hard `DELETE`.
 
-### A6. Deferred-materialization signal can be consumed mid-turn
+### A6. Deferred-publication consumption is mid-turn-gated (both harnesses) — RESOLVED
 
-Both harnesses include the deferred-materialization signal in
-`isCacheBustingPass` / `shouldRunHeuristics` regardless of mid-turn state, so a
-background historian/recomp publish can cause an m[0]/m[1] re-render on the next
-transform pass even mid-turn. This is accepted because the signal is only *set*
-at safe points (publish completes atomically) and the re-render is byte-stable
-when nothing material changed, so the worst case is one extra cache-busting pass,
-not corruption. Tightening this to gate on `!midTurn` is a possible future
-refinement, not a correctness fix. (OpenCode and Pi behave identically here.)
+Earlier this entry accepted that a background historian/recomp publish could
+re-render m[0]/m[1] even mid-turn. That is no longer the behavior: both harnesses
+now gate deferred-publication consumption on the **mid-turn-adjusted** scheduler
+decision. OpenCode computes `canConsumeDeferredOnThisPass(...)` from
+`midTurnAdjustedSchedulerDecision`; Pi now computes an equivalent
+`canConsumeDeferredLate` (mid-turn-aware) **before** `shouldRunHeuristics` and
+feeds it in — fixing a prior inversion where Pi read the raw
+`deferredMaterializationSessions.has()` (no mid-turn gate) and then derived
+`canConsumeDeferredLate` from `shouldRunHeuristics`, which let Pi run heuristics +
+drain the native compaction marker mid-turn while OpenCode stayed deferred. So a
+deferred publication that lands mid-turn now waits for the next non-mid-turn
+execute/force pass on both harnesses (force-materialization ≥85% still bypasses,
+identically). Explicit flush (`hasPendingMaterialization`) is still a separate,
+always-eligible trigger on both — matching OpenCode's `isExplicitFlush`.
 
 ---
 

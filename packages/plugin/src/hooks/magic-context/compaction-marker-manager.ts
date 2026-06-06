@@ -246,32 +246,36 @@ export function updateCompactionMarkerAfterPublication(
     sessionId: string,
     lastCompartmentEnd: number,
     directory?: string,
-): void {
+): boolean {
     const existing = getPersistedCompactionMarkerState(db, sessionId);
 
     if (existing) {
         if (existing.boundaryOrdinal === lastCompartmentEnd) {
-            // Same boundary — nothing to do (placeholder text never changes)
-            return;
+            // Same boundary — nothing to do (placeholder text never changes).
+            // Already current = success.
+            return true;
         }
 
         // Boundary moved forward — remove old marker and inject new one.
-        // Clear persisted state only after successful removal to avoid orphaned DB rows.
-        try {
-            removeCompactionMarker(existing);
-            setPersistedCompactionMarkerState(db, sessionId, null);
+        // removeCompactionMarker returns false on failure (it does NOT throw),
+        // so honor the boolean: only clear persisted state after a SUCCESSFUL
+        // removal. Clearing it on a failed removal would orphan the old marker
+        // rows AND, if the injection below also fails, lose the durable retry
+        // path entirely. On removal failure we abort WITHOUT clearing — the
+        // caller (and the next pass) can retry against the still-persisted state.
+        const removed = removeCompactionMarker(existing);
+        if (!removed) {
             sessionLog(
                 sessionId,
-                `compaction-marker: removed old boundary at ordinal ${existing.boundaryOrdinal}, moving to ${lastCompartmentEnd}`,
+                `compaction-marker: failed to remove old boundary at ordinal ${existing.boundaryOrdinal}; preserving persisted state for retry (not injecting new marker this pass)`,
             );
-        } catch (error) {
-            sessionLog(
-                sessionId,
-                `compaction-marker: failed to remove old boundary at ordinal ${existing.boundaryOrdinal}, proceeding with new injection:`,
-                error,
-            );
-            // State kept so next cleanup/update can retry removal
+            return false;
         }
+        setPersistedCompactionMarkerState(db, sessionId, null);
+        sessionLog(
+            sessionId,
+            `compaction-marker: removed old boundary at ordinal ${existing.boundaryOrdinal}, moving to ${lastCompartmentEnd}`,
+        );
     }
 
     const result = injectCompactionMarker({
@@ -290,7 +294,12 @@ export function updateCompactionMarkerAfterPublication(
             sessionId,
             `compaction-marker: injected at ordinal ${lastCompartmentEnd}, boundary user msg ${result.boundaryMessageId}`,
         );
+        return true;
     }
+    // Injection failed (e.g. boundary message not found). The old marker was
+    // already removed (if any); there's nothing persisted to retry against, so
+    // report failure so callers don't treat the boundary as advanced.
+    return false;
 }
 
 /**

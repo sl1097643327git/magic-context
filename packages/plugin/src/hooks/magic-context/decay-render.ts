@@ -52,6 +52,20 @@ function escapeXmlContent(s: string): string {
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+/**
+ * A row is v2-tiered ONLY when `p1` is a non-empty string. This matches the
+ * compartment parser's contract (compartment-parser.ts: a row is tiered iff
+ * `p1.length > 0`) and the NEEDS_UPGRADE predicate (`legacy=1 OR p1 IS NULL OR
+ * p1=''`). Rows with empty/null `p1` — legacy rows, or the malformed pseudo-v2
+ * state left by an interrupted upgrade (`legacy=0` but tiers never populated) —
+ * must render via flat `content`, never as an empty tier body. Note a VALID v2
+ * row can still have an empty `p4` (a legitimate self-close); that's handled by
+ * the tier-body path, not here, because such a row has a non-empty `p1`.
+ */
+function isTieredRow(c: DecayRenderCompartment): boolean {
+    return typeof c.p1 === "string" && c.p1.length > 0;
+}
+
 /** v2 paraphrase tier body with denser-tier and content fallbacks. */
 function tierBody(c: DecayRenderCompartment, tier: number): string {
     const tiers = [c.p1, c.p2, c.p3, c.p4];
@@ -90,11 +104,16 @@ function renderOneCompartment(c: DecayRenderCompartment, tier: number): string {
     const baseAttrs = `start="${c.startMessage}" end="${c.endMessage}" title="${escapeXmlAttr(c.title)}"`;
     if (tier >= 5) return ""; // archived
 
-    if (c.legacy === 1) {
-        if (tier >= 4) return `<compartment ${baseAttrs} />`;
+    // Legacy rows AND malformed pseudo-v2 rows (legacy=0 but no usable p1, e.g.
+    // an interrupted upgrade) render via flat `content` — never as an empty
+    // tier. Without this, a `legacy=0, p1=''` row produced an empty self-close
+    // here, silently dropping the compartment body from m[0]/m[1].
+    if (c.legacy === 1 || !isTieredRow(c)) {
+        const flat = (c.content ?? "").trim();
+        if (tier >= 4 || flat.length === 0) return `<compartment ${baseAttrs} />`;
         return [
             `<compartment ${baseAttrs}>`,
-            escapeXmlContent(legacyBodyForTier(c.content, tier)),
+            escapeXmlContent(legacyBodyForTier(flat, tier)),
             "</compartment>",
         ].join("\n");
     }

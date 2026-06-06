@@ -163,9 +163,23 @@ describe("source contract: peek-then-drain in runPipeline (history)", () => {
 		expect(segment).toMatch(/if\s*\(\s*args\.isCacheBusting\s*\)/);
 	});
 
-	test("deferred publication drains only on a pass that can consume late", () => {
-		expect(code).toMatch(
+	test("deferred publication drains only on a MID-TURN-AWARE can-consume-late gate", () => {
+		// canConsumeDeferredLate must be a mid-turn-aware gate computed
+		// INDEPENDENTLY (from the mid-turn-adjusted schedulerDecision + force
+		// threshold), NOT derived from shouldRunHeuristics. The old inverted form
+		// `baseShouldApplyPendingOps || shouldRunHeuristics` let a deferred publish
+		// drain mid-turn (shouldRunHeuristics read raw deferred-set membership),
+		// busting cache where OpenCode stayed deferred. It must mirror OpenCode's
+		// canConsumeDeferredOnThisPass.
+		expect(code).not.toMatch(
 			/const\s+canConsumeDeferredLate\s*=\s*baseShouldApplyPendingOps\s*\|\|\s*shouldRunHeuristics/,
+		);
+		expect(code).toMatch(
+			/const\s+canConsumeDeferredLate\s*=\s*[\s\S]*?args\.schedulerDecision\s*===\s*"execute"/,
+		);
+		expect(code).toContain("args.forceMaterialization === true");
+		expect(code).toContain(
+			"args.contextUsage.percentage >= FORCE_MATERIALIZATION_PERCENTAGE",
 		);
 		expect(code).toContain("const deferredMaterialize =");
 		expect(code).toContain("const deferredHistoryRefresh =");

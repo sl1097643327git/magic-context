@@ -296,15 +296,22 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             // marker that a prior in-flight incremental publish may have left
             // behind — recomp now owns the boundary.
             if (lastCompartmentEnd > 0) {
-                updateCompactionMarkerAfterPublication(
+                const markerUpdated = updateCompactionMarkerAfterPublication(
                     db,
                     sessionId,
                     lastCompartmentEnd,
                     deps.directory,
                 );
-                const stalePending = getPendingCompactionMarkerState(db, sessionId);
-                if (stalePending) {
-                    clearPendingCompactionMarkerStateIf(db, sessionId, stalePending);
+                // Only CAS-clear a stale pending marker blob when the direct
+                // update actually advanced the boundary. If the update failed
+                // (transient OpenCode DB write error on removal/injection), keep
+                // the pending blob so the deferred drain can still retry —
+                // clearing it would drop the only durable retry path.
+                if (markerUpdated) {
+                    const stalePending = getPendingCompactionMarkerState(db, sessionId);
+                    if (stalePending) {
+                        clearPendingCompactionMarkerStateIf(db, sessionId, stalePending);
+                    }
                 }
             }
 
@@ -585,15 +592,19 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
         // promoteAndFinalize early-exit path already does this). Without it, the
         // next incremental run may reprocess already-compartmentalized messages.
         if (lastCompartmentEnd > 0) {
-            updateCompactionMarkerAfterPublication(
+            const markerUpdated = updateCompactionMarkerAfterPublication(
                 db,
                 sessionId,
                 lastCompartmentEnd,
                 deps.directory,
             );
-            const stalePending = getPendingCompactionMarkerState(db, sessionId);
-            if (stalePending) {
-                clearPendingCompactionMarkerStateIf(db, sessionId, stalePending);
+            // Only clear the stale pending blob when the boundary actually
+            // advanced — preserve it for the deferred-drain retry on failure.
+            if (markerUpdated) {
+                const stalePending = getPendingCompactionMarkerState(db, sessionId);
+                if (stalePending) {
+                    clearPendingCompactionMarkerStateIf(db, sessionId, stalePending);
+                }
             }
         }
 

@@ -732,7 +732,23 @@ export function createTransform(deps: TransformDeps) {
                 );
             }
 
-            startRecoveryRun();
+            const recoveryStarted = startRecoveryRun();
+            // If recovery can't start because there's no eligible pre-tail
+            // history to compact, the runner's own no-op clear (which disarms
+            // needs_emergency_recovery) never fires — so the flag would stay
+            // armed and force-bump every later pass to 95% forever (abort loop),
+            // even after the user manually frees context. Disarm here too,
+            // matching the runner's no-op semantics. Preserve detectedContextLimit
+            // (authoritative model data). Only do this for the no-eligible-history
+            // reason — an active run (startRecoveryRun false because one is already
+            // in flight) will clear the flag itself when it completes.
+            if (!recoveryStarted && !getEligibleHistoryForCompartment()) {
+                clearEmergencyRecovery(db, sessionId);
+                sessionLog(
+                    sessionId,
+                    "transform: disarming emergency recovery — no eligible pre-tail history to compact (would otherwise loop at 95%)",
+                );
+            }
             sessionLog(
                 sessionId,
                 `EMERGENCY: aborting session at ${emergencyPercentage}%, historian failures: ${historianFailureState.failureCount}`,

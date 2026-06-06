@@ -368,10 +368,19 @@ export async function executePartialRecompInternal(
             // prior in-flight incremental publish may have left behind — partial
             // recomp now owns the boundary up to lastEnd.
             if (lastEnd > 0) {
-                updateCompactionMarkerAfterPublication(db, sessionId, lastEnd, deps.directory);
-                const stalePending = getPendingCompactionMarkerState(db, sessionId);
-                if (stalePending) {
-                    clearPendingCompactionMarkerStateIf(db, sessionId, stalePending);
+                const markerUpdated = updateCompactionMarkerAfterPublication(
+                    db,
+                    sessionId,
+                    lastEnd,
+                    deps.directory,
+                );
+                // Only clear the stale pending blob when the boundary actually
+                // advanced — preserve it for the deferred-drain retry on failure.
+                if (markerUpdated) {
+                    const stalePending = getPendingCompactionMarkerState(db, sessionId);
+                    if (stalePending) {
+                        clearPendingCompactionMarkerStateIf(db, sessionId, stalePending);
+                    }
                 }
             }
             return { compartmentCount: merged.length, lastEndMessage: lastEnd };

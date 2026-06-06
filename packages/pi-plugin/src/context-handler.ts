@@ -1584,39 +1584,49 @@ export function registerPiContextHandler(
 			}
 			let usagePercentage = 0;
 			let usageInputTokens = 0;
+			// Persisted usage (from message_end via persistPiPressureFromMessageEnd)
+			// already has its percentage computed against the sane-bounded +
+			// detected-limit-corrected effective limit, so it's authoritative and
+			// must NOT be recomputed below. The fallback path (raw getContextUsage)
+			// uses Pi's own denominator and DOES need correcting.
+			let usedPersistedUsage = false;
 			if (
 				sessionMetaForUsage.lastContextPercentage > 0 &&
 				sessionMetaForUsage.lastInputTokens > 0
 			) {
 				usagePercentage = sessionMetaForUsage.lastContextPercentage;
 				usageInputTokens = sessionMetaForUsage.lastInputTokens;
+				usedPersistedUsage = true;
 			} else {
 				usagePercentage =
 					typeof piUsage?.percent === "number" ? piUsage.percent : 0;
 				usageInputTokens =
 					typeof piUsage?.tokens === "number" ? piUsage.tokens : 0;
 			}
-			let usageContextLimit =
-				typeof piUsage?.contextWindow === "number" && piUsage.contextWindow > 0
-					? piUsage.contextWindow
-					: undefined;
+			// Sane-bound Pi's reported window the SAME way message_end does
+			// (isSaneLimit, not `> 0`). A garbage-but-positive window (e.g. a
+			// transient 6748) must be REJECTED here, not trusted — otherwise the
+			// history budget collapses to a few hundred tokens and over-archives.
+			let usageContextLimit = isSaneLimit(piUsage?.contextWindow)
+				? piUsage.contextWindow
+				: undefined;
 
 			// Overflow recovery: a previous LLM call ended with a
 			// provider context-overflow error AND the pi.on("message_end")
 			// handler persisted needs_emergency_recovery=1. On THIS pass:
 			//
-			//   1. Bump effective percentage to 95% so the existing
-			//      emergency path (await historian + drop-all-tools)
-			//      fires regardless of pressure math.
-			//   2. If the error reported a real context limit, prefer
+			//   1. If the error reported a real context limit, prefer
 			//      that limit over Pi's reported contextWindow (which
 			//      was clearly wrong if we just overflowed).
+			//   2. Bump effective percentage to 95% so the existing
+			//      emergency path (await historian + drop-all-tools)
+			//      fires regardless of pressure math.
 			//
-			// Mirrors OpenCode's transform.ts:401 wiring exactly. The
-			// recovery flag is cleared by the historian publication
-			// path on success (see signalPiHistoryRefresh), so we won't
-			// keep bumping forever.
+			// Mirrors OpenCode's transform.ts wiring. The recovery flag is
+			// cleared by the historian publication path on success (see
+			// signalPiHistoryRefresh), so we won't keep bumping forever.
 			const tEmergencyRecovery = performance.now();
+			let needsEmergencyBump = false;
 			try {
 				const overflowState = getOverflowState(options.db, sessionId);
 				if (overflowState.detectedContextLimit > 0) {
@@ -1628,13 +1638,8 @@ export function registerPiContextHandler(
 						overflowState.detectedContextLimit,
 					);
 				}
-				if (overflowState.needsEmergencyRecovery && usagePercentage < 95) {
-					sessionLog(
-						sessionId,
-						`transform: overflow recovery flag set — bumping percentage from ${usagePercentage.toFixed(1)}% to 95% (detectedLimit=${overflowState.detectedContextLimit || "unknown"})`,
-					);
-					usagePercentage = 95;
-				}
+				needsEmergencyBump =
+					overflowState.needsEmergencyRecovery && usagePercentage < 95;
 			} catch (err) {
 				sessionLog(
 					sessionId,
@@ -1645,7 +1650,7 @@ export function registerPiContextHandler(
 			const sessionMeta = sessionMetaForUsage;
 			const modelKey = liveModelBySession.get(sessionId);
 			// Cold-start stable-limit fallback: if `getContextUsage()` hasn't
-			// reported a window yet (first pass after restart, before any
+			// reported a (sane) window yet (first pass after restart, before any
 			// response), read the model's window directly from `ctx.model`
 			// — Pi exposes it at model-select, independent of any message. This
 			// is Pi's authoritative source (replacing the old models.dev lookup);
@@ -1657,6 +1662,27 @@ export function registerPiContextHandler(
 				if (isSaneLimit(modelWindow)) {
 					usageContextLimit = modelWindow;
 				}
+			}
+			// Fallback-path percentage correction: when we DIDN'T use persisted
+			// usage, `usagePercentage` is on Pi's raw denominator — which is wrong
+			// once we've corrected the limit (detected-overflow cap, or a sane
+			// window replacing a garbage one). Recompute against the corrected
+			// limit so the scheduler's percentage check and the 85/95% cleanup
+			// paths see the true pressure. (Persisted usage is already correct.)
+			if (
+				!usedPersistedUsage &&
+				isSaneLimit(usageContextLimit) &&
+				usageInputTokens > 0
+			) {
+				usagePercentage = (usageInputTokens / usageContextLimit) * 100;
+			}
+			// Emergency bump LAST so it wins over any recomputation above.
+			if (needsEmergencyBump) {
+				sessionLog(
+					sessionId,
+					`transform: overflow recovery flag set — bumping percentage to 95% (detectedLimit=${usageContextLimit ?? "unknown"})`,
+				);
+				usagePercentage = 95;
 			}
 			let schedulerDecision: "execute" | "defer";
 			const tScheduler = performance.now();
@@ -2586,10 +2612,32 @@ function maybeFireHistorian(args: {
 	let usageContextLimit: number | undefined;
 	try {
 		const piUsage = ctx.getContextUsage?.();
-		usageContextLimit =
-			typeof piUsage?.contextWindow === "number" && piUsage.contextWindow > 0
-				? piUsage.contextWindow
-				: undefined;
+		// Sane-bound (isSaneLimit, NOT `> 0`) so a garbage-but-positive window
+		// can't drive the trigger budget — mirrors the main pressure pass.
+		usageContextLimit = isSaneLimit(piUsage?.contextWindow)
+			? piUsage.contextWindow
+			: undefined;
+		// Cold-start: fall back to the model's window when usage hasn't reported
+		// a sane one yet (first pass after restart).
+		if (
+			usageContextLimit === undefined &&
+			isSaneLimit(ctx.model?.contextWindow)
+		) {
+			usageContextLimit = ctx.model.contextWindow;
+		}
+		// Apply the detected-overflow cap (authoritative real limit) just like the
+		// main pass — otherwise the trigger budget uses the wrong (larger) limit.
+		try {
+			const overflowState = getOverflowState(db, sessionId);
+			if (overflowState.detectedContextLimit > 0) {
+				usageContextLimit = Math.min(
+					usageContextLimit ?? overflowState.detectedContextLimit,
+					overflowState.detectedContextLimit,
+				);
+			}
+		} catch {
+			// Best-effort — fall through with the uncorrected limit.
+		}
 		const sessionMetaForUsage = getOrCreateSessionMeta(db, sessionId);
 		if (
 			sessionMetaForUsage.lastContextPercentage > 0 &&
@@ -2621,8 +2669,15 @@ function maybeFireHistorian(args: {
 				);
 				return;
 			}
+			// Recompute the fallback percentage against the corrected limit (raw
+			// piUsage.percent is on Pi's own denominator and is wrong once the
+			// limit was sane-bounded or overflow-capped).
+			const fallbackPercentage =
+				isSaneLimit(usageContextLimit) && piUsage.tokens > 0
+					? (piUsage.tokens / usageContextLimit) * 100
+					: piUsage.percent;
 			usage = {
-				percentage: piUsage.percent,
+				percentage: fallbackPercentage,
 				inputTokens: piUsage.tokens,
 			};
 			sessionLog(
@@ -2891,6 +2946,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	let executedWorkThisPass = false;
 	let historyWasConsumedThisPass = false;
 	let materializationSatisfiedThisPass = false;
+	let pendingOpsAppliedThisPass = false;
 	let suppressDeferredHistoryDrain = false;
 	let casLost = false;
 	const deferredHistoryWasPendingAtPassStart =
@@ -2964,6 +3020,26 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const alreadyRanHeuristicsThisTurn =
 		currentTurnId !== null &&
 		lastHeuristicsTurnIdBySession.get(args.sessionId) === currentTurnId;
+	// Mid-turn-aware gate for consuming DEFERRED publication signals — mirrors
+	// OpenCode's canConsumeDeferredOnThisPass. `args.schedulerDecision` is ALREADY
+	// the mid-turn-adjusted decision (applyMidTurnDeferral downgrades execute→defer
+	// mid-turn), so a deferred-publication signal that lands mid-turn is NOT
+	// consumed here — it waits for the next non-mid-turn execute/force pass. This
+	// breaks the previous inverted dependency where shouldRunHeuristics read the
+	// RAW deferredMaterializationSessions.has() (no mid-turn gate) and then
+	// canConsumeDeferredLate was derived FROM shouldRunHeuristics — so Pi ran
+	// heuristics + drained the native compaction marker mid-turn where OpenCode
+	// stays deferred (busting the Anthropic prompt cache while a multi-step turn
+	// was still accumulating tool calls). (OpenCode also consumes on
+	// justAwaitedPublication, but Pi's historian is detached and signals via the
+	// deferred sets post-publish, so there's no inline await to special-case.)
+	const canConsumeDeferredLate =
+		args.schedulerDecision === "execute" ||
+		args.forceMaterialization === true ||
+		args.contextUsage.percentage >= FORCE_MATERIALIZATION_PERCENTAGE;
+	const deferredMaterializeEligible =
+		canConsumeDeferredLate &&
+		deferredMaterializationSessions.has(args.sessionId);
 	// Pi sessions are primary-equivalent today. If Pi adds subagents on this
 	// transform path, subagents should bypass this once-per-turn guard like
 	// OpenCode does, because they do not share the primary agent's turn cache.
@@ -2971,7 +3047,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		args.heuristics !== undefined &&
 		(args.forceMaterialization === true ||
 			hasPendingMaterialization(args.sessionId) ||
-			deferredMaterializationSessions.has(args.sessionId) ||
+			deferredMaterializeEligible ||
 			(args.schedulerDecision === "execute" && !alreadyRanHeuristicsThisTurn));
 
 	// 1. Tagging: assigns tag numbers + injects §N§ prefixes (unless
@@ -3071,8 +3147,13 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		args.schedulerDecision === "execute" ||
 		args.forceMaterialization ||
 		hasPendingMaterializeSignal;
-	const canConsumeDeferredLate =
-		baseShouldApplyPendingOps || shouldRunHeuristics;
+	// `canConsumeDeferredLate` is computed ONCE, earlier (above shouldRunHeuristics),
+	// as a mid-turn-aware gate independent of shouldRunHeuristics — mirroring
+	// OpenCode's canConsumeDeferredOnThisPass. It must NOT be re-derived from
+	// shouldRunHeuristics here (the old inverted dependency that let deferred
+	// publication drain mid-turn). Explicit flush (hasPendingMaterializeSignal)
+	// still forces application via baseShouldApplyPendingOps, exactly as OpenCode
+	// keeps isExplicitFlush separate from the deferred-consumption gate.
 	const deferredMaterialize =
 		canConsumeDeferredLate && deferredMaterializationWasPending;
 	const deferredHistoryRefresh =
@@ -3107,17 +3188,25 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				tApplyPending,
 			);
 			executedWorkThisPass = true;
-			// Drain only after success — if applyPendingOperations throws
-			// the flag stays set so the next pass retries.
+			// materializationSatisfiedThisPass enables the deferred-HISTORY drain
+			// below. OpenCode drains deferred-history on history-consumption alone
+			// (not heuristics success), so setting this right after pending-ops
+			// success matches OpenCode for the history drain.
 			materializationSatisfiedThisPass = true;
+			pendingOpsAppliedThisPass = true;
 			if (hasPendingMaterializeSignal) {
 				if (args.heuristics === undefined) {
 					consumePendingMaterialization(args.sessionId);
 				}
 			}
-			if (deferredMaterialize) {
-				consumeDeferredMaterialization(args.sessionId);
-			}
+			// NOTE: do NOT consume deferredMaterialization here. OpenCode only
+			// marks deferredMaterializedSuccessfully AFTER the heuristics phase
+			// also completes (its pending-ops + heuristics share one try block, and
+			// the success flag is set at the end). If heuristics throws, OpenCode
+			// leaves deferred-materialization UNdrained so the next pass retries the
+			// full publication-driven materialization + heuristics. Pi's heuristics
+			// run in a separate try below, so we defer this consume to after that
+			// block, gated on heuristics success (or heuristics being disabled).
 		} catch (err) {
 			sessionLog(
 				args.sessionId,
@@ -3335,6 +3424,24 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				args.sessionId,
 				`heuristic cleanup failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
 			);
+		}
+	}
+
+	// Consume deferred-materialization ONLY after the full pass (pending ops +
+	// heuristics) succeeded — matching OpenCode, which sets
+	// deferredMaterializedSuccessfully after its shared pending-ops+heuristics
+	// try block completes. If heuristics was SUPPOSED to run this pass
+	// (shouldRunHeuristics) but threw (heuristicsExecuted stays false), we leave
+	// the signal armed so the next pass retries the publication-driven
+	// materialization + heuristics. When heuristics weren't scheduled this pass
+	// (!shouldRunHeuristics — e.g. heuristics disabled), pending-ops success is
+	// sufficient. Whenever deferredMaterialize is true, shouldRunHeuristics is
+	// also true (deferredMaterializeEligible feeds it), so the common path waits
+	// on heuristics exactly like OpenCode.
+	if (deferredMaterialize && pendingOpsAppliedThisPass) {
+		const fullPassSucceeded = shouldRunHeuristics ? heuristicsExecuted : true;
+		if (fullPassSucceeded) {
+			consumeDeferredMaterialization(args.sessionId);
 		}
 	}
 
