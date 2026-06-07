@@ -397,8 +397,14 @@ export function loadPluginConfig(
         mergedRaw = deepMergeRawConfig(mergedRaw, projectRaw);
 
         // Post-merge: prevent a redirected embedding endpoint from inheriting
-        // the user's api_key (exfiltration guard).
-        for (const warning of dropInheritedEmbeddingKeyOnRedirect(projectRaw, mergedRaw)) {
+        // the user's api_key (exfiltration guard). Pass the user config so a
+        // project that only repeats the user's own endpoint (to change model,
+        // etc.) is not treated as a redirect.
+        for (const warning of dropInheritedEmbeddingKeyOnRedirect(
+            projectRaw,
+            mergedRaw,
+            userLoaded?.config,
+        )) {
             allWarnings.push(`[project config] ${warning}`);
         }
     }
@@ -510,7 +516,11 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
             allWarnings.push(`[project config] ${warning}`);
         }
         mergedRaw = deepMergeRawConfig(mergedRaw, projectRaw);
-        for (const warning of dropInheritedEmbeddingKeyOnRedirect(projectRaw, mergedRaw)) {
+        for (const warning of dropInheritedEmbeddingKeyOnRedirect(
+            projectRaw,
+            mergedRaw,
+            userLoaded?.config,
+        )) {
             allWarnings.push(`[project config] ${warning}`);
         }
     }

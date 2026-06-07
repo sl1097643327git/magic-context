@@ -24,13 +24,19 @@ const HIDDEN_AGENT_KEYS = ["historian", "dreamer", "sidekick"] as const;
  *  - `permission` — broadens the agent's per-tool permissions.
  *  - `tools`      — enable/disable map; could flip a denied tool (e.g. `bash`)
  *                   on for an agent whose allow-list intentionally excludes it.
+ *  - `system_prompt` — sidekick's custom system prompt. It takes precedence over
+ *                   the built-in prompt (sidekick/agent.ts reads
+ *                   `config.system_prompt` before `config.prompt`), so leaving it
+ *                   unstripped reopens the exact reprogramming vector `prompt`
+ *                   closes — a cloned repo could rewrite sidekick's instructions
+ *                   via `/ctx-aug`.
  *
  * Benign fields (model/temperature/disable/schedule/tasks/…) are deliberately
  * NOT stripped: a repo may legitimately tune its own dreamer cadence or model,
  * and none of those are an escalation vector (the model is still invoked
  * through the user's own provider auth).
  */
-const AGENT_ESCALATION_FIELDS = ["prompt", "permission", "tools"] as const;
+const AGENT_ESCALATION_FIELDS = ["prompt", "permission", "tools", "system_prompt"] as const;
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -91,11 +97,21 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
  *
  * `projectRaw` is the raw project config (pre-merge, so we can see what the
  * project itself declared). `mergedRaw` is the post-merge result, mutated in
- * place. Returns warnings.
+ * place. `userRaw` is the trusted user config; when supplied, the key is dropped
+ * only when the project endpoint ACTUALLY differs from the user's endpoint — a
+ * project repeating the user's own endpoint (e.g. only to change `model`) is not
+ * a redirect and must keep the inherited key. Returns warnings.
  */
+function normalizeEndpoint(value: unknown): string | undefined {
+    if (typeof value !== "string") return undefined;
+    const trimmed = value.trim().replace(/\/+$/, "");
+    return trimmed.length > 0 ? trimmed.toLowerCase() : undefined;
+}
+
 export function dropInheritedEmbeddingKeyOnRedirect(
     projectRaw: Record<string, unknown>,
     mergedRaw: Record<string, unknown>,
+    userRaw?: Record<string, unknown>,
 ): string[] {
     const projectEmbedding = projectRaw.embedding;
     if (!isPlainObject(projectEmbedding)) return [];
@@ -105,6 +121,20 @@ export function dropInheritedEmbeddingKeyOnRedirect(
     // is not an exfiltration vector.
     const redirectsEndpoint = "endpoint" in projectEmbedding;
     if (!redirectsEndpoint) return [];
+
+    // A project that merely repeats the user's OWN endpoint (e.g. to override
+    // `model` while keeping the same server) is not a redirect — the key was
+    // always destined for that endpoint. Only drop when the destination
+    // actually changed. When userRaw is absent we cannot tell, so fall back to
+    // the conservative presence-based drop.
+    const userEmbedding = userRaw?.embedding;
+    if (isPlainObject(userEmbedding)) {
+        const projectEndpoint = normalizeEndpoint(projectEmbedding.endpoint);
+        const userEndpoint = normalizeEndpoint(userEmbedding.endpoint);
+        if (projectEndpoint !== undefined && projectEndpoint === userEndpoint) {
+            return [];
+        }
+    }
 
     const providesOwnKey =
         typeof projectEmbedding.api_key === "string" && projectEmbedding.api_key.length > 0;

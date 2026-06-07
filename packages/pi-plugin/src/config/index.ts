@@ -275,6 +275,9 @@ export function loadPiConfig(
 		if (a.scope === b.scope) return 0;
 		return a.scope === "user" ? -1 : 1;
 	});
+	// The trusted user config (sorted first) — passed to the embedding-redirect
+	// guard so a project repeating the user's own endpoint is not a redirect.
+	const userRaw = mergeFiles.find((f) => f.scope === "user")?.config;
 
 	for (const loaded of mergeFiles) {
 		const prefix =
@@ -292,6 +295,7 @@ export function loadPiConfig(
 			for (const warning of dropInheritedEmbeddingKeyOnRedirect(
 				projectRaw,
 				rawConfig,
+				userRaw,
 			)) {
 				warnings.push(`${prefix} ${warning}`);
 			}
@@ -393,6 +397,7 @@ export function loadPiConfigDetailed(
 		if (a.scope === b.scope) return 0;
 		return a.scope === "user" ? -1 : 1;
 	});
+	const userRaw = mergeFiles.find((f) => f.scope === "user")?.config;
 
 	for (const loaded of mergeFiles) {
 		const prefix =
@@ -408,6 +413,7 @@ export function loadPiConfigDetailed(
 			for (const warning of dropInheritedEmbeddingKeyOnRedirect(
 				projectRaw,
 				rawConfig,
+				userRaw,
 			)) {
 				warnings.push(`${prefix} ${warning}`);
 			}

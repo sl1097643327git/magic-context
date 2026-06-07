@@ -1627,6 +1627,7 @@ export function registerPiContextHandler(
 			// signalPiHistoryRefresh), so we won't keep bumping forever.
 			const tEmergencyRecovery = performance.now();
 			let needsEmergencyBump = false;
+			let emergencyRecoveryArmed = false;
 			try {
 				const overflowState = getOverflowState(options.db, sessionId);
 				if (overflowState.detectedContextLimit > 0) {
@@ -1638,6 +1639,7 @@ export function registerPiContextHandler(
 						overflowState.detectedContextLimit,
 					);
 				}
+				emergencyRecoveryArmed = overflowState.needsEmergencyRecovery;
 				needsEmergencyBump =
 					overflowState.needsEmergencyRecovery && usagePercentage < 95;
 			} catch (err) {
@@ -1879,6 +1881,36 @@ export function registerPiContextHandler(
 						);
 					} catch {
 						// Historian already logged its own failure; just continue.
+					}
+				}
+
+				// Disarm a stuck emergency-recovery flag. The flag is normally
+				// cleared by the historian publication path (onPublished →
+				// clearEmergencyRecovery). But if recovery was armed by an
+				// overflow on a session with NO eligible pre-tail history to
+				// compact, no historian will ever spawn (maybeFireHistorian's
+				// trigger needs eligible history), so onPublished never fires and
+				// the flag stays armed — bumping every later pass to 95% forever
+				// (abort loop), even after the user manually frees context. Clear
+				// it here when there's no in-flight historian AND no eligible
+				// history, mirroring OpenCode transform.ts:745. detectedContextLimit
+				// is left intact (authoritative model data).
+				if (
+					emergencyRecoveryArmed &&
+					!inFlightHistorian.has(sessionId) &&
+					!hasEligiblePiCompartmentHistory(options.db, sessionId)
+				) {
+					try {
+						clearEmergencyRecovery(options.db, sessionId);
+						sessionLog(
+							sessionId,
+							"EMERGENCY: disarming recovery — no eligible pre-tail history to compact (would otherwise loop at 95%)",
+						);
+					} catch (err) {
+						sessionLog(
+							sessionId,
+							`EMERGENCY: clearEmergencyRecovery failed: ${err instanceof Error ? err.message : String(err)}`,
+						);
 					}
 				}
 			}

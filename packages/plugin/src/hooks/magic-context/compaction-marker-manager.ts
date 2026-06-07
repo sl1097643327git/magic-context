@@ -394,11 +394,14 @@ export function checkCompactionMarkerConsistency(db: Database): void {
             const state = getPersistedCompactionMarkerState(db, row.session_id);
             if (!state) continue;
 
-            // Check all 3 referenced rows
-            const boundaryExists = checkMessage.get(state.boundaryMessageId) !== null;
-            const summaryMessageExists = checkMessage.get(state.summaryMessageId) !== null;
-            const compactionPartExists = checkPart.get(state.compactionPartId) !== null;
-            const summaryPartExists = checkPart.get(state.summaryPartId) !== null;
+            // Check all 3 referenced rows. Use `!= null` (not `!== null`):
+            // bun:sqlite's .get() returns `undefined` for a missing row, so a
+            // strict `!== null` is always true and a deleted OpenCode row would
+            // be treated as present — leaving stale marker state never reconciled.
+            const boundaryExists = checkMessage.get(state.boundaryMessageId) != null;
+            const summaryMessageExists = checkMessage.get(state.summaryMessageId) != null;
+            const compactionPartExists = checkPart.get(state.compactionPartId) != null;
+            const summaryPartExists = checkPart.get(state.summaryPartId) != null;
 
             const allPresent =
                 boundaryExists && summaryMessageExists && compactionPartExists && summaryPartExists;
