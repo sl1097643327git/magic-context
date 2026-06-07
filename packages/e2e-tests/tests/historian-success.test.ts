@@ -173,7 +173,18 @@ describe("historian success path", () => {
             // in v0.14.1, tests need to provide the follow-up turn explicitly.
             await h.sendPrompt(sessionId, "turn 12: post-trigger follow-up.");
 
-            // Wait for historian to publish at least one compartment.
+            // Wait for the historian run to REACH ITS TERMINAL STATE: at least
+            // one compartment published AND compartment_in_progress cleared.
+            // These are NOT simultaneous — the compartment row is COMMITted
+            // (compartment-runner-incremental.ts BEGIN IMMEDIATE..COMMIT) well
+            // before the flag clears at the end of the same async run, with an
+            // `await ensureProjectRegistered` + embedding/signal/marker work in
+            // between. Waiting only on the compartment count (the old check)
+            // raced that window: on a slower runner the row exists while the
+            // flag is still 1. The flag always ends at 0 on a finished run
+            // (success path clears it; any throw clears it via the runner's
+            // catch), so the terminal invariant is "compartment present AND flag
+            // cleared". Wait for both.
             await h.waitFor(
                 () => {
                     const row = h
@@ -182,9 +193,16 @@ describe("historian success path", () => {
                             "SELECT COUNT(*) as c FROM compartments WHERE session_id = ?",
                         )
                         .get(sessionId) as { c: number } | null;
-                    return (row?.c ?? 0) >= 1;
+                    if ((row?.c ?? 0) < 1) return false;
+                    const meta = h
+                        .contextDb()
+                        .prepare(
+                            "SELECT compartment_in_progress FROM session_meta WHERE session_id = ?",
+                        )
+                        .get(sessionId) as { compartment_in_progress: number } | null;
+                    return (meta?.compartment_in_progress ?? 1) === 0;
                 },
-                { timeoutMs: 30_000, label: "compartment row appears" },
+                { timeoutMs: 30_000, label: "compartment published and in-progress flag cleared" },
             );
 
             // Assertions.
