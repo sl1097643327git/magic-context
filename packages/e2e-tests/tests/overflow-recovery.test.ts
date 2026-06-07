@@ -25,6 +25,15 @@
  * 3. **Recovery** — The emergency recovery flag forces the percentage to 95%
  *    even if the model's self-reported usage still looks low, which fires
  *    the existing 95% emergency path (abort + historian + aggressive drops).
+ *    NOTE: recovery runs on a transform pass AFTER detection. On opencode
+ *    <=1.15 an overflow triggered in-turn compaction (a second pass same
+ *    turn), so recovery completed same-turn. On opencode >=1.16 (commit
+ *    7e09660c3, "respect disabled auto compaction on overflow") a session
+ *    with `compaction.auto:false` — the Magic Context default — errors the
+ *    turn and goes idle with NO in-turn second pass, so recovery fires on
+ *    the user's NEXT prompt. The plugin is correct in both cases; this test
+ *    drives a follow-up turn and asserts on persisted state so it is
+ *    version-agnostic.
  *
  * 4. **Completion** — When historian successfully publishes a compartment,
  *    the recovery flag is cleared so future turns aren't stuck at 95%.
@@ -174,19 +183,58 @@ describe("context overflow recovery", () => {
             // error from the provider.
             mainShouldOverflow = true;
 
-            // Fire the turn that will overflow. The full recovery cycle —
-            // detection → bump percentage to 95% → historian → clear flag —
-            // completes inside this single prompt's lifecycle because the
-            // emergency path is intentionally synchronous (historian runs
-            // inline at 95%). The SDK will still throw because the provider
-            // returned 400, but the plugin has already recorded and recovered
-            // from the overflow by the time the error propagates back.
+            // Fire the turn that will overflow. The provider returns 400, so the
+            // SDK throws. What opencode does next depends on its version:
+            //   - opencode <=1.15: an overflow set `needsCompaction`, which ran
+            //     opencode's compaction flow IN-TURN — producing a second
+            //     transform pass on which our recovery fired same-turn.
+            //   - opencode >=1.16 (commit 7e09660c3, "respect disabled auto
+            //     compaction on overflow"): with `compaction.auto:false` (what
+            //     every Magic Context user sets), opencode now errors the turn
+            //     and goes idle — NO in-turn compaction, no second transform
+            //     pass. Recovery therefore fires on the user's NEXT prompt.
+            // Either way, DETECTION happens on this turn via the session.error
+            // event; RECOVERY may be deferred to the next turn. The test asserts
+            // detection here, then drives a follow-up turn and asserts recovery —
+            // version-agnostic across both behaviors.
             try {
                 await h.sendPrompt(sessionId, "user turn that will overflow", {
                     timeoutMs: 30_000,
                 });
             } catch {
                 // expected — provider returned 400
+            }
+
+            // Detection must persist on the overflow turn itself (the session.error
+            // handler records the real limit + arms recovery), independent of when
+            // the recovery historian actually runs.
+            const afterOverflow = await h.waitFor(
+                () => {
+                    const s = readState();
+                    if (s.detected_context_limit !== 120000) return false;
+                    return s;
+                },
+                {
+                    timeoutMs: 15_000,
+                    intervalMs: 100,
+                    label: "overflow detected (real limit persisted)",
+                },
+            );
+            expect(afterOverflow.detected_context_limit).toBe(120000);
+
+            // Drive the recovery turn. On opencode >=1.16 this is the pass that
+            // bumps to 95% and fires the emergency historian; on <=1.15 recovery
+            // already completed in-turn and this is just a normal follow-up (the
+            // waitFor below still passes because the flag is already cleared and
+            // the historian already ran). The follow-up prompt itself may succeed
+            // or throw depending on timing — either is fine; we assert on state.
+            try {
+                await h.sendPrompt(sessionId, "follow-up turn that drives recovery", {
+                    timeoutMs: 30_000,
+                });
+            } catch {
+                // tolerated — recovery is asserted via persisted state, not the
+                // prompt's own resolution.
             }
 
             // Wait for the recovery cycle to complete. End state evidence:
@@ -210,7 +258,7 @@ describe("context overflow recovery", () => {
                         return s;
                     },
                     {
-                        timeoutMs: 15_000,
+                        timeoutMs: 20_000,
                         intervalMs: 100,
                         label: "overflow detected, recovery completed, flag cleared",
                     },
@@ -234,7 +282,7 @@ describe("context overflow recovery", () => {
             // At least one historian call during recovery.
             expect(historianCalls).toBeGreaterThan(historianBeforeOverflow);
         },
-        120_000,
+        180_000,
     );
 
     it(
