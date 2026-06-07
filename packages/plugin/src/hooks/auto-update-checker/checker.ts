@@ -5,7 +5,6 @@ import { fileURLToPath } from "node:url";
 import { parse as parseJsonc } from "comment-json";
 
 import { log } from "../../shared/logger";
-import { isValidSemver } from "./cache";
 import {
     CACHE_DIR,
     NPM_FETCH_TIMEOUT,
@@ -14,6 +13,7 @@ import {
     USER_OPENCODE_CONFIG,
     USER_OPENCODE_CONFIG_JSONC,
 } from "./constants";
+import { isValidSemver } from "./semver";
 import {
     NpmPackageEnvelopeSchema,
     OpencodeConfigSchema,
