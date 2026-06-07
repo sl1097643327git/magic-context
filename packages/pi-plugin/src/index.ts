@@ -839,23 +839,49 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			// registration above used process.cwd(), but Pi can switch projects
 			// mid-process (`/cd`, multi-root). Without this, a switched-into
 			// project is never dreamed and `/ctx-dream` there throws
-			// "not registered". registerPiDreamerProject is idempotent
-			// (early-returns when the project is already registered), so this is a
-			// no-op for the boot project and only does real work on first switch.
-			if (dreamerConfig) {
+			// "not registered". registerPiDreamerProject is idempotent for the
+			// same identity+dir, and rebuilds against the new checkout when the
+			// directory changed (worktree/clone of the same repo).
+			//
+			// On a genuine switch we MUST re-resolve config from the new
+			// checkout's cwd — the boot `config`/`dreamerConfig` belong to the
+			// launch directory, and a switched-into project may carry its own
+			// .pi/magic-context.jsonc (different model/schedule, or its own
+			// `dreamer.disable`). Reusing the boot config would silently run the
+			// dreamer in the new checkout with the old project's settings.
+			const switchedProject = currentProject.projectDir !== projectDir;
+			const effectiveConfig = switchedProject
+				? loadPiConfig({ cwd: currentProject.projectDir }).config
+				: config;
+			const effectiveDreamerConfig = switchedProject
+				? resolveDreamerFromConfig(effectiveConfig)
+				: dreamerConfig;
+			if (effectiveDreamerConfig) {
 				try {
 					registerPiDreamerProject({
 						db,
 						projectDir: currentProject.projectDir,
 						projectIdentity: currentProject.projectIdentity,
-						config: dreamerConfig,
-						embeddingConfig: config.embedding,
-						memoryEnabled: config.memory.enabled,
-						gitCommitIndexing: config.memory.git_commit_indexing,
+						config: effectiveDreamerConfig,
+						embeddingConfig: effectiveConfig.embedding,
+						memoryEnabled: effectiveConfig.memory.enabled,
+						gitCommitIndexing: effectiveConfig.memory.git_commit_indexing,
 						onAdjunctsRefreshNeeded: signalPiSystemPromptRefreshForProject,
 					});
 				} catch (err) {
 					warn("before_agent_start: registerPiDreamerProject threw:", err);
+				}
+			} else if (switchedProject) {
+				// The switched-into checkout DISABLES the dreamer. Any existing
+				// registration for this identity is pinned to the old checkout and
+				// still enabled — registerPiDreamerProject's disable early-return
+				// can't clean it up, so tear it down explicitly here.
+				try {
+					unregisterPiDreamerProject({
+						projectIdentity: currentProject.projectIdentity,
+					});
+				} catch (err) {
+					warn("before_agent_start: unregisterPiDreamerProject threw:", err);
 				}
 			}
 			// Pi exposes `sessionManager.getSessionId()` once a session is

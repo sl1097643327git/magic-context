@@ -126,6 +126,63 @@ describe("Pi dreamer wiring", () => {
 		expect(__test.registeredProjectCount()).toBe(1);
 	});
 
+	test("re-registering the SAME dir is a no-op (keeps the first timer)", async () => {
+		db = createDb();
+		const timerCleanup = mock(() => {});
+		__test.setStartDreamScheduleTimerFactory(async () => timerCleanup);
+
+		const opts = dreamerOptions({
+			database: db,
+			projectDir: "/tmp/pi-samedir",
+			projectIdentity: "git:pi-samedir",
+		});
+		registerPiDreamerProject(opts);
+		await flushMicrotasks();
+		registerPiDreamerProject(opts);
+		await flushMicrotasks();
+
+		expect(__test.registeredProjectCount()).toBe(1);
+		// Same dir → no rebuild → original timer never cleaned up.
+		expect(timerCleanup).not.toHaveBeenCalled();
+	});
+
+	test("re-registering the same identity with a DIFFERENT dir rebuilds (worktree switch)", async () => {
+		db = createDb();
+		const firstCleanup = mock(() => {});
+		const secondCleanup = mock(() => {});
+		const cleanups = [firstCleanup, secondCleanup];
+		const dirs: string[] = [];
+		__test.setStartDreamScheduleTimerFactory(async (registration) => {
+			dirs.push((registration as { directory: string }).directory);
+			return cleanups.shift() ?? mock(() => {});
+		});
+
+		// Worktree A of the same repo → identity X.
+		registerPiDreamerProject(
+			dreamerOptions({
+				database: db,
+				projectDir: "/tmp/worktree-A",
+				projectIdentity: "git:pi-worktree",
+			}),
+		);
+		await flushMicrotasks();
+		// Worktree B of the SAME repo (same identity, different dir).
+		registerPiDreamerProject(
+			dreamerOptions({
+				database: db,
+				projectDir: "/tmp/worktree-B",
+				projectIdentity: "git:pi-worktree",
+			}),
+		);
+		await flushMicrotasks();
+
+		// Still one registration, but rebuilt: first timer torn down, second
+		// timer started against worktree B.
+		expect(__test.registeredProjectCount()).toBe(1);
+		expect(firstCleanup).toHaveBeenCalledTimes(1);
+		expect(dirs).toEqual(["/tmp/worktree-A", "/tmp/worktree-B"]);
+	});
+
 	test("unregister removes the project", () => {
 		db = createDb();
 		registerPiDreamerProject(

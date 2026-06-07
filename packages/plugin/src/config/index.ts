@@ -9,6 +9,7 @@ import {
     dropInheritedEmbeddingKeyOnRedirect,
     stripUnsafeProjectConfigFields,
 } from "./project-security";
+import { pruneNestedConfigLeaf } from "./prune-config-leaf";
 import { type MagicContextConfig, MagicContextConfigSchema } from "./schema/magic-context";
 import { substituteConfigVariables } from "./variable";
 
@@ -305,15 +306,20 @@ function parsePluginConfig(
             rawValue !== null &&
             !Array.isArray(rawValue);
         if (allNested) {
-            const prunedBlock: Record<string, unknown> = {
+            let prunedBlock: Record<string, unknown> = {
                 ...(rawValue as Record<string, unknown>),
             };
             const prunedLeaves: string[] = [];
             for (const p of issuePaths) {
-                const leaf = String(p[1]);
-                if (leaf in prunedBlock) {
-                    delete prunedBlock[leaf];
-                    prunedLeaves.push(leaf);
+                // p is the full Zod issue path ([key, ...nested]); prune the
+                // DEEPEST invalid leaf, not just the first child (p[1]), so a
+                // 3-level path like memory.git_commit_indexing.since_days drops
+                // only `since_days` and keeps a sibling `enabled: false`.
+                const relative = p.slice(1);
+                const result = pruneNestedConfigLeaf(prunedBlock, relative);
+                if (result) {
+                    prunedBlock = result.block;
+                    prunedLeaves.push(result.removed);
                 }
             }
             patched[key] = prunedBlock;

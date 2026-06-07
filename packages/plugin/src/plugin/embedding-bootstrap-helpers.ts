@@ -31,11 +31,25 @@ export const EMBEDDING_AFFECTING_KEYS = new Set([
     "embedding.endpoint",
     "embedding.model",
     "embedding.provider",
+    // input_type changes the embedding vector space (it's part of the registry's
+    // identity fingerprint), and truncate changes request behavior — a failed or
+    // untrusted load involving either must keep last-known-good/observation mode,
+    // not let a broken value re-register mid-session.
+    "embedding.input_type",
+    "embedding.truncate",
 ]);
 
 export const EMBEDDING_AFFECTING_TOP_LEVEL_KEYS = new Set(["embedding", "memory", "experimental"]);
 
-const EMBEDDING_WARNING_TERMS = ["api_key", "endpoint", "model", "provider", "embedding"];
+const EMBEDDING_WARNING_TERMS = [
+    "api_key",
+    "endpoint",
+    "model",
+    "provider",
+    "embedding",
+    "input_type",
+    "truncate",
+];
 const loggedFailureSignatures = new Map<string, Set<string>>();
 
 function sha256Prefix(value: string, length = 16): string {

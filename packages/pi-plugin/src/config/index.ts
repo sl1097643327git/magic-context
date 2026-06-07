@@ -1,3 +1,4 @@
+import "@magic-context/core/config/prune-config-leaf";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +9,7 @@ import {
 	dropInheritedEmbeddingKeyOnRedirect,
 	stripUnsafeProjectConfigFields,
 } from "@magic-context/core/config/project-security";
+import { pruneNestedConfigLeaf } from "@magic-context/core/config/prune-config-leaf";
 import {
 	type MagicContextConfig,
 	MagicContextConfigSchema,
@@ -217,15 +219,19 @@ function parsePiConfig(
 			rawValue !== null &&
 			!Array.isArray(rawValue);
 		if (allNested) {
-			const prunedBlock: Record<string, unknown> = {
+			let prunedBlock: Record<string, unknown> = {
 				...(rawValue as Record<string, unknown>),
 			};
 			const prunedLeaves: string[] = [];
 			for (const p of issuePaths) {
-				const leaf = String(p[1]);
-				if (leaf in prunedBlock) {
-					delete prunedBlock[leaf];
-					prunedLeaves.push(leaf);
+				// Prune the DEEPEST invalid leaf (parity with OpenCode), so a
+				// 3-level path like memory.git_commit_indexing.since_days drops
+				// only `since_days` and keeps a sibling `enabled: false`.
+				const relative = p.slice(1);
+				const result = pruneNestedConfigLeaf(prunedBlock, relative);
+				if (result) {
+					prunedBlock = result.block;
+					prunedLeaves.push(result.removed);
 				}
 			}
 			patched[key] = prunedBlock;

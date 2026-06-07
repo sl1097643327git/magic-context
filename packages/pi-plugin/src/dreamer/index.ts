@@ -78,6 +78,13 @@ interface ProjectRegistration {
 	 *  `command-handler.ts:236-246` `processDreamQueue` invocation). The
 	 *  registered dreamer timer also calls this on its own schedule. */
 	runOnce: () => Promise<DreamRunResult | null>;
+	/** The directory this registration was built for. `resolveProjectIdentity`
+	 *  is intentionally identical across worktrees/clones of one repo, so a
+	 *  `/cd` into a different checkout of the SAME repo keeps the same identity
+	 *  but a different directory. We track it so re-registration can detect the
+	 *  switch and rebuild against the new checkout + its config instead of
+	 *  silently reusing the first one. */
+	projectDir: string;
 }
 
 type PiSubagentRunnerFactory = () => PiSubagentRunner;
@@ -107,7 +114,19 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 
 	const existing = registeredProjects.get(opts.projectIdentity);
 	if (existing) {
-		return;
+		// Same identity, same directory → genuinely already registered, no-op.
+		if (existing.projectDir === opts.projectDir) {
+			return;
+		}
+		// Same identity, DIFFERENT directory: a worktree/clone switch in the same
+		// process. The existing registration's timer + client closure are pinned
+		// to the OLD checkout and its boot-time dreamerConfig. Tear it down and
+		// rebuild against the new directory + freshly-resolved config below, so
+		// the dreamer runs in the right checkout (and honors a `dreamer.disable`
+		// that may differ between checkouts — handled by the disable early-return
+		// above, which fires before this).
+		existing.cleanup();
+		registeredProjects.delete(opts.projectIdentity);
 	}
 
 	registerDreamProjectDirectory(opts.projectIdentity, opts.projectDir);
@@ -186,6 +205,7 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 			cleanup?.();
 		},
 		runOnce,
+		projectDir: opts.projectDir,
 	});
 }
 

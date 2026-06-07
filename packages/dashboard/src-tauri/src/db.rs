@@ -2517,11 +2517,19 @@ pub fn bulk_update_memory_status(
         .collect();
     // Both `active` and `permanent` re-enter the m[0] baseline, so a bulk
     // status change INTO either counts as a restore for epoch-bump purposes
-    // (matches update_memory_status). Per-row prior status is re-checked below.
+    // (matches update_memory_status). Only bump for rows whose status ACTUALLY
+    // changes — a no-op (already in new_status) must not bust the epoch and
+    // force a needless m[0]/m[1] rematerialization (mirrors the single-row
+    // `prior_status != Some(new_status)` gate).
     let is_restore = new_status == "active" || new_status == "permanent";
     let is_archive = new_status == "archived";
+    let changed_paths: HashMap<i64, String> = phase_a_targets
+        .iter()
+        .filter(|(_, target)| target.status.as_deref() != Some(new_status))
+        .map(|(id, target)| (*id, target.project_path.clone()))
+        .collect();
     let phase_a_identities = if is_restore {
-        normalize_memory_project_identities(&phase_a_paths)
+        normalize_memory_project_identities(&changed_paths)
     } else {
         HashSet::new()
     };
@@ -2666,13 +2674,15 @@ pub fn get_sessions(conn: &Connection) -> Result<Vec<SessionSummary>, rusqlite::
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
-    // Resolve session titles and project IDs from OpenCode's DB
+    // Resolve session titles and the real Magic Context project identity from
+    // OpenCode's DB. info.1 is already the resolved git:/dir: identity (not the
+    // internal project_id), so it is used as-is — no `git:` prefix fabrication.
     let session_info = resolve_session_info(&sessions);
     for session in &mut sessions {
         if let Some(info) = session_info.get(&session.session_id) {
             session.title = Some(info.0.clone());
             if !info.1.is_empty() {
-                session.project_identity = Some(format!("git:{}", info.1));
+                session.project_identity = Some(info.1.clone());
             }
         }
     }
@@ -3244,6 +3254,12 @@ fn preview_from_json(value: &serde_json::Value) -> String {
 
 /// Look up session titles and project IDs from OpenCode's database.
 /// Returns HashMap<session_id, (title, project_id)>.
+/// Resolve `(title, project_identity)` per OpenCode session id. The identity is
+/// Magic Context's own `git:<root-sha>` / `dir:<hash>` space, computed from the
+/// project's worktree path via `resolve_project_identity` — NOT OpenCode's
+/// internal `project_id` hash (a different space). Joining the worktree and
+/// resolving it is what `list_opencode_sessions` does; this mirrors it so
+/// `get_sessions` emits identities that actually match the project-scoped views.
 fn resolve_session_info(
     sessions: &[SessionSummary],
 ) -> std::collections::HashMap<String, (String, String)> {
@@ -3261,7 +3277,11 @@ fn resolve_session_info(
         Err(_) => return result,
     };
 
-    let mut stmt = match conn.prepare("SELECT id, title, project_id FROM session") {
+    let mut stmt = match conn.prepare(
+        "SELECT s.id, COALESCE(s.title, ''), COALESCE(p.worktree, '')
+         FROM session s
+         LEFT JOIN project p ON p.id = s.project_id",
+    ) {
         Ok(s) => s,
         Err(_) => return result,
     };
@@ -3274,7 +3294,15 @@ fn resolve_session_info(
         ))
     }) {
         for row in rows.flatten() {
-            result.insert(row.0, (row.1, row.2));
+            let (session_id, title, worktree) = row;
+            // Empty worktree (no project row) → no resolvable identity; leave it
+            // blank so the caller skips setting project_identity.
+            let identity = if worktree.is_empty() {
+                String::new()
+            } else {
+                resolve_project_identity(&worktree)
+            };
+            result.insert(session_id, (title, identity));
         }
     }
 
@@ -3826,17 +3854,28 @@ pub fn get_dream_runs(
     let mut runs: Vec<DreamRun> = Vec::new();
 
     if let Some(project_path) = project_path {
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, project_path, started_at, finished_at, holder_id, tasks_json, tasks_succeeded, tasks_failed, smart_notes_surfaced, smart_notes_pending, memory_changes_json
-                 FROM dream_runs
-                 WHERE project_path = ?1
-                 ORDER BY finished_at DESC
-                 LIMIT ?2",
-            )
+        // Resolve identity-equivalent stored paths (git:/dir: forms, legacy raw
+        // paths) so dream runs group the same way the Memories tab does — a
+        // literal `WHERE project_path = ?` misses normalized-identity projects.
+        let paths = resolve_paths_for_table_filter(conn, "dream_runs", project_path)
             .map_err(|e| e.to_string())?;
+        let placeholders = build_in_placeholders(paths.len(), 1);
+        let limit_idx = paths.len() + 1;
+        let sql = format!(
+            "SELECT id, project_path, started_at, finished_at, holder_id, tasks_json, tasks_succeeded, tasks_failed, smart_notes_surfaced, smart_notes_pending, memory_changes_json
+             FROM dream_runs
+             WHERE project_path IN ({placeholders})
+             ORDER BY finished_at DESC
+             LIMIT ?{limit_idx}"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(paths.len() + 1);
+        for p in &paths {
+            params.push(p);
+        }
+        params.push(&normalized_limit);
         let mut rows = stmt
-            .query(rusqlite::params![project_path, normalized_limit])
+            .query(params.as_slice())
             .map_err(|e| e.to_string())?;
         while let Some(row) = rows.next().map_err(|e| e.to_string())? {
             let mapped = map_dream_run_row(row).map_err(|e| e.to_string())?;
