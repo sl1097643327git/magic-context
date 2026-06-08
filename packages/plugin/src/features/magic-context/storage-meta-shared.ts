@@ -42,6 +42,14 @@ export interface SessionMetaRow {
     cached_m0_tool_set_hash: string | null;
     cached_m0_model_key: string | null;
     last_observed_model_key: string | null;
+    last_usage_context_limit: number | null;
+    prior_boundary_ordinal: number | null;
+    protected_tail_policy_version: number | null;
+    protected_tail_drain_window_started_at: number | null;
+    protected_tail_drain_tokens: number | null;
+    recovery_no_eligible_head_count: number | null;
+    force_emergency_bypass_window_start: number | null;
+    force_emergency_bypass_used: number | null;
     upgrade_reminded_at: number | null;
     pi_stable_id_scheme: number | null;
 }
@@ -83,6 +91,14 @@ export const SESSION_META_SELECT_COLUMNS = [
     "cached_m0_tool_set_hash",
     "cached_m0_model_key",
     "last_observed_model_key",
+    "last_usage_context_limit",
+    "prior_boundary_ordinal",
+    "protected_tail_policy_version",
+    "protected_tail_drain_window_started_at",
+    "protected_tail_drain_tokens",
+    "recovery_no_eligible_head_count",
+    "force_emergency_bypass_window_start",
+    "force_emergency_bypass_used",
     "upgrade_reminded_at",
     "pi_stable_id_scheme",
 ] as const;
@@ -123,6 +139,14 @@ export const META_COLUMNS: Record<string, string> = {
     cachedM0ToolSetHash: "cached_m0_tool_set_hash",
     cachedM0ModelKey: "cached_m0_model_key",
     lastObservedModelKey: "last_observed_model_key",
+    lastUsageContextLimit: "last_usage_context_limit",
+    priorBoundaryOrdinal: "prior_boundary_ordinal",
+    protectedTailPolicyVersion: "protected_tail_policy_version",
+    protectedTailDrainWindowStartedAt: "protected_tail_drain_window_started_at",
+    protectedTailDrainTokens: "protected_tail_drain_tokens",
+    recoveryNoEligibleHeadCount: "recovery_no_eligible_head_count",
+    forceEmergencyBypassWindowStart: "force_emergency_bypass_window_start",
+    forceEmergencyBypassUsed: "force_emergency_bypass_used",
     upgradeRemindedAt: "upgrade_reminded_at",
     piStableIdScheme: "pi_stable_id_scheme",
 };
@@ -227,6 +251,14 @@ export function isSessionMetaRow(row: unknown): row is SessionMetaRow {
         isStringOrNull(r.cached_m0_tool_set_hash) &&
         isStringOrNull(r.cached_m0_model_key) &&
         isStringOrNull(r.last_observed_model_key) &&
+        isNumberOrNull(r.last_usage_context_limit) &&
+        isNumberOrNull(r.prior_boundary_ordinal) &&
+        isNumberOrNull(r.protected_tail_policy_version) &&
+        isNumberOrNull(r.protected_tail_drain_window_started_at) &&
+        isNumberOrNull(r.protected_tail_drain_tokens) &&
+        isNumberOrNull(r.recovery_no_eligible_head_count) &&
+        isNumberOrNull(r.force_emergency_bypass_window_start) &&
+        isNumberOrNull(r.force_emergency_bypass_used) &&
         isNumberOrNull(r.upgrade_reminded_at) &&
         isNumberOrNull(r.pi_stable_id_scheme)
     );
@@ -270,6 +302,14 @@ export function getDefaultSessionMeta(sessionId: string): SessionMeta {
         cachedM0ToolSetHash: null,
         cachedM0ModelKey: null,
         lastObservedModelKey: null,
+        lastUsageContextLimit: 0,
+        priorBoundaryOrdinal: 1,
+        protectedTailPolicyVersion: 0,
+        protectedTailDrainWindowStartedAt: 0,
+        protectedTailDrainTokens: 0,
+        recoveryNoEligibleHeadCount: 0,
+        forceEmergencyBypassWindowStart: 0,
+        forceEmergencyBypassUsed: 0,
         upgradeRemindedAt: null,
         piStableIdScheme: null,
     };
@@ -375,6 +415,14 @@ export function toSessionMeta(row: SessionMetaRow): SessionMeta {
         cachedM0ToolSetHash: stringOrNull(row.cached_m0_tool_set_hash),
         cachedM0ModelKey: stringOrNull(row.cached_m0_model_key),
         lastObservedModelKey: stringOrNull(row.last_observed_model_key),
+        lastUsageContextLimit: numOrZero(row.last_usage_context_limit),
+        priorBoundaryOrdinal: Math.max(1, numOrZero(row.prior_boundary_ordinal) || 1),
+        protectedTailPolicyVersion: numOrZero(row.protected_tail_policy_version),
+        protectedTailDrainWindowStartedAt: numOrZero(row.protected_tail_drain_window_started_at),
+        protectedTailDrainTokens: numOrZero(row.protected_tail_drain_tokens),
+        recoveryNoEligibleHeadCount: numOrZero(row.recovery_no_eligible_head_count),
+        forceEmergencyBypassWindowStart: numOrZero(row.force_emergency_bypass_window_start),
+        forceEmergencyBypassUsed: numOrZero(row.force_emergency_bypass_used),
         upgradeRemindedAt: numOrNull(row.upgrade_reminded_at),
         piStableIdScheme: numOrNull(row.pi_stable_id_scheme),
     };

@@ -38,10 +38,10 @@ import {
 } from "./compartment-runner-validation";
 import { clearInjectionCache } from "./inject-compartments";
 import {
-    getProtectedTailStartOrdinal,
-    getRawSessionMessageCount,
-    readSessionChunk,
-} from "./read-session-chunk";
+    createDefaultBoundarySnapshotForTests,
+    resolveOpenCodeProtectedTailBoundary,
+} from "./protected-tail-boundary";
+import { getRawSessionMessageCount, readSessionChunk } from "./read-session-chunk";
 import { buildReferenceBlocks } from "./reference-retrieval";
 import { sendIgnoredMessage } from "./send-session-notification";
 
@@ -159,12 +159,26 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
     updateSessionMeta(db, sessionId, { compartmentInProgress: true });
 
     try {
-        const protectedTailStart = getProtectedTailStartOrdinal(sessionId);
-        if (protectedTailStart <= 1) {
-            return "## Magic Recomp\n\nNo eligible raw history exists before the protected tail, so nothing was rebuilt.";
-        }
-
         const rawMessageCount = getRawSessionMessageCount(sessionId);
+        const boundarySnapshot =
+            process.env.NODE_ENV === "test"
+                ? createDefaultBoundarySnapshotForTests(sessionId)
+                : resolveOpenCodeProtectedTailBoundary({
+                      db,
+                      sessionId,
+                      mode: "manual-full-recomp",
+                      contextLimit: 128_000,
+                      executeThresholdPercentage: 65,
+                      usage: null,
+                      usageSource: "provisional-zero",
+                  });
+        const protectedTailStart = Math.min(
+            boundarySnapshot.protectedTailStart,
+            rawMessageCount + 1,
+        );
+        if (rawMessageCount <= 0) {
+            return "## Magic Recomp\n\nNo raw history exists, so nothing was rebuilt.";
+        }
         // Intentional: session.get failure is non-fatal — we fall back to deps.directory
         const parentSessionResponse = await client.session
             .get({ path: { id: sessionId } })

@@ -1153,8 +1153,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		// before the turn actually completed. OpenCode's equivalent gates on
 		// finish === "stop". Mirror that with the final assistant's stopReason.
 		try {
-			const msgs = (event as { messages?: Array<{ role?: string; stopReason?: string }> })
-				?.messages;
+			const msgs = (
+				event as { messages?: Array<{ role?: string; stopReason?: string }> }
+			)?.messages;
 			const lastAssistant = Array.isArray(msgs)
 				? [...msgs].reverse().find((m) => m?.role === "assistant")
 				: undefined;

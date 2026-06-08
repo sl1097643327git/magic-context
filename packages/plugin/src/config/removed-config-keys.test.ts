@@ -96,9 +96,7 @@ describe("removed Phase 2 config keys", () => {
             join(REPO_ROOT, "README.md"),
             join(REPO_ROOT, "assets", "magic-context.schema.json"),
         ];
-        const e2eFiles = walkSourceFiles(
-            join(REPO_ROOT, "packages", "e2e-tests", "tests"),
-        ).filter(
+        const e2eFiles = walkSourceFiles(join(REPO_ROOT, "packages", "e2e-tests", "tests")).filter(
             // e2e tests are the consumer surface here, not unit tests of the
             // keys — scan them despite the .test.ts skip in walkSourceFiles.
             () => true,

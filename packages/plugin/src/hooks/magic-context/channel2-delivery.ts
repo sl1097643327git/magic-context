@@ -68,10 +68,7 @@ export async function maybeDeliverChannel2(
     // current undropped-tool count is known and has fallen below the trigger
     // floor, cancel the intent by resetting to '' — NOT 'delivered' — so the
     // cap is preserved and a genuinely high-pressure later turn can re-arm it.
-    if (
-        deps.undroppedTokens !== undefined &&
-        deps.undroppedTokens < CHANNEL2_CEIL_UNDROPPED
-    ) {
+    if (deps.undroppedTokens !== undefined && deps.undroppedTokens < CHANNEL2_CEIL_UNDROPPED) {
         try {
             casChannel2NudgeState(deps.db, sessionId, "pending", "");
             sessionLog(

@@ -52,6 +52,7 @@ import {
 	clearHistorianFailureState,
 	getOverflowState,
 	incrementHistorianFailure,
+	recordProtectedTailPublicationFloor,
 	setPendingPiCompactionMarkerState,
 } from "@magic-context/core/features/magic-context/storage";
 import {
@@ -80,11 +81,18 @@ import {
 import { renderMemoryBlock } from "@magic-context/core/hooks/magic-context/inject-compartments";
 import { onNoteTrigger } from "@magic-context/core/hooks/magic-context/note-nudger";
 import {
-	getProtectedTailStartOrdinal,
+	createDefaultBoundarySnapshotForTests,
+	recordHighPressureNoEligibleHead,
+	resolveBoundaryContext,
+	resolveProtectedTailBoundary,
+	validateBoundarySnapshot,
+} from "@magic-context/core/hooks/magic-context/protected-tail-boundary";
+import {
 	type RawMessageProvider,
 	readSessionChunk,
 	withRawMessageProvider,
 } from "@magic-context/core/hooks/magic-context/read-session-chunk";
+import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import { buildReferenceBlocks } from "@magic-context/core/hooks/magic-context/reference-retrieval";
 import { describeError } from "@magic-context/core/shared/error-message";
 import { sessionLog } from "@magic-context/core/shared/logger";
@@ -106,6 +114,25 @@ const DEFAULT_HISTORIAN_TIMEOUT_MS = 120_000;
 /** Keep historian alert noise to once per minute per session. */
 const HISTORIAN_ALERT_COOLDOWN_MS = 60 * 1000;
 const lastHistorianAlertBySession = new Map<string, number>();
+
+function truncateHistorianInputIfNeeded(text: string, budget: number): string {
+	if (estimateTokens(text) <= budget) return text;
+	let lo = 0;
+	let hi = text.length;
+	let best = 0;
+	const marker =
+		"\n[… tokens truncated by Magic Context to fit the historian window …]";
+	while (lo <= hi) {
+		const mid = (lo + hi) >> 1;
+		if (estimateTokens(text.slice(0, mid) + marker) <= budget) {
+			best = mid;
+			lo = mid + 1;
+		} else {
+			hi = mid - 1;
+		}
+	}
+	return text.slice(0, best) + marker;
+}
 
 function shouldSuppressHistorianAlert(sessionId: string): boolean {
 	const last = lastHistorianAlertBySession.get(sessionId);
@@ -252,13 +279,51 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					? priorCompartments[priorCompartments.length - 1].endMessage + 1
 					: 1;
 
-			const protectedTailStart = getProtectedTailStartOrdinal(sessionId);
-			if (protectedTailStart <= offset) {
+			const boundarySnapshot =
+				process.env.NODE_ENV === "test"
+					? createDefaultBoundarySnapshotForTests(sessionId)
+					: resolveProtectedTailBoundary(
+							resolveBoundaryContext({
+								db,
+								sessionId,
+								mode: "pi-runner",
+								contextLimit: 128_000,
+								executeThresholdPercentage: 65,
+								usage: null,
+								usageSource: "provisional-zero",
+								providerShapeVersion: "pi-folded-v1",
+								cacheNamespace: `pi:${sessionId}`,
+							}),
+						);
+			const validation =
+				boundarySnapshot.rawRangeFingerprint.length > 0
+					? validateBoundarySnapshot({
+							db,
+							snapshot: boundarySnapshot,
+						})
+					: { ok: true as const };
+			if (!validation.ok) {
 				sessionLog(
 					sessionId,
-					`historian no-op: protectedTailStart=${protectedTailStart} <= offset=${offset} — nothing to compact`,
+					`historian no-op: stale protected-tail snapshot (${validation.detail ?? validation.reason ?? "unknown"})`,
 				);
-				clearEmergencyRecovery(db, sessionId);
+				return;
+			}
+			const protectedTailStart = boundarySnapshot.protectedTailStart;
+			const eligibleEndOrdinal = Math.min(
+				boundarySnapshot.eligibleEndOrdinal,
+				protectedTailStart,
+			);
+			if (protectedTailStart <= offset || eligibleEndOrdinal <= offset) {
+				sessionLog(
+					sessionId,
+					`historian no-op: protectedTailStart=${protectedTailStart} eligibleEnd=${eligibleEndOrdinal} <= offset=${offset} — nothing to compact`,
+				);
+				if (boundarySnapshot.usagePercentage < 80) {
+					clearEmergencyRecovery(db, sessionId);
+				} else {
+					recordHighPressureNoEligibleHead(db, boundarySnapshot);
+				}
 				return;
 			}
 
@@ -266,14 +331,18 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				sessionId,
 				historianChunkTokens,
 				offset,
-				protectedTailStart,
+				eligibleEndOrdinal,
 			);
 			if (!chunk.text || chunk.messageCount === 0) {
 				sessionLog(
 					sessionId,
 					`historian no-op: chunk empty after filtering (messageCount=${chunk.messageCount}, textLen=${chunk.text?.length ?? 0}) range=${offset}-${protectedTailStart - 1}`,
 				);
-				clearEmergencyRecovery(db, sessionId);
+				if (boundarySnapshot.usagePercentage < 80) {
+					clearEmergencyRecovery(db, sessionId);
+				} else {
+					recordHighPressureNoEligibleHead(db, boundarySnapshot);
+				}
 				return;
 			}
 
@@ -321,11 +390,22 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				sessionCompartments: priorCompartments,
 			});
 
+			const chunkText = truncateHistorianInputIfNeeded(
+				chunk.text,
+				historianChunkTokens,
+			);
+			if (chunkText !== chunk.text) {
+				sessionLog(
+					sessionId,
+					`historian pre-flight: truncated formatted input for ${chunk.startIndex}-${chunk.endIndex} to fit ${historianChunkTokens} tokens`,
+				);
+			}
+
 			const prompt = buildCompartmentAgentPrompt({
 				seedExamples: references.seedExamples,
 				sessionReferences: references.sessionReferences,
 				projectMemory,
-				inputSource: `Messages ${chunk.startIndex}-${chunk.endIndex}:\n\n${chunk.text}`,
+				inputSource: `Messages ${chunk.startIndex}-${chunk.endIndex}:\n\n${chunkText}`,
 				memoryEnabled: memoryEnabled !== false,
 			});
 
@@ -704,6 +784,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				// (gated, below). No replaceSessionFacts — promoted facts reach
 				// the agent through the renderer's m[1] new-memories watermark.
 				clearHistorianFailureState(db, sessionId);
+				recordProtectedTailPublicationFloor(db, sessionId, lastNewEnd + 1);
 				clearEmergencyRecovery(db, sessionId);
 				// userObservations are inserted POST-COMMIT
 				// (best-effort, below), not inside this publish transaction. An

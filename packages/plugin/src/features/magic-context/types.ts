@@ -89,6 +89,14 @@ export interface SessionMeta {
     cachedM0ToolSetHash: string | null;
     cachedM0ModelKey: string | null;
     lastObservedModelKey: string | null;
+    lastUsageContextLimit: number;
+    priorBoundaryOrdinal: number;
+    protectedTailPolicyVersion: number;
+    protectedTailDrainWindowStartedAt: number;
+    protectedTailDrainTokens: number;
+    recoveryNoEligibleHeadCount: number;
+    forceEmergencyBypassWindowStart: number;
+    forceEmergencyBypassUsed: number;
     upgradeRemindedAt: number | null;
 }
 

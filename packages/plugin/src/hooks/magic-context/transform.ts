@@ -1,5 +1,4 @@
 import * as crypto from "node:crypto";
-import { getLastCompartmentEndMessage } from "../../features/magic-context/compartment-storage";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import { scheduleReconciliation } from "../../features/magic-context/message-index-async";
 import type { Scheduler } from "../../features/magic-context/scheduler";
@@ -12,6 +11,7 @@ import {
     getMaxDroppedTagNumber,
     getOrCreateSessionMeta,
     getTagsByNumbers,
+    loadPersistedUsage,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
 import {
@@ -22,6 +22,8 @@ import {
     clearHistorianFailureState,
     clearPersistedReasoningWatermark,
     getOverflowState,
+    loadProtectedTailMeta,
+    resetProtectedTailNoEligibleHead,
     setDeferredExecutePendingIfAbsent,
 } from "../../features/magic-context/storage-meta-persisted";
 import type { Tagger } from "../../features/magic-context/tagger";
@@ -45,10 +47,13 @@ import {
 } from "./inject-compartments";
 import { onNoteTrigger } from "./note-nudger";
 import {
-    getProtectedTailStartOrdinal,
-    getRawSessionMessageCount,
-    readRawSessionMessages,
-} from "./read-session-chunk";
+    createDefaultBoundarySnapshotForTests,
+    hasRunnableCompartmentWindow,
+    type ProtectedTailBoundarySnapshot,
+    RECOVERY_NO_HEAD_LIMIT,
+    resolveOpenCodeProtectedTailBoundary,
+} from "./protected-tail-boundary";
+import { readRawSessionMessages } from "./read-session-chunk";
 import { findLastAssistantModelFromOpenCodeDb, isMidTurn } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
 import { sendIgnoredMessage } from "./send-session-notification";
@@ -485,7 +490,11 @@ export function createTransform(deps: TransformDeps) {
         // First-pass reset MUST run BEFORE loadContextUsage so threshold checks
         // (95% blocking, 80% emergency nudge) don't fire on stale data from a
         // different model, reverted message, or previous session state.
-        // Snapshot failure state BEFORE reset — restart recovery needs it.
+        // Snapshot failure/usage state BEFORE reset — restart recovery needs
+        // failure state, and protected-tail boundary sizing can use fresh
+        // persisted usage even when first-pass cache hygiene clears the live
+        // usage counters below.
+        const persistedUsageBeforeFirstPassReset = loadPersistedUsage(db, sessionId);
         const historianFailureState = getHistorianFailureState(db, sessionId);
 
         if (isFirstTransformPassForSession && sessionMeta) {
@@ -525,7 +534,18 @@ export function createTransform(deps: TransformDeps) {
         if (fullFeatureMode) {
             try {
                 const overflowState = getOverflowState(db, sessionId);
-                if (overflowState.needsEmergencyRecovery && contextUsageEarly.percentage < 95) {
+                if (contextUsageEarly.percentage < 80) {
+                    resetProtectedTailNoEligibleHead(db, sessionId);
+                }
+                const protectedTailMeta = loadProtectedTailMeta(db, sessionId);
+                const noHeadEscape =
+                    overflowState.needsEmergencyRecovery &&
+                    protectedTailMeta.recoveryNoEligibleHeadCount >= RECOVERY_NO_HEAD_LIMIT;
+                if (
+                    overflowState.needsEmergencyRecovery &&
+                    contextUsageEarly.percentage < 95 &&
+                    !noHeadEscape
+                ) {
                     sessionLog(
                         sessionId,
                         `transform: bumping percentage to 95% due to overflow recovery flag (was ${contextUsageEarly.percentage.toFixed(1)}%, detectedLimit=${overflowState.detectedContextLimit || "unknown"})`,
@@ -534,6 +554,13 @@ export function createTransform(deps: TransformDeps) {
                         ...contextUsageEarly,
                         percentage: 95,
                     };
+                } else if (noHeadEscape && deps.client) {
+                    void sendIgnoredMessage(
+                        deps.client,
+                        sessionId,
+                        "Magic Context can't compact yet — the recent history is a single in-progress block. Continuing; it will compact once the block completes. Run `/ctx-recomp` if this persists.",
+                        deps.getNotificationParams?.(sessionId) ?? {},
+                    );
                 }
             } catch (error) {
                 sessionLog(
@@ -578,6 +605,22 @@ export function createTransform(deps: TransformDeps) {
                   sessionID: sessionId,
               })
             : undefined;
+        const currentModelKeyForBoundary = deps.getModelKey?.(sessionId);
+        const persistedUsageFreshForBoundary =
+            persistedUsageBeforeFirstPassReset &&
+            Date.now() - persistedUsageBeforeFirstPassReset.updatedAt <= 10 * 60 * 1000 &&
+            (persistedUsageBeforeFirstPassReset.lastObservedModelKey === null ||
+                currentModelKeyForBoundary === undefined ||
+                persistedUsageBeforeFirstPassReset.lastObservedModelKey ===
+                    currentModelKeyForBoundary) &&
+            (resolvedContextLimit === undefined ||
+                persistedUsageBeforeFirstPassReset.lastUsageContextLimit === 0 ||
+                persistedUsageBeforeFirstPassReset.lastUsageContextLimit === resolvedContextLimit)
+                ? persistedUsageBeforeFirstPassReset.usage
+                : null;
+        const boundaryUsageForProtectedTail = persistedUsageFreshForBoundary ?? contextUsageEarly;
+        const boundaryUsageSource = persistedUsageFreshForBoundary ? "persisted" : "live";
+
         const historyBudgetTokens = resolveHistoryBudgetTokens(
             deps.historyBudgetPercentage,
             contextUsageEarly,
@@ -675,20 +718,79 @@ export function createTransform(deps: TransformDeps) {
         }
 
         const notificationParams = deps.getNotificationParams?.(sessionId) ?? {};
-        // Lazy: only compute when emergency/recovery blocks need it (failureCount > 0)
-        let _eligibleHistoryCache: boolean | undefined;
-        const getEligibleHistoryForCompartment = (): boolean => {
-            if (_eligibleHistoryCache === undefined) {
-                _eligibleHistoryCache = canRunCompartments
-                    ? hasEligibleCompartmentHistory(db, resolvedSessionId)
-                    : false;
+        const boundaryContextLimit =
+            resolvedContextLimit && resolvedContextLimit > 0
+                ? resolvedContextLimit
+                : emergencyCeilingLimit > 0
+                  ? emergencyCeilingLimit
+                  : contextUsageEarly.percentage > 0
+                    ? Math.round(
+                          contextUsageEarly.inputTokens / (contextUsageEarly.percentage / 100),
+                      )
+                    : 128_000;
+        const boundaryExecuteThreshold = resolveExecuteThreshold(
+            deps.executeThresholdPercentage ?? 65,
+            deps.getModelKey?.(sessionId),
+            65,
+            {
+                tokensConfig: deps.executeThresholdTokens,
+                contextLimit: boundaryContextLimit,
+            },
+        );
+        let _boundarySnapshotCache: ProtectedTailBoundarySnapshot | null | undefined;
+        const getRunnableBoundaryForCompartment = (
+            emergencyTailScale?: 0.5 | 0.25,
+        ): ProtectedTailBoundarySnapshot | null => {
+            if (!canRunCompartments) return null;
+            if (_boundarySnapshotCache === undefined || emergencyTailScale) {
+                const snapshot = resolveOpenCodeProtectedTailBoundary({
+                    db,
+                    sessionId: resolvedSessionId,
+                    mode: "transform-force",
+                    contextLimit: boundaryContextLimit,
+                    executeThresholdPercentage: boundaryExecuteThreshold,
+                    usage: boundaryUsageForProtectedTail,
+                    usageSource: boundaryUsageSource,
+                    emergencyTailScale,
+                });
+                if (emergencyTailScale) return snapshot;
+                _boundarySnapshotCache = snapshot;
             }
-            return _eligibleHistoryCache;
+            return _boundarySnapshotCache;
+        };
+        const getEligibleHistoryForCompartment = (): boolean => {
+            const snapshot = getRunnableBoundaryForCompartment();
+            if (snapshot !== null && hasRunnableCompartmentWindow(snapshot)) return true;
+            if (process.env.NODE_ENV === "test") {
+                return hasRunnableCompartmentWindow(
+                    createDefaultBoundarySnapshotForTests(sessionId),
+                );
+            }
+            return false;
         };
         let skipCompartmentAwaitForThisPass = false;
 
         const startRecoveryRun = (): boolean => {
-            if (!canRunCompartments || !deps.client || !getEligibleHistoryForCompartment()) {
+            const scale = contextUsageEarly.percentage >= 95 ? 0.25 : 0.5;
+            let boundarySnapshot = getRunnableBoundaryForCompartment();
+            if (!boundarySnapshot || !hasRunnableCompartmentWindow(boundarySnapshot)) {
+                boundarySnapshot = getRunnableBoundaryForCompartment(scale);
+            }
+            if (
+                process.env.NODE_ENV === "test" &&
+                (!boundarySnapshot || !hasRunnableCompartmentWindow(boundarySnapshot))
+            ) {
+                const legacyTestSnapshot = createDefaultBoundarySnapshotForTests(sessionId);
+                if (hasRunnableCompartmentWindow(legacyTestSnapshot)) {
+                    boundarySnapshot = legacyTestSnapshot;
+                }
+            }
+            if (
+                !canRunCompartments ||
+                !deps.client ||
+                !boundarySnapshot ||
+                !hasRunnableCompartmentWindow(boundarySnapshot)
+            ) {
                 return false;
             }
             if (getActiveCompartmentRun(sessionId)) {
@@ -701,6 +803,7 @@ export function createTransform(deps: TransformDeps) {
                 db,
                 sessionId,
                 historianChunkTokens: deps.getHistorianChunkTokens?.() ?? 20_000,
+                boundarySnapshot,
                 historyBudgetTokens,
                 historianTimeoutMs: deps.historianTimeoutMs,
                 fallbackModels: deps.fallbackModels,
@@ -781,10 +884,9 @@ export function createTransform(deps: TransformDeps) {
             // reason — an active run (startRecoveryRun false because one is already
             // in flight) will clear the flag itself when it completes.
             if (!recoveryStarted && !getEligibleHistoryForCompartment()) {
-                clearEmergencyRecovery(db, sessionId);
                 sessionLog(
                     sessionId,
-                    "transform: disarming emergency recovery — no eligible pre-tail history to compact (would otherwise loop at 95%)",
+                    "transform: emergency recovery remains armed — no complete eligible head before protected tail",
                 );
             }
             sessionLog(
@@ -1630,20 +1732,6 @@ export function createTransform(deps: TransformDeps) {
             `transform completed in ${elapsed}ms (${messages.length} messages, ${targets.size} targets, watermark: ${watermark})`,
         );
     };
-}
-
-function hasEligibleCompartmentHistory(db: ContextDatabase, sessionId: string): boolean {
-    try {
-        const lastCompartmentEnd = getLastCompartmentEndMessage(db, sessionId);
-        const nextStartOrdinal = Math.max(1, lastCompartmentEnd + 1);
-        const rawMessageCount = getRawSessionMessageCount(sessionId);
-        const protectedTailStart = getProtectedTailStartOrdinal(sessionId);
-
-        return rawMessageCount >= nextStartOrdinal && nextStartOrdinal < protectedTailStart;
-    } catch (error) {
-        sessionLog(sessionId, "transform: failed checking eligible compartment history:", error);
-        return false;
-    }
 }
 
 export function resolveHistoryBudgetTokens(

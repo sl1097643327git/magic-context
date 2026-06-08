@@ -4,11 +4,14 @@ import type { ContextUsage, SessionMeta, TagEntry } from "../../features/magic-c
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import {
-    getProtectedTailStartOrdinal,
-    getRawSessionMessageCount,
-    readSessionChunk,
-    withRawSessionMessageCache,
-} from "./read-session-chunk";
+    createDefaultBoundarySnapshotForTests,
+    deriveMinForceEligibleTokens,
+    getRawHistoryEligibility,
+    hasRunnableCompartmentWindow,
+    type ProtectedTailBoundarySnapshot,
+    resolveOpenCodeProtectedTailBoundary,
+} from "./protected-tail-boundary";
+import { readSessionChunk, withRawSessionMessageCache } from "./read-session-chunk";
 
 const PROACTIVE_TRIGGER_OFFSET_PERCENTAGE = 2;
 const POST_DROP_TARGET_RATIO = 0.75;
@@ -94,35 +97,70 @@ function estimateProjectedPostDropPercentage(
 interface TailInfo {
     nextStartOrdinal: number;
     hasNewRawHistory: boolean;
+    hasProtectedEligibleHead: boolean;
     isMeaningful: boolean;
     tokenEstimate: number;
+    trueRawEligibleTokens: number;
     commitClusterCount: number;
+    boundarySnapshot?: ProtectedTailBoundarySnapshot;
 }
 
 const TAIL_INFO_DEFAULTS: TailInfo = {
     nextStartOrdinal: 1,
     hasNewRawHistory: false,
+    hasProtectedEligibleHead: false,
     isMeaningful: false,
     tokenEstimate: 0,
+    trueRawEligibleTokens: 0,
     commitClusterCount: 0,
 };
 
-function getUnsummarizedTailInfo(db: Database, sessionId: string, triggerBudget: number): TailInfo {
+function resolveBoundaryContextLimit(usage: ContextUsage, fallbackContextLimit?: number): number {
+    if (fallbackContextLimit && fallbackContextLimit > 0) return fallbackContextLimit;
+    if (usage.percentage > 0 && usage.inputTokens > 0) {
+        return Math.max(1, Math.round(usage.inputTokens / (usage.percentage / 100)));
+    }
+    return 128_000;
+}
+
+function getUnsummarizedTailInfo(
+    db: Database,
+    sessionId: string,
+    triggerBudget: number,
+    usage: ContextUsage,
+    executeThresholdPercentage: number,
+    contextLimit?: number,
+): TailInfo {
     return withRawSessionMessageCache(() => {
         try {
-            const lastCompartmentEnd = getLastCompartmentEndMessage(db, sessionId);
-            const nextStartOrdinal = Math.max(1, lastCompartmentEnd + 1);
-            const rawMessageCount = getRawSessionMessageCount(sessionId);
-            const protectedTailStart = getProtectedTailStartOrdinal(sessionId);
-            const hasEligibleHistory =
-                rawMessageCount >= nextStartOrdinal && nextStartOrdinal < protectedTailStart;
-
-            if (!hasEligibleHistory) {
-                return { ...TAIL_INFO_DEFAULTS, nextStartOrdinal };
+            const rawEligibility = getRawHistoryEligibility(db, sessionId);
+            if (!rawEligibility.hasRawBeyondLastCompartment) {
+                return { ...TAIL_INFO_DEFAULTS, nextStartOrdinal: rawEligibility.offset };
             }
 
-            // Read a large enough window to capture commit clusters and tail size.
-            // Use 3x the trigger budget so we can detect the tail-size trigger.
+            const boundary =
+                process.env.NODE_ENV === "test"
+                    ? createDefaultBoundarySnapshotForTests(sessionId)
+                    : resolveOpenCodeProtectedTailBoundary({
+                          db,
+                          sessionId,
+                          mode: "trigger",
+                          contextLimit: resolveBoundaryContextLimit(usage, contextLimit),
+                          executeThresholdPercentage,
+                          usage,
+                          usageSource: "live",
+                      });
+            const hasProtectedEligibleHead = boundary.offset < boundary.protectedTailStart;
+
+            if (!hasProtectedEligibleHead) {
+                return {
+                    ...TAIL_INFO_DEFAULTS,
+                    nextStartOrdinal: rawEligibility.offset,
+                    hasNewRawHistory: true,
+                    boundarySnapshot: boundary,
+                };
+            }
+
             const scanBudget = Math.max(
                 MIN_PROACTIVE_TAIL_TOKEN_ESTIMATE,
                 triggerBudget * TAIL_SIZE_TRIGGER_MULTIPLIER,
@@ -130,20 +168,24 @@ function getUnsummarizedTailInfo(db: Database, sessionId: string, triggerBudget:
             const chunk = readSessionChunk(
                 sessionId,
                 scanBudget,
-                nextStartOrdinal,
-                protectedTailStart,
+                rawEligibility.offset,
+                boundary.protectedTailStart,
             );
             const isMeaningful =
                 chunk.hasMore ||
+                boundary.trueRawEligibleTokens >= MIN_PROACTIVE_TAIL_TOKEN_ESTIMATE ||
                 chunk.tokenEstimate >= MIN_PROACTIVE_TAIL_TOKEN_ESTIMATE ||
                 chunk.messageCount >= MIN_PROACTIVE_TAIL_MESSAGE_COUNT;
 
             return {
-                nextStartOrdinal,
+                nextStartOrdinal: rawEligibility.offset,
                 hasNewRawHistory: true,
+                hasProtectedEligibleHead,
                 isMeaningful,
                 tokenEstimate: chunk.tokenEstimate,
+                trueRawEligibleTokens: boundary.trueRawEligibleTokens,
                 commitClusterCount: chunk.commitClusterCount,
+                boundarySnapshot: boundary,
             };
         } catch (error) {
             sessionLog(sessionId, "compartment trigger: raw tail inspection failed:", error);
@@ -163,6 +205,7 @@ export function checkCompartmentTrigger(
     clearReasoningAge?: number,
     commitClusterTrigger?: { enabled: boolean; min_clusters: number },
     preloadedActiveTags?: readonly TagEntry[],
+    contextLimit?: number,
 ): CompartmentTriggerResult {
     if (sessionMeta.compartmentInProgress) {
         sessionLog(
@@ -172,7 +215,14 @@ export function checkCompartmentTrigger(
         return { shouldFire: false };
     }
 
-    const tailInfo = getUnsummarizedTailInfo(db, sessionId, triggerBudget);
+    const tailInfo = getUnsummarizedTailInfo(
+        db,
+        sessionId,
+        triggerBudget,
+        usage,
+        executeThresholdPercentage,
+        contextLimit,
+    );
     if (!tailInfo.hasNewRawHistory) {
         // Diagnostic data collection is best-effort. The helpers can throw if
         // the OpenCode session DB is unavailable (e.g. in unit-test env or
@@ -183,11 +233,9 @@ export function checkCompartmentTrigger(
         // fields so callers see no behavioral change.
         try {
             const lastCompartmentEnd = getLastCompartmentEndMessage(db, sessionId);
-            const rawMessageCount = getRawSessionMessageCount(sessionId);
-            const protectedTailStart = getProtectedTailStartOrdinal(sessionId);
             sessionLog(
                 sessionId,
-                `compartment trigger: skipped — no new raw history (usage=${usage.percentage.toFixed(1)}% nextStartOrdinal=${tailInfo.nextStartOrdinal} lastCompartmentEnd=${lastCompartmentEnd} rawMessageCount=${rawMessageCount} protectedTailStart=${protectedTailStart})`,
+                `compartment trigger: skipped — no new raw history (usage=${usage.percentage.toFixed(1)}% nextStartOrdinal=${tailInfo.nextStartOrdinal} lastCompartmentEnd=${lastCompartmentEnd})`,
             );
         } catch (error) {
             sessionLog(
@@ -225,7 +273,34 @@ export function checkCompartmentTrigger(
             sessionId,
             `compartment trigger: force-firing at ${usage.percentage.toFixed(1)}% (projected post-drop ${projectedPostDropPercentage?.toFixed(1) ?? "none"}%)`,
         );
-        return { shouldFire: true, reason: "force_80" };
+        if (tailInfo.boundarySnapshot && hasRunnableCompartmentWindow(tailInfo.boundarySnapshot)) {
+            return {
+                shouldFire: true,
+                reason: "force_80",
+            };
+        }
+        const scale = usage.percentage >= BLOCK_UNTIL_DONE_PERCENTAGE ? 0.25 : 0.5;
+        const scaledBoundary = resolveOpenCodeProtectedTailBoundary({
+            db,
+            sessionId,
+            mode: "trigger",
+            contextLimit: resolveBoundaryContextLimit(usage, contextLimit),
+            executeThresholdPercentage,
+            usage,
+            usageSource: "live",
+            emergencyTailScale: scale,
+        });
+        if (
+            hasRunnableCompartmentWindow(scaledBoundary) &&
+            scaledBoundary.trueRawEligibleTokens >= deriveMinForceEligibleTokens(scaledBoundary.N)
+        ) {
+            return { shouldFire: true, reason: "force_80" };
+        }
+        sessionLog(
+            sessionId,
+            "compartment trigger: force_80 skipped — raw exists but protected head genuinely empty after emergency tail scale",
+        );
+        return { shouldFire: false };
     }
 
     // Commit-cluster trigger: N+ distinct work phases with commits, enough token volume
@@ -241,16 +316,22 @@ export function checkCompartmentTrigger(
             sessionId,
             `compartment trigger: commit-cluster fire — ${tailInfo.commitClusterCount} clusters (min=${minClusters}), ~${tailInfo.tokenEstimate} tokens in eligible prefix`,
         );
-        return { shouldFire: true, reason: "commit_clusters" };
+        return {
+            shouldFire: true,
+            reason: "commit_clusters",
+        };
     }
 
     // Tail-size trigger: eligible prefix is very large regardless of pressure or commits
-    if (tailInfo.tokenEstimate >= triggerBudget * TAIL_SIZE_TRIGGER_MULTIPLIER) {
+    if (tailInfo.trueRawEligibleTokens >= triggerBudget * TAIL_SIZE_TRIGGER_MULTIPLIER) {
         sessionLog(
             sessionId,
             `compartment trigger: tail-size fire — ~${tailInfo.tokenEstimate} tokens exceeds ${triggerBudget * TAIL_SIZE_TRIGGER_MULTIPLIER} budget threshold`,
         );
-        return { shouldFire: true, reason: "tail_size" };
+        return {
+            shouldFire: true,
+            reason: "tail_size",
+        };
     }
 
     // Pressure-driven trigger: context is near threshold and drops aren't enough
@@ -276,7 +357,7 @@ export function checkCompartmentTrigger(
         return { shouldFire: false };
     }
 
-    if (!tailInfo.isMeaningful) {
+    if (!tailInfo.hasProtectedEligibleHead || !tailInfo.isMeaningful) {
         sessionLog(
             sessionId,
             `compartment trigger: not firing at ${usage.percentage.toFixed(1)}% because unsummarized tail from ${tailInfo.nextStartOrdinal} is too small`,
@@ -288,5 +369,8 @@ export function checkCompartmentTrigger(
         sessionId,
         `compartment trigger: proactive fire at ${usage.percentage.toFixed(1)}% (floor=${proactiveTriggerPercentage}% projected post-drop=${projectedPostDropPercentage?.toFixed(1) ?? "none"}% target=${relativePostDropTarget.toFixed(1)}%)`,
     );
-    return { shouldFire: true, reason: "projected_headroom" };
+    return {
+        shouldFire: true,
+        reason: "projected_headroom",
+    };
 }

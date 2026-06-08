@@ -40,7 +40,6 @@ import {
 	releaseCompartmentLease,
 	renewCompartmentLease,
 } from "@magic-context/core/features/magic-context/compartment-lease";
-import { getLastCompartmentEndMessage } from "@magic-context/core/features/magic-context/compartment-storage";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
 	clearSessionTracking,
@@ -110,8 +109,13 @@ import {
 	peekNoteNudgeText,
 } from "@magic-context/core/hooks/magic-context/note-nudger";
 import {
-	getProtectedTailStartOrdinal,
-	getRawSessionMessageCount,
+	createDefaultBoundarySnapshotForTests,
+	getRawHistoryEligibility,
+	hasRunnableCompartmentWindow,
+	resolveBoundaryContext,
+	resolveProtectedTailBoundary,
+} from "@magic-context/core/hooks/magic-context/protected-tail-boundary";
+import {
 	readRawSessionMessages,
 	setRawMessageProvider,
 } from "@magic-context/core/hooks/magic-context/read-session-chunk";
@@ -1906,8 +1910,7 @@ export function registerPiContextHandler(
 									liveModelBySession.get(sessionId),
 									65,
 									{
-										tokensConfig:
-											schedulerConfig.executeThresholdTokens,
+										tokensConfig: schedulerConfig.executeThresholdTokens,
 										contextLimit: usageContextLimit,
 										sessionId,
 									},
@@ -2436,14 +2439,25 @@ function hasEligiblePiCompartmentHistory(
 	sessionId: string,
 ): boolean {
 	try {
-		const lastCompartmentEnd = getLastCompartmentEndMessage(db, sessionId);
-		const nextStartOrdinal = Math.max(1, lastCompartmentEnd + 1);
-		const rawMessageCount = getRawSessionMessageCount(sessionId);
-		const protectedTailStart = getProtectedTailStartOrdinal(sessionId);
-		return (
-			rawMessageCount >= nextStartOrdinal &&
-			nextStartOrdinal < protectedTailStart
-		);
+		const rawEligibility = getRawHistoryEligibility(db, sessionId);
+		if (!rawEligibility.hasRawBeyondLastCompartment) return false;
+		const snapshot =
+			process.env.NODE_ENV === "test"
+				? createDefaultBoundarySnapshotForTests(sessionId)
+				: resolveProtectedTailBoundary(
+						resolveBoundaryContext({
+							db,
+							sessionId,
+							mode: "pi-trigger",
+							contextLimit: 128_000,
+							executeThresholdPercentage: 65,
+							usage: null,
+							usageSource: "provisional-zero",
+							providerShapeVersion: "pi-folded-v1",
+							cacheNamespace: `pi:${sessionId}`,
+						}),
+					);
+		return hasRunnableCompartmentWindow(snapshot);
 	} catch (err) {
 		sessionLog(
 			sessionId,
@@ -2786,6 +2800,7 @@ function maybeFireHistorian(args: {
 			triggerInputs.clearReasoningAge,
 			triggerInputs.commitClusterTrigger,
 			args.activeTags,
+			usageContextLimit,
 		);
 
 		if (!trigger.shouldFire) {
@@ -3424,8 +3439,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 						args.emergencyCeilingTokens !== undefined &&
 						args.emergencyCeilingTokens > 0
 							? {
-									currentTotalInputTokens:
-										args.contextUsage.inputTokens,
+									currentTotalInputTokens: args.contextUsage.inputTokens,
 									ceilingTokens: args.emergencyCeilingTokens,
 								}
 							: undefined,

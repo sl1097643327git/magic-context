@@ -19,9 +19,7 @@ describe("buildMagicContextSection — generic guidance", () => {
         const generic = buildMagicContextSection(null, 20, true, false, false, false);
 
         for (const agent of KNOWN_AGENT_IDENTITIES) {
-            expect(buildMagicContextSection(agent, 20, true, false, false, false)).toBe(
-                generic,
-            );
+            expect(buildMagicContextSection(agent, 20, true, false, false, false)).toBe(generic);
         }
     });
 

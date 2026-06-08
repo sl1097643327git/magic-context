@@ -378,3 +378,21 @@ identically on both harnesses.
 Update this file whenever a deliberate Pi↔OpenCode divergence is introduced or
 changed. Point audit/council/Oracle briefs at it so intentional divergences are
 not re-reported as bugs each round.
+
+---
+
+## 8. Protected-tail true-raw parity is text + tool I/O only
+
+**OpenCode:** raw session reads preserve full provider part JSON, including
+reasoning/thinking and image payload metadata. The protected-tail true-raw
+estimator can count those categories directly.
+
+**Pi:** transcript shaping deliberately drops thinking parts and image payloads
+before the shared protected-tail core sees the folded OpenCode-shaped messages.
+Pi still preserves text and tool invocation/result I/O, so protected-tail sizing,
+tool-arc fencing, and historian eligibility are parity-tested for those fields.
+
+**Consequence:** thinking/image token parity is a known provider-shape divergence
+and is deferred. Tests should assert text + tool-I/O parity and separately track
+Pi's expected undercount for thinking/images rather than treating it as a silent
+regression.

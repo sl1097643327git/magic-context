@@ -1,4 +1,3 @@
-import { getLastCompartmentEndMessage } from "../../features/magic-context/compartment-storage";
 import { type ContextDatabase, updateSessionMeta } from "../../features/magic-context/storage";
 import type { PluginContext } from "../../plugin/types";
 import { sessionLog } from "../../shared/logger";
@@ -12,7 +11,12 @@ import {
     type PreparedCompartmentInjection,
     prepareCompartmentInjection,
 } from "./inject-compartments";
-import { getProtectedTailStartOrdinal, getRawSessionMessageCount } from "./read-session-chunk";
+import {
+    getRawHistoryEligibility,
+    hasRunnableCompartmentWindow,
+    type ProtectedTailBoundarySnapshot,
+    resolveOpenCodeProtectedTailBoundary,
+} from "./protected-tail-boundary";
 import { sendIgnoredMessage } from "./send-session-notification";
 import type { MessageLike } from "./transform-operations";
 
@@ -72,28 +76,40 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
     let justAwaitedPublication = false;
     let rebuiltHistoryThisPass = false;
     const historianRunnable = args.historianRunnable !== false;
-    let lastCompartmentEnd: number | null = null;
-    let rawMessageCount: number | null = null;
-    let cachedProtectedTailStart: number | null = null;
+    let rawEligibility: ReturnType<typeof getRawHistoryEligibility> | null = null;
+    let lastObservedCompartmentEnd = -1;
+    let cachedBoundarySnapshot: ProtectedTailBoundarySnapshot | null = null;
 
     function hasNewRawHistoryForCompartment(): boolean {
         if (!args.fullFeatureMode || !historianRunnable) return false;
-        if (lastCompartmentEnd === null) {
-            lastCompartmentEnd = getLastCompartmentEndMessage(args.db, args.resolvedSessionId);
+        if (rawEligibility === null) {
+            rawEligibility = getRawHistoryEligibility(args.db, args.resolvedSessionId);
+            lastObservedCompartmentEnd = rawEligibility.lastCompartmentEnd;
         }
-        if (rawMessageCount === null) {
-            rawMessageCount = getRawSessionMessageCount(args.resolvedSessionId);
+        return rawEligibility.hasRawBeyondLastCompartment;
+    }
+
+    function getBoundarySnapshotForCompartment(): ProtectedTailBoundarySnapshot | null {
+        if (!hasNewRawHistoryForCompartment()) return null;
+        if (cachedBoundarySnapshot === null) {
+            cachedBoundarySnapshot = resolveOpenCodeProtectedTailBoundary({
+                db: args.db,
+                sessionId: args.resolvedSessionId,
+                mode: "transform-force",
+                contextLimit: 128_000,
+                executeThresholdPercentage: 65,
+                usage: { percentage: args.contextUsage.percentage, inputTokens: 0 },
+                usageSource: "live",
+                emergencyTailScale:
+                    args.contextUsage.percentage >= BLOCK_UNTIL_DONE_PERCENTAGE ? 0.25 : undefined,
+            });
         }
-        return rawMessageCount > lastCompartmentEnd;
+        return cachedBoundarySnapshot;
     }
 
     function hasEligibleHistoryForCompartment(): boolean {
-        if (!hasNewRawHistoryForCompartment()) return false;
-        if (cachedProtectedTailStart === null) {
-            cachedProtectedTailStart = getProtectedTailStartOrdinal(args.resolvedSessionId);
-        }
-        const nextStart = (lastCompartmentEnd ?? 0) + 1;
-        return nextStart < cachedProtectedTailStart;
+        const snapshot = getBoundarySnapshotForCompartment();
+        return snapshot !== null && hasRunnableCompartmentWindow(snapshot);
     }
 
     async function awaitCompartmentRun(
@@ -154,7 +170,7 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
         if (!hasEligibleHistoryForCompartment()) {
             sessionLog(
                 args.sessionId,
-                `transform: skipping compartment start, no eligible history before protected tail (beyond ${lastCompartmentEnd ?? -1})`,
+                `transform: skipping compartment start, no eligible history before protected tail (beyond ${lastObservedCompartmentEnd})`,
             );
             updateSessionMeta(args.db, args.sessionId, { compartmentInProgress: false });
             compartmentInProgress = false;
@@ -169,6 +185,7 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
                 db: args.db,
                 sessionId: args.sessionId,
                 historianChunkTokens: args.historianChunkTokens,
+                boundarySnapshot: getBoundarySnapshotForCompartment() ?? undefined,
                 historyBudgetTokens: args.historyBudgetTokens,
                 historianTimeoutMs: args.historianTimeoutMs,
                 fallbackModels: args.fallbackModels,
@@ -211,6 +228,7 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
                 db: args.db,
                 sessionId: args.sessionId,
                 historianChunkTokens: args.historianChunkTokens,
+                boundarySnapshot: getBoundarySnapshotForCompartment() ?? undefined,
                 historyBudgetTokens: args.historyBudgetTokens,
                 historianTimeoutMs: args.historianTimeoutMs,
                 fallbackModels: args.fallbackModels,

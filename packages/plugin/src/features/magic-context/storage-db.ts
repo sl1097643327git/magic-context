@@ -36,7 +36,7 @@ export function getSchemaFenceRejection(): {
     return lastSchemaFenceRejection;
 }
 
-export const LATEST_SUPPORTED_VERSION = 31;
+export const LATEST_SUPPORTED_VERSION = 32;
 
 export interface OpenDatabaseOptions {
     dbPath?: string;
@@ -607,6 +607,14 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       cached_m0_project_docs_hash TEXT,
       cached_m1_bytes BLOB,
       last_observed_model_key TEXT,
+      last_usage_context_limit INTEGER NOT NULL DEFAULT 0,
+      prior_boundary_ordinal INTEGER NOT NULL DEFAULT 1,
+      protected_tail_policy_version INTEGER NOT NULL DEFAULT 0,
+      protected_tail_drain_window_started_at INTEGER NOT NULL DEFAULT 0,
+      protected_tail_drain_tokens INTEGER NOT NULL DEFAULT 0,
+      recovery_no_eligible_head_count INTEGER NOT NULL DEFAULT 0,
+      force_emergency_bypass_window_start INTEGER NOT NULL DEFAULT 0,
+      force_emergency_bypass_used INTEGER NOT NULL DEFAULT 0,
       cached_m0_materialized_at INTEGER,
       cached_m0_session_facts_version INTEGER,
       cached_m0_upgrade_state TEXT,
@@ -868,6 +876,29 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     ensureColumn(db, "session_meta", "cached_m0_project_docs_hash", "TEXT");
     ensureColumn(db, "session_meta", "cached_m1_bytes", "BLOB");
     ensureColumn(db, "session_meta", "last_observed_model_key", "TEXT");
+    ensureColumn(db, "session_meta", "last_usage_context_limit", "INTEGER NOT NULL DEFAULT 0");
+    ensureColumn(db, "session_meta", "prior_boundary_ordinal", "INTEGER NOT NULL DEFAULT 1");
+    ensureColumn(db, "session_meta", "protected_tail_policy_version", "INTEGER NOT NULL DEFAULT 0");
+    ensureColumn(
+        db,
+        "session_meta",
+        "protected_tail_drain_window_started_at",
+        "INTEGER NOT NULL DEFAULT 0",
+    );
+    ensureColumn(db, "session_meta", "protected_tail_drain_tokens", "INTEGER NOT NULL DEFAULT 0");
+    ensureColumn(
+        db,
+        "session_meta",
+        "recovery_no_eligible_head_count",
+        "INTEGER NOT NULL DEFAULT 0",
+    );
+    ensureColumn(
+        db,
+        "session_meta",
+        "force_emergency_bypass_window_start",
+        "INTEGER NOT NULL DEFAULT 0",
+    );
+    ensureColumn(db, "session_meta", "force_emergency_bypass_used", "INTEGER NOT NULL DEFAULT 0");
     ensureColumn(db, "session_meta", "cached_m0_materialized_at", "INTEGER");
     ensureColumn(db, "session_meta", "cached_m0_session_facts_version", "INTEGER");
     ensureColumn(db, "session_meta", "cached_m0_upgrade_state", "TEXT");
@@ -1102,6 +1133,14 @@ function healNullIntegerColumns(db: Database): void {
         ["new_work_tokens", 0],
         ["total_input_tokens", 0],
         ["last_emergency_input_sample", 0],
+        ["last_usage_context_limit", 0],
+        ["prior_boundary_ordinal", 1],
+        ["protected_tail_policy_version", 0],
+        ["protected_tail_drain_window_started_at", 0],
+        ["protected_tail_drain_tokens", 0],
+        ["recovery_no_eligible_head_count", 0],
+        ["force_emergency_bypass_window_start", 0],
+        ["force_emergency_bypass_used", 0],
     ];
     for (const [column, fallback] of columns) {
         try {

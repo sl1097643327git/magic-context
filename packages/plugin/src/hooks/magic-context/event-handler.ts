@@ -24,7 +24,7 @@ import {
 } from "../../features/magic-context/storage";
 import { getPersistedCompactionMarkerState } from "../../features/magic-context/storage-meta-persisted";
 import type { Tagger } from "../../features/magic-context/tagger";
-import type { ContextUsage } from "../../features/magic-context/types";
+import type { ContextUsage, SessionMeta } from "../../features/magic-context/types";
 import { log, sessionLog } from "../../shared/logger";
 import { refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
 import { maybeDeliverChannel2 } from "./channel2-delivery";
@@ -432,14 +432,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
 
             try {
                 const modelKey = resolveModelKey(info.providerID, info.modelID);
-                const updates: {
-                    lastResponseTime: number;
-                    cacheTtl?: string;
-                    lastContextPercentage?: number;
-                    lastInputTokens?: number;
-                    observedSafeInputTokens?: number;
-                    cacheAlertSent?: boolean;
-                } = {
+                const updates: Partial<SessionMeta> & { lastResponseTime: number } = {
                     lastResponseTime: now,
                 };
 
@@ -513,6 +506,8 @@ export function createEventHandler(deps: EventHandlerDeps) {
 
                     updates.lastContextPercentage = percentage;
                     updates.lastInputTokens = totalInputTokens;
+                    updates.lastUsageContextLimit = contextLimit;
+                    updates.lastObservedModelKey = modelKey ?? null;
                     if (!messageHadOverflowError) {
                         updates.observedSafeInputTokens = Math.max(
                             observedSafeInputTokens,
@@ -558,6 +553,8 @@ export function createEventHandler(deps: EventHandlerDeps) {
                             triggerBudget,
                             deps.config.clear_reasoning_age ?? 50,
                             deps.config.commit_cluster_trigger,
+                            undefined,
+                            contextLimit,
                         );
 
                         if (triggerResult.shouldFire) {

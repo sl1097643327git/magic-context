@@ -1,6 +1,6 @@
+import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "bun:test";
 import {
 	getChannel2NudgeState,
 	setChannel2NudgeState,
@@ -200,10 +200,10 @@ describe("Channel 2 delivery wiring (regression)", () => {
 	});
 
 	it("the agent_end handler calls maybeDeliverChannel2Pi", () => {
-		const handler = INDEX_SRC.match(
-			/pi\.on\("agent_end",[\s\S]*?\n\t\}\);/,
-		);
+		const handler = INDEX_SRC.match(/pi\.on\("agent_end",[\s\S]*?\n\t\}\);/);
 		expect(handler).not.toBeNull();
-		expect(handler?.[0] ?? "").toContain("maybeDeliverChannel2Pi(pi, db, sessionId)");
+		expect(handler?.[0] ?? "").toContain(
+			"maybeDeliverChannel2Pi(pi, db, sessionId)",
+		);
 	});
 });

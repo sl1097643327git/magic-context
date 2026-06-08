@@ -32,7 +32,7 @@ import {
     validateStoredCompartments,
 } from "./compartment-runner-validation";
 import { clearInjectionCache } from "./inject-compartments";
-import { getProtectedTailStartOrdinal, readSessionChunk } from "./read-session-chunk";
+import { readSessionChunk } from "./read-session-chunk";
 import { buildReferenceBlocks } from "./reference-retrieval";
 import { sendIgnoredMessage } from "./send-session-notification";
 
@@ -151,8 +151,6 @@ export async function executePartialRecompInternal(
     updateSessionMeta(db, sessionId, { compartmentInProgress: true });
 
     try {
-        const protectedTailStart = getProtectedTailStartOrdinal(sessionId);
-
         // ── Snap to compartment boundaries ─────────────────────────────────
         const existingCompartments = getCompartments(db, sessionId);
         const snapResult = snapRangeToCompartments(existingCompartments, range);
@@ -160,12 +158,6 @@ export async function executePartialRecompInternal(
             return `## Magic Recomp — Failed\n\n${snapResult.error}`;
         }
         const { snapStart, snapEnd, priorCompartments, tailCompartments } = snapResult;
-
-        // Refuse to recomp into the protected tail — validation would fail anyway
-        // but checking here produces a clearer user-facing error.
-        if (snapEnd >= protectedTailStart) {
-            return `## Magic Recomp — Failed\n\nSnapped range ${snapStart}-${snapEnd} would cross into the protected tail (starting at ${protectedTailStart}). Partial recomp cannot rebuild recent messages. Try an earlier range.`;
-        }
 
         // ── Resume detection: check existing staging range ─────────────────
         const storedRange = getRecompPartialRange(db, sessionId);

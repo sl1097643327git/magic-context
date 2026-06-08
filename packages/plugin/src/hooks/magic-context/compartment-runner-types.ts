@@ -1,6 +1,7 @@
 import type { PluginContext } from "../../plugin/types";
 import type { Database } from "../../shared/sqlite";
 import type { ParsedEvent } from "./compartment-parser";
+import type { ProtectedTailBoundarySnapshot } from "./protected-tail-boundary";
 import type { NotificationParams } from "./send-session-notification";
 
 /**
@@ -61,6 +62,8 @@ export interface CompartmentRunnerDeps {
      */
     historianChunkTokens: number;
     historianTimeoutMs?: number;
+    /** Immutable protected-tail boundary resolved by the trigger/force path. Tests may omit it and use the default-snapshot factory. */
+    boundarySnapshot?: ProtectedTailBoundarySnapshot;
     /** Resolved fallback chain for historian-family calls (historian + compressor). */
     fallbackModels?: readonly string[];
     directory: string;

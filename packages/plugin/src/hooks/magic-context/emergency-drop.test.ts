@@ -61,7 +61,7 @@ describe("planEmergencyDrop — guards", () => {
         maxTag: 10,
         protectedTags: 0,
         hasPriorDrop: false,
-            priorInputSample: 0,
+        priorInputSample: 0,
     };
 
     it("skips when the ceiling is unknown/invalid", () => {

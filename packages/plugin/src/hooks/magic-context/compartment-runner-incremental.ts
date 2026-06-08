@@ -25,6 +25,9 @@ import {
     clearHistorianFailureState,
     getOverflowState,
     incrementHistorianFailure,
+    recordProtectedTailPublicationFloor,
+    reserveProtectedTailDrainTokens,
+    rollbackProtectedTailDrainReservation,
     setPendingCompactionMarkerState,
 } from "../../features/magic-context/storage";
 import {
@@ -51,7 +54,16 @@ import {
 } from "./compartment-runner-validation";
 import { clearInjectionCache, renderMemoryBlock } from "./inject-compartments";
 import { onNoteTrigger } from "./note-nudger";
-import { getProtectedTailStartOrdinal, readSessionChunk } from "./read-session-chunk";
+import {
+    createDefaultBoundarySnapshotForTests,
+    type ProtectedTailBoundarySnapshot,
+    recordHighPressureNoEligibleHead,
+    resolveOpenCodeProtectedTailBoundary,
+    selectPerRunCap,
+    validateBoundarySnapshot,
+} from "./protected-tail-boundary";
+import { readSessionChunk } from "./read-session-chunk";
+import { estimateTokens } from "./read-session-formatting";
 import { buildReferenceBlocks } from "./reference-retrieval";
 import { sendIgnoredMessage } from "./send-session-notification";
 
@@ -86,6 +98,8 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
     let completedSuccessfully = false;
     let issueNotified = false;
     let stateFilePath: string | undefined;
+    let drainReservation: ReturnType<typeof reserveProtectedTailDrainTokens>["reservation"] = null;
+    let historianAttempted = false;
 
     // historian_runs telemetry (migration v24). Captured across the run and
     // recorded ONCE in `finally` so every exit path (no-op, failure, success) is
@@ -138,6 +152,31 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
         await sendIgnoredMessage(client, sessionId, message, getNotificationParams?.() ?? {});
     };
 
+    const truncateHistorianInputIfNeeded = (text: string, budget: number): string => {
+        if (estimateTokens(text) <= budget) return text;
+        let lo = 0;
+        let hi = text.length;
+        let best = 0;
+        const marker = "\n[… tokens truncated by Magic Context to fit the historian window …]";
+        while (lo <= hi) {
+            const mid = (lo + hi) >> 1;
+            if (estimateTokens(text.slice(0, mid) + marker) <= budget) {
+                best = mid;
+                lo = mid + 1;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        return text.slice(0, best) + marker;
+    };
+
+    const rollbackDrainReservation = (): void => {
+        if (drainReservation) {
+            rollbackProtectedTailDrainReservation(db, drainReservation);
+            drainReservation = null;
+        }
+    };
+
     updateSessionMeta(db, sessionId, { compartmentInProgress: true });
 
     try {
@@ -166,45 +205,113 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
                 ? priorCompartments[priorCompartments.length - 1].endMessage + 1
                 : 1;
 
-        const protectedTailStart = getProtectedTailStartOrdinal(sessionId);
-        if (protectedTailStart <= offset) {
-            // No eligible raw history before the protected tail. Nothing to
-            // compact — this is a successful no-op, not a failure. If the
-            // session was force-bumped to 95% by `needs_emergency_recovery`,
-            // we'd otherwise loop forever: the bump fires this run, the run
-            // bails silently, no publish path clears the recovery flag, the
-            // next turn bumps and runs again. Disarm here so legitimate
-            // future overflows can re-arm cleanly. The `detectedContextLimit`
-            // is intentionally preserved — that's authoritative model data
-            // that stays useful for pressure math.
+        const boundarySnapshot: ProtectedTailBoundarySnapshot =
+            deps.boundarySnapshot ??
+            (process.env.NODE_ENV === "test"
+                ? createDefaultBoundarySnapshotForTests(sessionId)
+                : resolveOpenCodeProtectedTailBoundary({
+                      db,
+                      sessionId,
+                      mode: "incremental-runner",
+                      contextLimit: 128_000,
+                      executeThresholdPercentage: 65,
+                      usage: null,
+                      usageSource: "provisional-zero",
+                  }));
+        const validation =
+            boundarySnapshot.rawRangeFingerprint.length > 0
+                ? validateBoundarySnapshot({ db, snapshot: boundarySnapshot })
+                : { ok: true };
+        if (!validation.ok) {
             sessionLog(
                 sessionId,
-                `historian no-op: protectedTailStart=${protectedTailStart} <= offset=${offset} — nothing to compact`,
+                `historian no-op: stale protected-tail snapshot (${validation.detail ?? validation.reason ?? "unknown"})`,
             );
-            clearEmergencyRecovery(db, sessionId);
             telemetry.status = "noop";
-            telemetry.failureReason = "nothing to compact before protected tail";
+            telemetry.failureReason = "stale_snapshot";
+            rollbackDrainReservation();
             return;
         }
 
-        const chunk = readSessionChunk(sessionId, historianChunkTokens, offset, protectedTailStart);
+        const protectedTailStart = Math.min(
+            boundarySnapshot.protectedTailStart,
+            boundarySnapshot.rawMessageCountAtTrigger + 1,
+        );
+        const eligibleEndOrdinal = Math.min(
+            boundarySnapshot.eligibleEndOrdinal,
+            protectedTailStart,
+        );
+        if (protectedTailStart <= offset || eligibleEndOrdinal <= offset) {
+            sessionLog(
+                sessionId,
+                `historian no-op: protectedTailStart=${protectedTailStart} eligibleEnd=${eligibleEndOrdinal} <= offset=${offset} — nothing to compact`,
+            );
+            if (boundarySnapshot.usagePercentage < 80 && !boundarySnapshot.emergencyTailScale) {
+                clearEmergencyRecovery(db, sessionId);
+            } else {
+                const count = recordHighPressureNoEligibleHead(db, boundarySnapshot);
+                sessionLog(
+                    sessionId,
+                    `historian high-pressure no-op: recovery remains armed (noEligibleHeadCount=${count})`,
+                );
+            }
+            telemetry.status = "noop";
+            telemetry.failureReason = "nothing to compact before protected tail";
+            rollbackDrainReservation();
+            return;
+        }
+
+        const perRunCap = selectPerRunCap(boundarySnapshot);
+        const usable = Math.max(
+            1,
+            Math.round(
+                (boundarySnapshot.contextLimit * boundarySnapshot.executeThresholdPercentage) / 100,
+            ),
+        );
+        const reserve = reserveProtectedTailDrainTokens({
+            db,
+            sessionId,
+            runId: crypto.randomUUID(),
+            trueRawTokens: boundarySnapshot.trueRawEligibleTokens,
+            usagePercentage: boundarySnapshot.usagePercentage,
+            usable,
+            perRunCap,
+        });
+        if (!reserve.ok) {
+            sessionLog(
+                sessionId,
+                `historian rate-limit skip: ${reserve.skippedReason ?? "quota exhausted"}`,
+            );
+            telemetry.status = "noop";
+            telemetry.failureReason = "protected-tail drain quota exhausted";
+            return;
+        }
+        drainReservation = reserve.reservation;
+
+        const chunk = readSessionChunk(sessionId, historianChunkTokens, offset, eligibleEndOrdinal);
         telemetry.chunkStartOrdinal = chunk.startIndex;
         telemetry.chunkEndOrdinal = chunk.endIndex;
         if (!chunk.text || chunk.messageCount === 0) {
-            // Same logic as above: there are eligible raw messages by
-            // ordinal, but every one of them was filtered as noise (ignored
-            // notifications, structural-only messages, etc.). Disarm
-            // recovery — there's nothing for historian to act on, and
-            // leaving the flag armed produces the issue #85 notification
-            // loop.
             sessionLog(
                 sessionId,
-                `historian no-op: chunk empty after filtering (messageCount=${chunk.messageCount}, textLen=${chunk.text?.length ?? 0}) range=${offset}-${protectedTailStart - 1}`,
+                `historian no-op: chunk empty after filtering (messageCount=${chunk.messageCount}, textLen=${chunk.text?.length ?? 0}) range=${offset}-${eligibleEndOrdinal - 1}`,
             );
-            clearEmergencyRecovery(db, sessionId);
+            if (boundarySnapshot.usagePercentage < 80 && !boundarySnapshot.emergencyTailScale) {
+                clearEmergencyRecovery(db, sessionId);
+            } else {
+                recordHighPressureNoEligibleHead(db, boundarySnapshot);
+            }
             telemetry.status = "noop";
             telemetry.failureReason = "chunk empty after filtering";
+            rollbackDrainReservation();
             return;
+        }
+        const chunkText = truncateHistorianInputIfNeeded(chunk.text, historianChunkTokens);
+        if (chunkText !== chunk.text) {
+            sessionLog(
+                sessionId,
+                `historian pre-flight: truncated formatted input for ${chunk.startIndex}-${chunk.endIndex} to fit ${historianChunkTokens} tokens`,
+            );
         }
 
         const chunkCoverageError = validateChunkCoverage(chunk);
@@ -220,6 +327,7 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             // diagnostics.
             const failCount = incrementHistorianFailure(db, sessionId, chunkCoverageError);
             await notifyHistorianIssue(buildHistorianFailureNotice(failCount, chunkCoverageError));
+            rollbackDrainReservation();
             return;
         }
 
@@ -244,7 +352,7 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             seedExamples: references.seedExamples,
             sessionReferences: references.sessionReferences,
             projectMemory,
-            inputSource: `Messages ${chunk.startIndex}-${chunk.endIndex}:\n\n${chunk.text}`,
+            inputSource: `Messages ${chunk.startIndex}-${chunk.endIndex}:\n\n${chunkText}`,
             memoryEnabled: deps.memoryEnabled !== false,
         });
 
@@ -271,6 +379,7 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
         );
         const sequenceOffset = priorCompartments.length === 0 ? 0 : maxExistingSequence + 1;
 
+        historianAttempted = true;
         const validatedPass = await runValidatedHistorianPass({
             client,
             parentSessionId: sessionId,
@@ -376,6 +485,7 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
         const holderId = deps.compartmentLeaseHolderId;
         if (!holderId) {
             sessionLog(sessionId, "historian publish skipped: missing compartment lease holder");
+            rollbackDrainReservation();
             return;
         }
         let published = false;
@@ -383,6 +493,7 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
         try {
             if (!isCompartmentLeaseHeld(db, sessionId, holderId)) {
                 db.exec("ROLLBACK");
+                rollbackDrainReservation();
                 sessionLog(
                     sessionId,
                     "historian publish skipped: compartment lease no longer held",
@@ -403,7 +514,9 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             // force-bumping percentage on future turns. detectedContextLimit
             // stays — it's the authoritative real limit and remains valuable
             // for pressure math going forward.
+            recordProtectedTailPublicationFloor(db, sessionId, lastCompartmentEnd + 1);
             clearEmergencyRecovery(db, sessionId);
+            drainReservation = null;
             if (deferMarkerApplication && lastNewEndMessageId) {
                 setPendingCompactionMarkerState(db, sessionId, {
                     ordinal: lastCompartmentEnd,
@@ -615,6 +728,7 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
         }
     } finally {
         if (!completedSuccessfully) {
+            if (!historianAttempted) rollbackDrainReservation();
             updateSessionMeta(db, sessionId, { compartmentInProgress: false });
         }
         // Record one historian_runs row for this attempt (every exit path).

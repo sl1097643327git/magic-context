@@ -1157,6 +1157,91 @@ const MIGRATIONS: Migration[] = [
             }
         },
     },
+    {
+        version: 32,
+        description:
+            "Protected tail boundary state, usage resolver fields, recovery escape, and drain quota",
+        up: (db: Database) => {
+            const hasSessionMeta = db
+                .prepare(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_meta' LIMIT 1",
+                )
+                .get();
+            if (!hasSessionMeta) return;
+            ensureColumn(
+                db,
+                "session_meta",
+                "prior_boundary_ordinal",
+                "INTEGER NOT NULL DEFAULT 1",
+            );
+            ensureColumn(
+                db,
+                "session_meta",
+                "protected_tail_policy_version",
+                "INTEGER NOT NULL DEFAULT 0",
+            );
+            ensureColumn(
+                db,
+                "session_meta",
+                "protected_tail_drain_window_started_at",
+                "INTEGER NOT NULL DEFAULT 0",
+            );
+            ensureColumn(
+                db,
+                "session_meta",
+                "protected_tail_drain_tokens",
+                "INTEGER NOT NULL DEFAULT 0",
+            );
+            ensureColumn(
+                db,
+                "session_meta",
+                "recovery_no_eligible_head_count",
+                "INTEGER NOT NULL DEFAULT 0",
+            );
+            ensureColumn(
+                db,
+                "session_meta",
+                "force_emergency_bypass_window_start",
+                "INTEGER NOT NULL DEFAULT 0",
+            );
+            ensureColumn(
+                db,
+                "session_meta",
+                "force_emergency_bypass_used",
+                "INTEGER NOT NULL DEFAULT 0",
+            );
+            ensureColumn(
+                db,
+                "session_meta",
+                "last_usage_context_limit",
+                "INTEGER NOT NULL DEFAULT 0",
+            );
+            db.prepare(
+                "UPDATE session_meta SET prior_boundary_ordinal = 1 WHERE prior_boundary_ordinal IS NULL OR prior_boundary_ordinal < 1",
+            ).run();
+            db.prepare(
+                "UPDATE session_meta SET protected_tail_policy_version = 0 WHERE protected_tail_policy_version IS NULL",
+            ).run();
+            db.prepare(
+                "UPDATE session_meta SET protected_tail_drain_window_started_at = 0 WHERE protected_tail_drain_window_started_at IS NULL",
+            ).run();
+            db.prepare(
+                "UPDATE session_meta SET protected_tail_drain_tokens = 0 WHERE protected_tail_drain_tokens IS NULL",
+            ).run();
+            db.prepare(
+                "UPDATE session_meta SET recovery_no_eligible_head_count = 0 WHERE recovery_no_eligible_head_count IS NULL",
+            ).run();
+            db.prepare(
+                "UPDATE session_meta SET force_emergency_bypass_window_start = 0 WHERE force_emergency_bypass_window_start IS NULL",
+            ).run();
+            db.prepare(
+                "UPDATE session_meta SET force_emergency_bypass_used = 0 WHERE force_emergency_bypass_used IS NULL",
+            ).run();
+            db.prepare(
+                "UPDATE session_meta SET last_usage_context_limit = 0 WHERE last_usage_context_limit IS NULL",
+            ).run();
+        },
+    },
 ];
 
 /**

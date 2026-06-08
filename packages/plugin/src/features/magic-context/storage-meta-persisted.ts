@@ -8,6 +8,8 @@ interface PersistedUsageRow {
     last_context_percentage: number;
     last_input_tokens: number;
     last_response_time: number;
+    last_observed_model_key: string | null;
+    last_usage_context_limit: number | null;
 }
 
 interface PersistedReasoningWatermarkRow {
@@ -86,6 +88,41 @@ export interface PersistedHistorianFailureState {
     lastFailureAt: number | null;
 }
 
+export interface PersistedUsageState {
+    usage: ContextUsage;
+    updatedAt: number;
+    lastObservedModelKey: string | null;
+    lastUsageContextLimit: number;
+}
+
+export interface ProtectedTailMeta {
+    priorBoundaryOrdinal: number;
+    protectedTailPolicyVersion: number;
+    protectedTailDrainWindowStartedAt: number;
+    protectedTailDrainTokens: number;
+    recoveryNoEligibleHeadCount: number;
+    forceEmergencyBypassWindowStart: number;
+    forceEmergencyBypassUsed: number;
+}
+
+export interface ProtectedTailSeedResult extends ProtectedTailMeta {
+    seeded: boolean;
+}
+
+export interface ProtectedTailDrainReservation {
+    sessionId: string;
+    runId: string;
+    tokens: number;
+}
+
+export interface ProtectedTailDrainReserveResult {
+    ok: boolean;
+    reservedTokens: number;
+    overQuotaBypass: boolean;
+    reservation: ProtectedTailDrainReservation | null;
+    skippedReason?: string;
+}
+
 const CAS_RETRY_LIMIT = 5;
 const AUTO_SEARCH_NO_HINT_REASONS = new Set<string>([
     "below-threshold",
@@ -102,7 +139,9 @@ function isPersistedUsageRow(row: unknown): row is PersistedUsageRow {
     return (
         typeof r.last_context_percentage === "number" &&
         typeof r.last_input_tokens === "number" &&
-        typeof r.last_response_time === "number"
+        typeof r.last_response_time === "number" &&
+        (typeof r.last_observed_model_key === "string" || r.last_observed_model_key === null) &&
+        (typeof r.last_usage_context_limit === "number" || r.last_usage_context_limit === null)
     );
 }
 
@@ -198,13 +237,10 @@ function getDefaultHistorianFailureState(): PersistedHistorianFailureState {
     };
 }
 
-export function loadPersistedUsage(
-    db: Database,
-    sessionId: string,
-): { usage: ContextUsage; updatedAt: number } | null {
+export function loadPersistedUsage(db: Database, sessionId: string): PersistedUsageState | null {
     const result = db
         .prepare(
-            "SELECT last_context_percentage, last_input_tokens, last_response_time FROM session_meta WHERE session_id = ?",
+            "SELECT last_context_percentage, last_input_tokens, last_response_time, last_observed_model_key, last_usage_context_limit FROM session_meta WHERE session_id = ?",
         )
         .get(sessionId);
 
@@ -221,7 +257,206 @@ export function loadPersistedUsage(
             inputTokens: result.last_input_tokens,
         },
         updatedAt: result.last_response_time || Date.now(),
+        lastObservedModelKey: result.last_observed_model_key,
+        lastUsageContextLimit:
+            typeof result.last_usage_context_limit === "number"
+                ? result.last_usage_context_limit
+                : 0,
     };
+}
+
+const DEFAULT_PROTECTED_TAIL_META: ProtectedTailMeta = {
+    priorBoundaryOrdinal: 1,
+    protectedTailPolicyVersion: 0,
+    protectedTailDrainWindowStartedAt: 0,
+    protectedTailDrainTokens: 0,
+    recoveryNoEligibleHeadCount: 0,
+    forceEmergencyBypassWindowStart: 0,
+    forceEmergencyBypassUsed: 0,
+};
+
+function toProtectedTailMeta(row: unknown): ProtectedTailMeta {
+    if (row === null || typeof row !== "object") return { ...DEFAULT_PROTECTED_TAIL_META };
+    const r = row as Record<string, unknown>;
+    const numberOr = (value: unknown, fallback: number): number =>
+        typeof value === "number" && Number.isFinite(value) ? value : fallback;
+    return {
+        priorBoundaryOrdinal: Math.max(1, numberOr(r.prior_boundary_ordinal, 1)),
+        protectedTailPolicyVersion: numberOr(r.protected_tail_policy_version, 0),
+        protectedTailDrainWindowStartedAt: numberOr(r.protected_tail_drain_window_started_at, 0),
+        protectedTailDrainTokens: numberOr(r.protected_tail_drain_tokens, 0),
+        recoveryNoEligibleHeadCount: numberOr(r.recovery_no_eligible_head_count, 0),
+        forceEmergencyBypassWindowStart: numberOr(r.force_emergency_bypass_window_start, 0),
+        forceEmergencyBypassUsed: numberOr(r.force_emergency_bypass_used, 0),
+    };
+}
+
+export function loadProtectedTailMeta(db: Database, sessionId: string): ProtectedTailMeta {
+    ensureSessionMetaRow(db, sessionId);
+    const row = db
+        .prepare(
+            `SELECT prior_boundary_ordinal, protected_tail_policy_version,
+                    protected_tail_drain_window_started_at, protected_tail_drain_tokens,
+                    recovery_no_eligible_head_count, force_emergency_bypass_window_start,
+                    force_emergency_bypass_used
+             FROM session_meta WHERE session_id = ?`,
+        )
+        .get(sessionId);
+    return toProtectedTailMeta(row);
+}
+
+export function markProtectedTailPolicyV3Seeded(
+    db: Database,
+    sessionId: string,
+    priorBoundaryOrdinal: number,
+): ProtectedTailSeedResult {
+    let seeded = false;
+    db.transaction(() => {
+        ensureSessionMetaRow(db, sessionId);
+        const existing = loadProtectedTailMeta(db, sessionId);
+        if (existing.protectedTailPolicyVersion < 3) {
+            db.prepare(
+                `UPDATE session_meta
+                 SET prior_boundary_ordinal = ?, protected_tail_policy_version = 3
+                 WHERE session_id = ? AND protected_tail_policy_version < 3`,
+            ).run(Math.max(1, Math.floor(priorBoundaryOrdinal)), sessionId);
+            seeded = true;
+        }
+    })();
+    return { ...loadProtectedTailMeta(db, sessionId), seeded };
+}
+
+export function recordProtectedTailPublicationFloor(
+    db: Database,
+    sessionId: string,
+    floorOrdinal: number,
+): void {
+    db.transaction(() => {
+        ensureSessionMetaRow(db, sessionId);
+        db.prepare(
+            `UPDATE session_meta
+             SET prior_boundary_ordinal = MAX(COALESCE(prior_boundary_ordinal, 1), ?),
+                 recovery_no_eligible_head_count = 0
+             WHERE session_id = ?`,
+        ).run(Math.max(1, Math.floor(floorOrdinal)), sessionId);
+    })();
+}
+
+export function recordProtectedTailNoEligibleHead(db: Database, sessionId: string): number {
+    db.transaction(() => {
+        ensureSessionMetaRow(db, sessionId);
+        db.prepare(
+            `UPDATE session_meta
+             SET recovery_no_eligible_head_count = COALESCE(recovery_no_eligible_head_count, 0) + 1
+             WHERE session_id = ?`,
+        ).run(sessionId);
+    })();
+    return loadProtectedTailMeta(db, sessionId).recoveryNoEligibleHeadCount;
+}
+
+export function resetProtectedTailNoEligibleHead(db: Database, sessionId: string): void {
+    db.transaction(() => {
+        ensureSessionMetaRow(db, sessionId);
+        db.prepare(
+            "UPDATE session_meta SET recovery_no_eligible_head_count = 0 WHERE session_id = ?",
+        ).run(sessionId);
+    })();
+}
+
+export const DRAIN_WINDOW_MS = 10 * 60 * 1000;
+
+export function protectedTailWindowBudget(
+    usagePercentage: number,
+    usable: number,
+    perRunCap: number,
+): number {
+    if (usagePercentage >= 95)
+        return Math.min(1_000_000, Math.max(4 * perRunCap, Math.round(0.5 * usable)));
+    if (usagePercentage >= 80)
+        return Math.min(750_000, Math.max(3 * perRunCap, Math.round(0.35 * usable)));
+    return Math.min(500_000, Math.max(perRunCap, Math.round(0.2 * usable)));
+}
+
+export function reserveProtectedTailDrainTokens(args: {
+    db: Database;
+    sessionId: string;
+    runId: string;
+    trueRawTokens: number;
+    usagePercentage: number;
+    usable: number;
+    perRunCap: number;
+    now?: number;
+}): ProtectedTailDrainReserveResult {
+    const now = args.now ?? Date.now();
+    const requested = Math.max(0, Math.floor(args.trueRawTokens));
+    if (requested === 0) {
+        return { ok: true, reservedTokens: 0, overQuotaBypass: false, reservation: null };
+    }
+    let result: ProtectedTailDrainReserveResult = {
+        ok: false,
+        reservedTokens: 0,
+        overQuotaBypass: false,
+        reservation: null,
+        skippedReason: "quota exhausted",
+    };
+    args.db.transaction(() => {
+        ensureSessionMetaRow(args.db, args.sessionId);
+        let meta = loadProtectedTailMeta(args.db, args.sessionId);
+        if (now - meta.protectedTailDrainWindowStartedAt > DRAIN_WINDOW_MS) {
+            args.db
+                .prepare(
+                    `UPDATE session_meta
+                     SET protected_tail_drain_window_started_at = ?, protected_tail_drain_tokens = 0,
+                         force_emergency_bypass_window_start = ?, force_emergency_bypass_used = 0
+                     WHERE session_id = ?`,
+                )
+                .run(now, now, args.sessionId);
+            meta = loadProtectedTailMeta(args.db, args.sessionId);
+        }
+        const budget = protectedTailWindowBudget(args.usagePercentage, args.usable, args.perRunCap);
+        const remaining = Math.max(0, budget - meta.protectedTailDrainTokens);
+        let reserved = Math.min(requested, args.perRunCap, remaining);
+        let bypass = false;
+        const bypassWindowExpired = now - meta.forceEmergencyBypassWindowStart > DRAIN_WINDOW_MS;
+        const bypassUsed = bypassWindowExpired ? 0 : meta.forceEmergencyBypassUsed;
+        if (reserved <= 0 && args.usagePercentage >= 95 && bypassUsed === 0) {
+            reserved = Math.min(requested, args.perRunCap);
+            bypass = true;
+        }
+        if (reserved <= 0) return;
+        args.db
+            .prepare(
+                `UPDATE session_meta
+                 SET protected_tail_drain_window_started_at = CASE WHEN protected_tail_drain_window_started_at = 0 THEN ? ELSE protected_tail_drain_window_started_at END,
+                     protected_tail_drain_tokens = COALESCE(protected_tail_drain_tokens, 0) + ?,
+                     force_emergency_bypass_window_start = CASE WHEN ? THEN ? ELSE force_emergency_bypass_window_start END,
+                     force_emergency_bypass_used = CASE WHEN ? THEN 1 ELSE force_emergency_bypass_used END
+                 WHERE session_id = ?`,
+            )
+            .run(now, reserved, bypass ? 1 : 0, now, bypass ? 1 : 0, args.sessionId);
+        result = {
+            ok: true,
+            reservedTokens: reserved,
+            overQuotaBypass: bypass,
+            reservation: { sessionId: args.sessionId, runId: args.runId, tokens: reserved },
+        };
+    })();
+    return result;
+}
+
+export function rollbackProtectedTailDrainReservation(
+    db: Database,
+    reservation: ProtectedTailDrainReservation | null,
+): void {
+    if (!reservation || reservation.tokens <= 0) return;
+    db.transaction(() => {
+        ensureSessionMetaRow(db, reservation.sessionId);
+        db.prepare(
+            `UPDATE session_meta
+             SET protected_tail_drain_tokens = MAX(0, COALESCE(protected_tail_drain_tokens, 0) - ?)
+             WHERE session_id = ?`,
+        ).run(reservation.tokens, reservation.sessionId);
+    })();
 }
 
 export function getPersistedReasoningWatermark(db: Database, sessionId: string): number {
@@ -970,9 +1205,15 @@ export function recordDetectedContextLimit(
 export function clearEmergencyRecovery(db: Database, sessionId: string): void {
     db.transaction(() => {
         ensureSessionMetaRow(db, sessionId);
-        db.prepare("UPDATE session_meta SET needs_emergency_recovery = 0 WHERE session_id = ?").run(
-            sessionId,
-        );
+        try {
+            db.prepare(
+                "UPDATE session_meta SET needs_emergency_recovery = 0, recovery_no_eligible_head_count = 0 WHERE session_id = ?",
+            ).run(sessionId);
+        } catch {
+            db.prepare(
+                "UPDATE session_meta SET needs_emergency_recovery = 0 WHERE session_id = ?",
+            ).run(sessionId);
+        }
     })();
 }
 

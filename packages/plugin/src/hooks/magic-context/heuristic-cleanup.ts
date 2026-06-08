@@ -93,7 +93,8 @@ export function applyHeuristicCleanup(
         // and guarantees every selected tag reclaims — no phantom tag counted as
         // reclaimed (which makes the plan stop early and under-evict).
         const droppableTags = tags.filter(
-            (t) => t.status === "active" && t.type === "tool" && targets.get(t.tagNumber)?.canDrop?.(),
+            (t) =>
+                t.status === "active" && t.type === "tool" && targets.get(t.tagNumber)?.canDrop?.(),
         );
         const plan = planEmergencyDrop({
             tags: droppableTags as readonly EmergencyDropTag[],

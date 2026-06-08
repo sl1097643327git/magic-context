@@ -41,6 +41,10 @@ import {
 	updateTagDropMode,
 	updateTagStatus,
 } from "@magic-context/core/features/magic-context/storage";
+import {
+	getEmergencyInputSample,
+	setEmergencyDropSample,
+} from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import type { TagEntry } from "@magic-context/core/features/magic-context/types";
 import {
 	applyCavemanCleanup,
@@ -53,10 +57,6 @@ import {
 import { stripSystemInjection } from "@magic-context/core/hooks/magic-context/system-injection-stripper";
 import type { TagTarget } from "@magic-context/core/hooks/magic-context/tag-messages";
 import { stripTagPrefix } from "@magic-context/core/hooks/magic-context/tag-part-guards";
-import {
-	getEmergencyInputSample,
-	setEmergencyDropSample,
-} from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { sessionLog } from "@magic-context/core/shared/logger";
 
 /**
@@ -336,14 +336,15 @@ export function applyPiHeuristicCleanup(
 				// Latch the usage sample on any ACTING pass (even zero real drops)
 				// so the next ≥85% pass on this stale sample no-ops. Dropped tags
 				// leave status='active' (re-selection guard). Mirrors OpenCode.
-				setEmergencyDropSample(db, sessionId, emergency.currentTotalInputTokens);
+				setEmergencyDropSample(
+					db,
+					sessionId,
+					emergency.currentTotalInputTokens,
+				);
 			})();
 			sessionLog(sessionId, `emergency tiered drop: ${plan.reason}`);
 		} else {
-			sessionLog(
-				sessionId,
-				`emergency tiered drop skipped: ${plan.reason}`,
-			);
+			sessionLog(sessionId, `emergency tiered drop skipped: ${plan.reason}`);
 		}
 	}
 

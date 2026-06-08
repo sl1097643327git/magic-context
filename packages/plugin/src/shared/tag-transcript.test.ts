@@ -159,7 +159,12 @@ describe("tagTranscript tool aggregation", () => {
             commit() {},
         };
 
-        const { targets } = tagTranscript("session-1", transcript, tagger, new FakeDb() as unknown as ContextDatabase);
+        const { targets } = tagTranscript(
+            "session-1",
+            transcript,
+            tagger,
+            new FakeDb() as unknown as ContextDatabase,
+        );
 
         const firstTag = tagger.getToolTag("session-1", "read:32", "assistant-1");
         const secondTag = tagger.getToolTag("session-1", "read:32", "assistant-2");
@@ -185,7 +190,12 @@ describe("tagTranscript tool aggregation", () => {
             commit() {},
         };
 
-        const { targets } = tagTranscript("session-1", transcript, tagger, new FakeDb() as unknown as ContextDatabase);
+        const { targets } = tagTranscript(
+            "session-1",
+            transcript,
+            tagger,
+            new FakeDb() as unknown as ContextDatabase,
+        );
         const tag = tagger.getToolTag("session-1", "read:99", "assistant-1");
 
         let result: "truncated" | "absent" | undefined;
@@ -210,7 +220,12 @@ describe("tagTranscript tool aggregation", () => {
             commit() {},
         };
 
-        const { targets } = tagTranscript("session-1", transcript, tagger, new FakeDb() as unknown as ContextDatabase);
+        const { targets } = tagTranscript(
+            "session-1",
+            transcript,
+            tagger,
+            new FakeDb() as unknown as ContextDatabase,
+        );
         const tag = tagger.getToolTag("session-1", "read:multi", "assistant-1");
 
         expect(targets.size).toBe(1);
@@ -235,7 +250,12 @@ describe("tagTranscript tool aggregation", () => {
             commit() {},
         };
 
-        const { targets } = tagTranscript("session-1", transcript, tagger, new FakeDb() as unknown as ContextDatabase);
+        const { targets } = tagTranscript(
+            "session-1",
+            transcript,
+            tagger,
+            new FakeDb() as unknown as ContextDatabase,
+        );
 
         const olderTag = tagger.getToolTag("session-1", "read:reused", "assistant-old");
         const nearestTag = tagger.getToolTag("session-1", "read:reused", "assistant-near");
