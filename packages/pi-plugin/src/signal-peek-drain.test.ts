@@ -295,8 +295,15 @@ describe("source contract: peek-then-drain in before_agent_start (system prompt)
 	});
 
 	test("system-prompt injection supports global disable, skip signatures, and existing prompt dedup", () => {
-		expect(code).toContain("config.system_prompt_injection?.enabled === false");
-		expect(code).toContain("config.system_prompt_injection?.skip_signatures");
+		// Council #4 (project-config bleed on /cd): these decisions use
+		// effectiveConfig — the config re-resolved from the CURRENT checkout's
+		// cwd on a project switch — not the launch-cwd boot `config`.
+		expect(code).toContain(
+			"effectiveConfig.system_prompt_injection?.enabled === false",
+		);
+		expect(code).toContain(
+			"effectiveConfig.system_prompt_injection?.skip_signatures",
+		);
 		expect(code).toContain("existingSystemPrompt: event.systemPrompt");
 	});
 

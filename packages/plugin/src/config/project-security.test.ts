@@ -14,6 +14,17 @@ describe("stripUnsafeProjectConfigFields", () => {
         expect(warnings.some((w) => w.includes("auto_update"))).toBe(true);
     });
 
+    it("strips sqlite.* from project config (resource-exhaustion vector)", () => {
+        const raw: Record<string, unknown> = {
+            sqlite: { cache_size_mb: 999_999, mmap_size_mb: 999_999 },
+            historian: { model: "x" },
+        };
+        const warnings = stripUnsafeProjectConfigFields(raw);
+        expect("sqlite" in raw).toBe(false);
+        expect(raw.historian).toEqual({ model: "x" });
+        expect(warnings.some((w) => w.includes("sqlite"))).toBe(true);
+    });
+
     it("strips hidden-agent prompt/permission/tools but keeps benign fields", () => {
         const raw: Record<string, unknown> = {
             dreamer: {

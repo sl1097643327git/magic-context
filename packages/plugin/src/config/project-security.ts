@@ -49,6 +49,11 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * Closes:
  *  - `auto_update` — a repo must not suppress plugin self-updates (which can
  *    carry security fixes).
+ *  - `sqlite` — `sqlite.cache_size_mb` / `mmap_size_mb` become PRAGMAs on the
+ *    process-global shared DB handle (one connection across every project in the
+ *    process). A cloned repo could set a huge value to exhaust host memory /
+ *    address space — a resource-exhaustion vector with no legitimate per-repo
+ *    use. Honor user-level config only.
  *  - hidden-agent `prompt`/`permission`/`tools` — a repo must not reprogram or
  *    re-permission the historian/dreamer/sidekick.
  */
@@ -59,6 +64,14 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         delete projectRaw.auto_update;
         warnings.push(
             "Ignoring auto_update from project config (security: this setting only honors user-level config).",
+        );
+    }
+
+    if ("sqlite" in projectRaw) {
+        delete projectRaw.sqlite;
+        warnings.push(
+            "Ignoring sqlite.* from project config (security: SQLite cache/mmap PRAGMAs apply to the " +
+                "process-global shared database handle; only user-level config may set them).",
         );
     }
 

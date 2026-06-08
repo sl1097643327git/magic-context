@@ -45,8 +45,7 @@ import { normalizeTodoStateJson } from "./todo-view";
 export type LiveModelBySession = Map<string, { providerID: string; modelID: string }>;
 export type VariantBySession = Map<string, string | undefined>;
 export type AgentBySession = Map<string, string>;
-export type RecentReduceBySession = Map<string, number>;
-export type ToolUsageSinceUserTurn = Map<string, number>;
+
 
 /**
  * Cache-busting signal sets — replaces the old monolithic `flushedSessions`.
@@ -147,8 +146,6 @@ export function getLiveNotificationParams(
 
 export function createChatMessageHook(args: {
     db: Parameters<typeof getOrCreateSessionMeta>[0];
-    toolUsageSinceUserTurn: ToolUsageSinceUserTurn;
-    recentReduceBySession: RecentReduceBySession;
     liveModelBySession: LiveModelBySession;
     variantBySession: VariantBySession;
     agentBySession: AgentBySession;
@@ -188,8 +185,7 @@ export function createChatMessageHook(args: {
 
         // The tool-heavy "sticky turn reminder" was replaced by the in-turn
         // Channel 1 ctx_reduce nudge (injected into tool outputs). No per-user-turn
-        // reminder state to set here anymore.
-        args.toolUsageSinceUserTurn.set(sessionId, 0);
+        // reminder state to track here anymore.
 
         const previousVariant = args.variantBySession.get(sessionId);
         args.variantBySession.set(sessionId, input.variant);
@@ -229,8 +225,6 @@ export function createEventHook(args: {
      * for the full doc-comment.
      */
     sessionDirectoryBySession: Map<string, string>;
-    recentReduceBySession: RecentReduceBySession;
-    toolUsageSinceUserTurn: ToolUsageSinceUserTurn;
     /** All signal sets are cleaned on `session.deleted` to prevent leaks. */
     historyRefreshSessions: HistoryRefreshSessions;
     deferredHistoryRefreshSessions: DeferredHistoryRefreshSessions;
@@ -339,8 +333,6 @@ export function createEventHook(args: {
             args.variantBySession.delete(sessionId);
             args.agentBySession.delete(sessionId);
             args.sessionDirectoryBySession.delete(sessionId);
-            args.recentReduceBySession.delete(sessionId);
-            args.toolUsageSinceUserTurn.delete(sessionId);
             args.historyRefreshSessions.delete(sessionId);
             args.deferredHistoryRefreshSessions.delete(sessionId);
             args.systemPromptRefreshSessions.delete(sessionId);
@@ -462,8 +454,6 @@ function maybeInjectChannel1Nudge(
 
 export function createToolExecuteAfterHook(args: {
     db: Parameters<typeof getOrCreateSessionMeta>[0];
-    recentReduceBySession: RecentReduceBySession;
-    toolUsageSinceUserTurn: ToolUsageSinceUserTurn;
     channel1StateBySession: Map<string, Channel1State>;
 }) {
     return async (input: unknown, output?: unknown) => {
@@ -472,9 +462,9 @@ export function createToolExecuteAfterHook(args: {
             return;
         }
 
-        const turnUsage = args.toolUsageSinceUserTurn.get(typedInput.sessionID) ?? 0;
         if (typedInput.tool === "ctx_reduce") {
-            args.recentReduceBySession.set(typedInput.sessionID, Date.now());
+            // Mark the Channel 1 baseline dirty so the next nudge re-measures the
+            // (now smaller) reclaimable tail instead of replaying a stale band.
             const state = args.channel1StateBySession.get(typedInput.sessionID);
             if (state) state.reducedSinceRefresh = true;
         } else {
@@ -529,6 +519,5 @@ export function createToolExecuteAfterHook(args: {
         if (typedInput.tool === "ctx_note") {
             clearNoteNudgeTriggerAndCooldown(args.db, typedInput.sessionID);
         }
-        args.toolUsageSinceUserTurn.set(typedInput.sessionID, turnUsage + 1);
     };
 }

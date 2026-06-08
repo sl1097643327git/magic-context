@@ -90,6 +90,7 @@ import {
 	clearSystemPromptRefresh,
 	hasSystemPromptRefresh,
 	type PiAutoSearchHandlerOptions,
+	type PiContextHandlerOptions,
 	type PiHistorianOptions,
 	recordPiLiveModel,
 	registerPiContextHandler,
@@ -450,6 +451,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		);
 		return;
 	}
+	// Non-null const alias: `db` is a `let` (reassigned during open), so TS
+	// won't carry the `!db` narrowing into the closures below. Capture it.
+	const database: ContextDatabase = db;
 
 	// v22 deferred legacy-memory identity backfill. openDatabase() has already
 	// run migrations; the runner is fire-and-forget and logs failures without
@@ -575,53 +579,82 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		};
 	}
 	const autoSearchConfig = resolveAutoSearchFromConfig(config);
-	registerPiContextHandler(pi, {
-		db,
-		ctxReduceEnabled: config.ctx_reduce_enabled,
-		// `protected_tags` flows here from the loaded magic-context.jsonc
-		// config (Step 5b). Defaults to schema value (20) when unset.
-		// Council finding #1 (unanimous CRITICAL): a hardcoded `0` here
-		// silently let recent-turn drops mid-task; use real config value.
-		protectedTags: config.protected_tags ?? 20,
-		// Heuristic-cleanup config — tiered emergency drop (≥85%), dedup,
-		// strips system injections, age-tier caveman compression. Routine
-		// age-based tool drops were removed; the tiered target-headroom
-		// emergency drop is the floor. Caveman is only forwarded when
-		// ctx_reduce_enabled=false (the feature replaces manual text dropping).
+
+	// Per-cwd context-handler options. Pi can switch projects mid-process
+	// (`/cd`, multi-root); a switched-into checkout may carry its own
+	// .pi/magic-context.jsonc (protected_tags, thresholds, memory/key-files
+	// toggles, historian model). buildPiContextHandlerOptions resolves the
+	// options for a given config; resolveContextOptionsForProject memoizes by
+	// projectDir so the hot path (`pi.on("context")`, once per LLM call) does
+	// one config read per distinct project and reuses it thereafter. The launch
+	// cwd is pre-seeded with the already-loaded boot config.
+	const contextOptionsByDir = new Map<string, PiContextHandlerOptions>();
+	const buildContextOptions = (
+		cfg: MagicContextConfig,
+		hist: PiHistorianOptions | undefined,
+		auto: PiAutoSearchHandlerOptions,
+	): PiContextHandlerOptions => ({
+		db: database,
+		ctxReduceEnabled: cfg.ctx_reduce_enabled,
+		protectedTags: cfg.protected_tags ?? 20,
 		heuristics: {
 			caveman:
-				config.ctx_reduce_enabled === false && config.caveman_text_compression
+				cfg.ctx_reduce_enabled === false && cfg.caveman_text_compression
 					? {
-							enabled: config.caveman_text_compression.enabled,
-							minChars: config.caveman_text_compression.min_chars,
+							enabled: cfg.caveman_text_compression.enabled,
+							minChars: cfg.caveman_text_compression.min_chars,
 						}
 					: undefined,
-			// Forward the user's clear_reasoning_age. Pi previously hardcoded
-			// 30, ignoring this config entirely. Schema default is 50 (matches
-			// OpenCode `magic-context.ts:303`).
-			clearReasoningAge: config.clear_reasoning_age,
+			clearReasoningAge: cfg.clear_reasoning_age,
 		},
-		// <session-history> injection — writes compartments + facts +
-		// project memories into message[0]. Cross-harness coherent:
-		// memories shared with OpenCode show up here automatically.
 		injection: {
-			memoryEnabled: config.memory.enabled,
-			injectionBudgetTokens: config.memory.injection_budget_tokens,
-			temporalAwareness: config.temporal_awareness === true,
-			keyFilesEnabled: config.dreamer?.pin_key_files?.enabled ?? false,
-			keyFilesTokenBudget:
-				config.dreamer?.pin_key_files?.token_budget ?? 10_000,
+			memoryEnabled: cfg.memory.enabled,
+			injectionBudgetTokens: cfg.memory.injection_budget_tokens,
+			temporalAwareness: cfg.temporal_awareness === true,
+			keyFilesEnabled: cfg.dreamer?.pin_key_files?.enabled ?? false,
+			keyFilesTokenBudget: cfg.dreamer?.pin_key_files?.token_budget ?? 10_000,
 		},
-		// Scheduler config — TTL + threshold gating for cache-busting
-		// stages. Heuristic cleanup runs only on execute passes so
-		// provider prompt cache stays warm on defer passes.
 		scheduler: {
-			executeThresholdPercentage: config.execute_threshold_percentage,
-			executeThresholdTokens: config.execute_threshold_tokens,
+			executeThresholdPercentage: cfg.execute_threshold_percentage,
+			executeThresholdTokens: cfg.execute_threshold_tokens,
 		},
-		historian: historianConfig,
-		autoSearch: autoSearchConfig,
+		historian: hist,
+		autoSearch: auto,
+		resolveForProject: resolveContextOptionsForProject,
 	});
+	function resolveContextOptionsForProject(
+		dir: string,
+	): PiContextHandlerOptions {
+		const cached = contextOptionsByDir.get(dir);
+		if (cached) return cached;
+		// A different checkout: re-resolve config + historian/auto-search from
+		// the new cwd. The launch dir is pre-seeded below so this branch only
+		// runs for genuine switches.
+		const switchedConfig = loadPiConfig({ cwd: dir }).config;
+		const switchedHistorian = resolveHistorianFromConfig(switchedConfig);
+		if (switchedHistorian) {
+			switchedHistorian.onStatusChange = (ctx) => {
+				updateStatusLine(ctx, {
+					db: database,
+					projectIdentity: resolveCurrentProject(ctx).projectIdentity,
+				});
+			};
+		}
+		const built = buildContextOptions(
+			switchedConfig,
+			switchedHistorian,
+			resolveAutoSearchFromConfig(switchedConfig),
+		);
+		contextOptionsByDir.set(dir, built);
+		return built;
+	}
+	const bootContextOptions = buildContextOptions(
+		config,
+		historianConfig,
+		autoSearchConfig,
+	);
+	contextOptionsByDir.set(projectDir, bootContextOptions);
+	registerPiContextHandler(pi, bootContextOptions);
 	info(
 		historianConfig
 			? `registered historian trigger (model=${historianConfig.model}, executeThreshold=${historianConfig.executeThresholdPercentage ?? 65}%)`
@@ -936,10 +969,16 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				}
 			}
 
-			if (config.system_prompt_injection?.enabled === false) {
+			// Use effectiveConfig (re-resolved from the CURRENT checkout's cwd on
+			// a project switch) for every system-prompt decision below — a
+			// switched-into project may carry its own .pi/magic-context.jsonc
+			// (memory/docs/key-files/injection toggles). Reusing boot `config`
+			// would render the launch project's adjuncts in the new checkout.
+			if (effectiveConfig.system_prompt_injection?.enabled === false) {
 				return;
 			}
-			const skipSigs = config.system_prompt_injection?.skip_signatures ?? [];
+			const skipSigs =
+				effectiveConfig.system_prompt_injection?.skip_signatures ?? [];
 			if (
 				skipSigs.some(
 					(sig) => sig.length > 0 && event.systemPrompt.includes(sig),

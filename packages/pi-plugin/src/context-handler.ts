@@ -50,6 +50,7 @@ import {
 import {
 	createScheduler,
 	parseCacheTtl,
+	type Scheduler,
 } from "@magic-context/core/features/magic-context/scheduler";
 import {
 	adoptFallbackTagMessageId,
@@ -660,6 +661,19 @@ export interface PiContextHandlerOptions {
 	 * the cortexkit DB with OpenCode, so memories ARE cross-harness.
 	 */
 	autoSearch?: PiAutoSearchHandlerOptions;
+	/**
+	 * Per-project config resolver (Pi `/cd` / multi-root). Pi can switch
+	 * projects mid-process; a switched-into checkout may carry its own
+	 * `.pi/magic-context.jsonc` (different protected_tags, thresholds,
+	 * memory/key-files toggles, historian model). Without this, every
+	 * context pass after a switch would run with the LAUNCH project's
+	 * settings (config bleed). When provided, the handler calls it once per
+	 * pass with the current `ctx.cwd` and uses the returned options for that
+	 * pass; the caller is expected to MEMOIZE per cwd so the hot path stays
+	 * allocation-free after warmup. Returns the base options for the launch
+	 * cwd. Tests omit it (the static options are used directly).
+	 */
+	resolveForProject?: (projectDir: string) => PiContextHandlerOptions;
 }
 
 /**
@@ -1254,21 +1268,31 @@ function adoptPiFallbackTags(
  */
 export function registerPiContextHandler(
 	pi: ExtensionAPI,
-	options: PiContextHandlerOptions,
+	baseOptions: PiContextHandlerOptions,
 ): void {
 	const tagger = createTagger();
 
-	// Build a real shared scheduler so cache-busting stages (heuristic
-	// cleanup, compartment injection rebuild) only run on execute passes.
-	// On defer passes the cache-stable replay path runs and the provider
-	// prompt cache stays warm. Mirrors OpenCode's createTransform deps.
-	const schedulerConfig = options.scheduler ?? {
+	// Pi can switch projects mid-process (`/cd`, multi-root). A scheduler is
+	// pure (config in, decision out — no per-session state), so it's safe to
+	// rebuild per project. We memoize one scheduler per distinct PiScheduler
+	// options instance so the hot path doesn't reparse TTL every pass; the
+	// per-cwd options are already memoized by the caller's resolveForProject.
+	const schedulerCache = new WeakMap<PiSchedulerOptions, Scheduler>();
+	const DEFAULT_SCHEDULER_CONFIG: PiSchedulerOptions = {
 		executeThresholdPercentage: 65,
 	};
-	const scheduler = createScheduler({
-		executeThresholdPercentage: schedulerConfig.executeThresholdPercentage,
-		executeThresholdTokens: schedulerConfig.executeThresholdTokens,
-	});
+	const schedulerFor = (opts: PiContextHandlerOptions): Scheduler => {
+		const cfg = opts.scheduler ?? DEFAULT_SCHEDULER_CONFIG;
+		let s = schedulerCache.get(cfg);
+		if (!s) {
+			s = createScheduler({
+				executeThresholdPercentage: cfg.executeThresholdPercentage,
+				executeThresholdTokens: cfg.executeThresholdTokens,
+			});
+			schedulerCache.set(cfg, s);
+		}
+		return s;
+	};
 
 	pi.on("context", async (event, ctx) => {
 		const transformStartTime = performance.now();
@@ -1285,6 +1309,14 @@ export function registerPiContextHandler(
 			}
 			sessionIdForError = sessionId;
 			const projectDirectory = ctx.cwd;
+			// Resolve the effective options for THIS pass's project. On a `/cd`
+			// switch this picks up the switched-into checkout's config (caller
+			// memoizes per cwd). Falls back to baseOptions (launch cwd) when no
+			// resolver is wired (tests) or the resolver returns nothing.
+			const options =
+				baseOptions.resolveForProject?.(projectDirectory) ?? baseOptions;
+			const schedulerConfig = options.scheduler ?? DEFAULT_SCHEDULER_CONFIG;
+			const scheduler = schedulerFor(options);
 			const projectIdentity = resolveProjectIdentity(projectDirectory);
 			updateSessionProjectTracking(sessionId, projectIdentity);
 			logTransformTiming(
@@ -2235,8 +2267,10 @@ export function registerPiContextHandler(
 				stack,
 			);
 			if (sessionIdForError) {
+				// baseOptions.db (not the per-pass `options`, which is scoped to
+				// the try). The DB handle is shared across all projects.
 				persistLastTransformErrorIfChanged(
-					options.db,
+					baseOptions.db,
 					sessionIdForError,
 					summarizeTransformError(err),
 				);

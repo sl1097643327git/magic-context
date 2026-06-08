@@ -518,7 +518,6 @@ export function buildStatusDetail(
         activeBytes: 0,
         lastResponseTime: 0,
         lastNudgeTokens: 0,
-        lastNudgeBand: "",
         lastTransformError: null,
         isSubagent: false,
         pendingOps: [],
@@ -545,7 +544,6 @@ export function buildStatusDetail(
             detail.tagCounter = Number(meta.counter ?? 0);
             detail.lastResponseTime = Number(meta.last_response_time ?? 0);
             detail.lastNudgeTokens = Number(meta.last_nudge_tokens ?? 0);
-            detail.lastNudgeBand = String(meta.last_nudge_band ?? "");
             detail.lastTransformError = meta.last_transform_error
                 ? String(meta.last_transform_error)
                 : null;
@@ -618,8 +616,8 @@ export function buildStatusDetail(
             const ct = resolveConfigValue<string>(config, "cache_ttl", modelKey, "5m");
             detail.cacheTtl = ct;
 
-            if (typeof config.protected_tag_count === "number") {
-                detail.protectedTagCount = config.protected_tag_count;
+            if (typeof config.protected_tags === "number") {
+                detail.protectedTagCount = config.protected_tags;
             }
             if (typeof config.history_budget_percentage === "number") {
                 detail.historyBudgetPercentage = config.history_budget_percentage;

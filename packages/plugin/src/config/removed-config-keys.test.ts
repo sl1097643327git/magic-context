@@ -23,6 +23,12 @@ const FORBIDDEN = [
     "drop_tool_structure",
     "autoDropToolAge",
     "dropToolStructure",
+    // Nudge redesign removed the rolling/iteration nudge config entirely
+    // (Channel 1/2 replaced them). No schema key, no camelCase thread.
+    "nudge_interval_tokens",
+    "iteration_nudge_threshold",
+    "nudgeIntervalTokens",
+    "iterationNudgeThreshold",
 ];
 
 // Files allowed to mention the dead keys: the CLI doctor names them to strip

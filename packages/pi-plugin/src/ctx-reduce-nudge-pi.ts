@@ -197,13 +197,29 @@ export function maybeDeliverChannel2Pi(
 	}
 	if (state !== "pending") return false;
 
+	// Revalidate before delivering (parity with OpenCode channel2-delivery).
+	// The `pending` intent was recorded at high pressure during a context pass;
+	// by this agent_end the agent may have run ctx_reduce (markPiChannel1Reduced
+	// + the next pass refreshes the baseline), so the ceiling condition no longer
+	// holds. Firing anyway injects a stale follow-up AND burns the one-per-session
+	// cap. When the current undropped tail is known and below the trigger floor,
+	// reset to '' (re-armable) instead — NOT 'delivered' — preserving the cap.
+	const baseline = channel1StateBySession.get(sessionId);
+	const undropped = baseline
+		? baseline.tailToolTokens + baseline.turnToolTokens
+		: CHANNEL2_CEIL_UNDROPPED;
+	if (baseline && undropped < CHANNEL2_CEIL_UNDROPPED) {
+		try {
+			casChannel2NudgeState(db, sessionId, "pending", "");
+		} catch {
+			// best-effort; next pass re-evaluates.
+		}
+		return false;
+	}
+
 	if (!casChannel2NudgeState(db, sessionId, "pending", "claimed")) return false;
 
 	try {
-		const baseline = channel1StateBySession.get(sessionId);
-		const undropped = baseline
-			? baseline.tailToolTokens + baseline.turnToolTokens
-			: CHANNEL2_CEIL_UNDROPPED;
 		pi.sendUserMessage(buildChannel2Reminder(undropped), {
 			deliverAs: "followUp",
 		});

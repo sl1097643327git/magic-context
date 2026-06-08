@@ -186,7 +186,6 @@ export async function loadStatusDetail(
         activeBytes: 0,
         lastResponseTime: 0,
         lastNudgeTokens: 0,
-        lastNudgeBand: "",
         lastTransformError: null,
         isSubagent: false,
         pendingOps: [],

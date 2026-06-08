@@ -544,3 +544,40 @@ lease inside `processDreamQueue` ensures only one actually runs (the other retur
 "another worker is already processing"). The window is benign — no double-run, no
 data race — so a caller-side lock would add coordination for no behavioral gain.
 Accepted.
+
+### A34. Emergency tiered drop latches on the usage sample, not on reclaim sufficiency (by design)
+
+`planEmergencyDrop` (`emergency-drop.ts`) drops oldest-first across tiers until
+the reclaim target is met OR all active candidates are exhausted. When the active
+tail is genuinely too small to hit the target, it drops everything droppable and
+the apply path latches `last_emergency_input_sample` to the current usage reading
+— so the NEXT ≥85% pass on the same (not-yet-remeasured) sample no-ops instead of
+re-walking the already-shrunken tail and re-busting the cache. An audit may read
+this as "under-reclaim": the drop didn't reach the target, yet the pass latches
+and stops. That's intentional — re-evaluating on the same stale sample can only
+over-drop the remainder (the floor recomputes from a smaller tail), thrashing the
+prefix for zero new headroom. The ≥95% emergency block is the correct backstop for
+"nothing left to drop." A fresh provider sample (the reading changes) releases the
+latch and the next pass re-evaluates. Accepted; do not "fix" by dropping the
+sample latch.
+
+### A35. node:sqlite `.transaction()` shim relies on the native `isTransaction` getter (verified, not a bug)
+
+The non-Bun SQLite branch (`shared/sqlite.ts`) subclasses `DatabaseSync` and adds
+a `.transaction()` shim that picks `BEGIN` at top level vs `SAVEPOINT` when
+nested, keyed off `db.isTransaction`. An audit may flag "the shim never sets
+`isTransaction`, so nested savepoint detection is broken." It is NOT broken:
+`isTransaction` is a NATIVE node:sqlite getter that the runtime flips on
+`BEGIN`/`COMMIT`/`ROLLBACK` — the shim reads it, never sets it. Verified by
+running the real shim under Node 24.15 (nested savepoint: inner rolls back, outer
+commits → final rows `a,c`; `b` correctly discarded). Accepted as correct.
+
+### A36. `channel2_nudge_state` reads `''` (not NULL) for rows predating migration v31 (verified safe)
+
+Migration v31 adds `channel2_nudge_state TEXT DEFAULT ''`. An audit may worry that
+pre-v31 rows read `NULL` and break the CAS (`WHERE channel2_nudge_state = ''`).
+SQLite `ALTER TABLE ADD COLUMN ... DEFAULT ''` physically backfills existing rows
+with the default, so they read `''` (verified `IS NULL → 0`), and the
+trigger/delivery CAS matches. A wedged `'claimed'` lease (crash mid-delivery) is
+healed to `'pending'` on every process boot by `healWedgedChannel2Claims`
+(`storage-db.ts`). Accepted as correct.

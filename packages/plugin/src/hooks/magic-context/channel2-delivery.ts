@@ -59,6 +59,31 @@ export async function maybeDeliverChannel2(
     }
     if (state !== "pending") return false;
 
+    // Revalidate before delivering. The `pending` intent was recorded at high
+    // pressure during a transform pass; between then and this terminal
+    // message.updated the agent may have run ctx_reduce (or a later turn shrank
+    // the reclaimable tail), so the ceiling condition no longer holds. Firing
+    // the synthetic nudge anyway would inject a stale "you have N tokens to
+    // drop" message AND consume the one-per-session cap for nothing. When the
+    // current undropped-tool count is known and has fallen below the trigger
+    // floor, cancel the intent by resetting to '' — NOT 'delivered' — so the
+    // cap is preserved and a genuinely high-pressure later turn can re-arm it.
+    if (
+        deps.undroppedTokens !== undefined &&
+        deps.undroppedTokens < CHANNEL2_CEIL_UNDROPPED
+    ) {
+        try {
+            casChannel2NudgeState(deps.db, sessionId, "pending", "");
+            sessionLog(
+                sessionId,
+                `channel2 intent cleared pre-delivery (undropped ${deps.undroppedTokens} < ${CHANNEL2_CEIL_UNDROPPED}; re-armable)`,
+            );
+        } catch {
+            // best-effort; if the CAS fails the next pass re-evaluates.
+        }
+        return false;
+    }
+
     const { serverUrl } = deps;
     if (!serverUrl) return false;
 

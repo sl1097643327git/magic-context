@@ -124,6 +124,45 @@ describe("registerPiContextHandler", () => {
 		}
 	});
 
+	it("resolves per-project options via resolveForProject using the pass cwd", async () => {
+		// Council #4 (project-config bleed on /cd): a Pi process can switch
+		// projects mid-session; the context handler must resolve options from the
+		// CURRENT pass cwd, not the launch-cwd base options. We assert the
+		// resolver is consulted with ctx.cwd and that its returned options win
+		// (here: a switched project disables ctx_reduce, so no §N§ prefix).
+		const db = createTestDb();
+		try {
+			const fake = createFakePi();
+			const seenDirs: string[] = [];
+			const switchedDir = "/tmp/switched-project-abc";
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				// Base (launch) options: ctx_reduce ON.
+				ctxReduceEnabled: true,
+				resolveForProject: (dir: string) => {
+					seenDirs.push(dir);
+					// Switched checkout turns ctx_reduce OFF.
+					return { db, ctxReduceEnabled: false };
+				},
+			});
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: never[] } | undefined>;
+			const messages = [userMessage("hello", 1)] as never[];
+
+			await handler(
+				{ messages },
+				fakeContext("ses-switch", switchedDir) as never,
+			);
+
+			// The resolver was consulted with the pass's cwd.
+			expect(seenDirs).toContain(switchedDir);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	it("clears stale compartmentInProgress on first context pass after restart", async () => {
 		const db = createTestDb();
 		try {

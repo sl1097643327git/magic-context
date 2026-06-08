@@ -25,8 +25,7 @@ function createTestDb(): Database {
 function createTestHook(db: Database): ReturnType<typeof createToolExecuteAfterHook> {
     return createToolExecuteAfterHook({
         db,
-        recentReduceBySession: new Map(),
-        toolUsageSinceUserTurn: new Map(),
+        channel1StateBySession: new Map(),
     });
 }
 
@@ -171,8 +170,6 @@ describe("createEventHook mid-session model switch clears overflow state", () =>
                 variantBySession: new Map(),
                 agentBySession: new Map(),
                 sessionDirectoryBySession: new Map(),
-                recentReduceBySession: new Map(),
-                toolUsageSinceUserTurn: new Map(),
                 historyRefreshSessions: new Set(),
                 deferredHistoryRefreshSessions: new Set(),
                 systemPromptRefreshSessions: new Set(),
@@ -216,8 +213,6 @@ describe("createEventHook mid-session model switch clears overflow state", () =>
                 variantBySession: new Map(),
                 agentBySession: new Map(),
                 sessionDirectoryBySession: new Map(),
-                recentReduceBySession: new Map(),
-                toolUsageSinceUserTurn: new Map(),
                 historyRefreshSessions: new Set(),
                 deferredHistoryRefreshSessions: new Set(),
                 systemPromptRefreshSessions: new Set(),

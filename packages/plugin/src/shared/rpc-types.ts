@@ -97,7 +97,6 @@ export interface StatusDetail extends SidebarSnapshot {
     activeBytes: number;
     lastResponseTime: number;
     lastNudgeTokens: number;
-    lastNudgeBand: string;
     lastTransformError: string | null;
     isSubagent: boolean;
     pendingOps: Array<{ tagId: number; operation: string }>;

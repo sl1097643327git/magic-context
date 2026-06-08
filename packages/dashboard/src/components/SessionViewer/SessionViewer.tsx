@@ -1863,10 +1863,6 @@ export default function SessionViewer() {
                       <td>{metaData().last_nudge_tokens.toLocaleString()}</td>
                     </tr>
                     <tr>
-                      <td>Nudge band</td>
-                      <td>{metaData().last_nudge_band || "—"}</td>
-                    </tr>
-                    <tr>
                       <td>Execute hits</td>
                       <td>{metaData().times_execute_threshold_reached}</td>
                     </tr>

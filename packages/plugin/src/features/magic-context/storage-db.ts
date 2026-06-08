@@ -993,6 +993,34 @@ export function healAllNullColumns(db: Database): void {
 }
 
 /**
+ * Boot heal for a wedged Channel-2 ceiling-nudge lease.
+ *
+ * The Channel-2 delivery path CAS-claims `channel2_nudge_state` ('pending' →
+ * 'claimed') BEFORE sending the synthetic user message, then either confirms
+ * ('claimed' → 'delivered') or reverts on a transient failure ('claimed' →
+ * 'pending'). If the process crashes in the window between the claim and the
+ * confirm/revert, the row is stranded at 'claimed' — and since delivery only
+ * acts on 'pending', the session's one-shot ceiling nudge is permanently burned
+ * with nothing ever sent.
+ *
+ * A 'claimed' value that survives a process restart can only mean exactly that
+ * crash (the claim and its resolution happen synchronously within one delivery
+ * call, never spanning a reboot). So on boot we reset any lingering 'claimed'
+ * back to 'pending' so the next near-threshold turn re-attempts. Single targeted
+ * UPDATE; runs once per process from the fresh-open path. Best-effort.
+ */
+function healWedgedChannel2Claims(db: Database): void {
+    try {
+        db.prepare(
+            "UPDATE session_meta SET channel2_nudge_state = 'pending' WHERE channel2_nudge_state = 'claimed'",
+        ).run();
+    } catch {
+        // Column missing on a very fresh DB before ensureColumn/migration v31
+        // adds it — the migration seeds it as '' so there's nothing to heal.
+    }
+}
+
+/**
  * One-shot heal for sessions upgraded from a build without memory_block_ids.
  *
  * Those sessions have a populated memory_block_cache but no ids — ctx_search's
@@ -1192,6 +1220,10 @@ export function openDatabase(dbPathOrOptions?: string | OpenDatabaseOptions): Da
                 log(`[magic-context] key-files orphan GC failed: ${getErrorMessage(error)}`);
             }
         }
+        // Recover any Channel-2 ceiling-nudge lease left at 'claimed' by a crash
+        // mid-delivery (see healWedgedChannel2Claims). Once per boot from the
+        // fresh-open path; the cached-handle early-return above skips it.
+        healWedgedChannel2Claims(db);
         // Tool-owner backfill (plan v3.3.1, Layer B). Runs once per
         // boot to populate tool_owner_message_id on legacy tool tags.
         // The backfill module short-circuits when no work is needed

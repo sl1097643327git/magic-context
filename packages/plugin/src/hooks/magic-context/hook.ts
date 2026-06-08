@@ -260,8 +260,6 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     const recompProgressBySession =
         deps.liveSessionState?.recompProgressBySession ??
         new Map<string, import("./compartment-runner-types").RecompProgress>();
-    const recentReduceBySession = new Map<string, number>();
-    const toolUsageSinceUserTurn = new Map<string, number>();
     // Channel 1 (ctx_reduce tool-output nudge) per-session metric baseline.
     // Written at the end of each transform pass (post-drop), read in
     // tool.execute.after. Only populated for primary sessions.
@@ -468,8 +466,6 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             agentBySession.delete(sessionId);
             sessionDirectoryBySession.delete(sessionId);
             recompProgressBySession.delete(sessionId);
-            recentReduceBySession.delete(sessionId);
-            toolUsageSinceUserTurn.delete(sessionId);
             internalChildSessions.delete(sessionId);
             channel1StateBySession.delete(sessionId);
         },
@@ -659,8 +655,6 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         variantBySession,
         agentBySession,
         sessionDirectoryBySession,
-        recentReduceBySession,
-        toolUsageSinceUserTurn,
         historyRefreshSessions,
         deferredHistoryRefreshSessions,
         systemPromptRefreshSessions,
@@ -679,8 +673,6 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         "experimental.text.complete": createTextCompleteHandler(),
         "chat.message": createChatMessageHook({
             db,
-            toolUsageSinceUserTurn,
-            recentReduceBySession,
             liveModelBySession,
             variantBySession,
             agentBySession,
@@ -733,8 +725,6 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         "command.execute.before": createCommandExecuteBeforeHook(commandHandler),
         "tool.execute.after": createToolExecuteAfterHook({
             db,
-            recentReduceBySession,
-            toolUsageSinceUserTurn,
             channel1StateBySession,
         }),
     };
