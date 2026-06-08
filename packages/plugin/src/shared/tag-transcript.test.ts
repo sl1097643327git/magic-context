@@ -159,7 +159,7 @@ describe("tagTranscript tool aggregation", () => {
             commit() {},
         };
 
-        const { targets } = tagTranscript("session-1", transcript, tagger, {} as ContextDatabase);
+        const { targets } = tagTranscript("session-1", transcript, tagger, new FakeDb() as unknown as ContextDatabase);
 
         const firstTag = tagger.getToolTag("session-1", "read:32", "assistant-1");
         const secondTag = tagger.getToolTag("session-1", "read:32", "assistant-2");
@@ -185,7 +185,7 @@ describe("tagTranscript tool aggregation", () => {
             commit() {},
         };
 
-        const { targets } = tagTranscript("session-1", transcript, tagger, {} as ContextDatabase);
+        const { targets } = tagTranscript("session-1", transcript, tagger, new FakeDb() as unknown as ContextDatabase);
         const tag = tagger.getToolTag("session-1", "read:99", "assistant-1");
 
         let result: "truncated" | "absent" | undefined;
@@ -210,7 +210,7 @@ describe("tagTranscript tool aggregation", () => {
             commit() {},
         };
 
-        const { targets } = tagTranscript("session-1", transcript, tagger, {} as ContextDatabase);
+        const { targets } = tagTranscript("session-1", transcript, tagger, new FakeDb() as unknown as ContextDatabase);
         const tag = tagger.getToolTag("session-1", "read:multi", "assistant-1");
 
         expect(targets.size).toBe(1);
@@ -235,7 +235,7 @@ describe("tagTranscript tool aggregation", () => {
             commit() {},
         };
 
-        const { targets } = tagTranscript("session-1", transcript, tagger, {} as ContextDatabase);
+        const { targets } = tagTranscript("session-1", transcript, tagger, new FakeDb() as unknown as ContextDatabase);
 
         const olderTag = tagger.getToolTag("session-1", "read:reused", "assistant-old");
         const nearestTag = tagger.getToolTag("session-1", "read:reused", "assistant-near");
@@ -272,9 +272,15 @@ describe("tagTranscript tool aggregation", () => {
 
         const tag = tagger.getToolTag("session-1", "read:image", "assistant-1");
         expect(tag).toBeDefined();
-        expect(tagger.byteSizes.get(tag ?? -1)).toBe(2);
-        expect(db.byteSizeUpdates).toHaveLength(1);
-        expect(db.byteSizeUpdates[0]?.tagNumber).toBe(tag);
-        expect(db.byteSizeUpdates[0]?.byteSize).toBeGreaterThan(512);
+        // byte_size is OUTPUT-only: the tag reserves at 0 on the tool_use
+        // occurrence (args live in inputByteSize), then updates to the real
+        // result payload size when the tool_result (incl. the non-text image
+        // block) is seen — proving non-text content is byte-accounted.
+        expect(tagger.byteSizes.get(tag ?? -1)).toBe(0);
+        // Two tool_result blocks (caption text + image) under one callId; the
+        // tag byte_size climbs to the LARGEST output block (the image > 512B).
+        const updatesForTag = db.byteSizeUpdates.filter((u) => u.tagNumber === tag);
+        expect(updatesForTag.length).toBeGreaterThanOrEqual(1);
+        expect(Math.max(...updatesForTag.map((u) => u.byteSize))).toBeGreaterThan(512);
     });
 });

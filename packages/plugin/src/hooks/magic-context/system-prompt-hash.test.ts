@@ -61,11 +61,12 @@ function buildHandler(opts?: {
     directory?: string;
     experimentalUserMemories?: boolean;
     internalChildSessions?: Set<string>;
+    ctxReduceEnabled?: boolean;
 }): ReturnType<typeof createSystemPromptHashHandler> {
     return createSystemPromptHashHandler({
         db: openDatabase(),
         protectedTags: 1,
-        ctxReduceEnabled: true,
+        ctxReduceEnabled: opts?.ctxReduceEnabled ?? true,
         dreamerEnabled: opts?.dreamerEnabled ?? false,
         injectDocs: opts?.injectDocs ?? false,
         directory: opts?.directory ?? "/tmp",
@@ -425,6 +426,26 @@ describe("system-prompt-hash subagent self-management (Unit B)", () => {
         expect(joined).not.toContain("### Reduction Triggers");
         expect(joined).not.toContain("ctx_memory");
         expect(joined).not.toContain("ctx_search");
+    });
+
+    it("injects NO block for a ctx_reduce-DISABLED subagent (no primary-role leak)", async () => {
+        useTempDataHome("sph-subagent-disabled-");
+        const sessionId = "ses-subagent-disabled";
+        const db = openDatabase();
+        getOrCreateSessionMeta(db, sessionId);
+        updateSessionMeta(db, sessionId, { isSubagent: true });
+
+        // ctx_reduce OFF: the subagent has no §N§ and no tool to act on, so it
+        // must get NO Magic Context block — not the no-reduce PRIMARY block
+        // (which would leak the partner frame + memory/search/note guidance).
+        const { handler } = buildHandler({ ctxReduceEnabled: false });
+        const system = ["You are a general-purpose coding subagent."];
+        await handler({ sessionID: sessionId }, { system });
+
+        const joined = system.join("\n");
+        expect(joined).not.toContain("## Magic Context");
+        expect(joined).not.toContain("long-term partner");
+        expect(joined).not.toContain("ctx_memory");
     });
 
     it("a PRIMARY (non-subagent) still gets the full long-term-partner block", async () => {

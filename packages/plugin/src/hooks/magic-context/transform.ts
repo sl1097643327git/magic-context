@@ -17,7 +17,7 @@ import {
 import {
     casChannel2NudgeState,
     clearDetectedContextLimit,
-    clearEmergencyDropWatermark,
+    clearEmergencyDropSample,
     clearEmergencyRecovery,
     clearHistorianFailureState,
     clearPersistedReasoningWatermark,
@@ -447,14 +447,14 @@ export function createTransform(deps: TransformDeps) {
                     clearPersistedReasoningWatermark(db, sessionId);
                     // The emergency-drop watermark is keyed to the prior model's
                     // ceiling (contextLimit × executeThreshold). A model change
-                    // moves the contextLimit → reset so the new model re-evaluates
-                    // the full tail. NOTE: on a LIVE mid-session switch this branch
-                    // is dead — hook-handlers.ts updates liveModelBySession first,
-                    // so knownModel already equals the new model by the time the
-                    // transform runs. The live clear lives in hook-handlers.ts; this
-                    // covers the fork / cold-start path where the transform itself
-                    // first observes the change.
-                    clearEmergencyDropWatermark(db, sessionId);
+                    // moves the contextLimit → reset the emergency idempotence
+                    // latch so the new model re-evaluates the full tail. NOTE: on a
+                    // LIVE mid-session switch this branch is dead — hook-handlers.ts
+                    // updates liveModelBySession first, so knownModel already equals
+                    // the new model by the time the transform runs. The live clear
+                    // lives in hook-handlers.ts; this covers the fork / cold-start
+                    // path where the transform itself first observes the change.
+                    clearEmergencyDropSample(db, sessionId);
                     // Clear any detected context limit from a prior overflow — the
                     // old limit was specific to the previous model and must not
                     // leak into pressure math for the new model. The recovery

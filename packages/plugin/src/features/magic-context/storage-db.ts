@@ -550,7 +550,6 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       last_nudge_band TEXT DEFAULT '',
       last_nudge_undropped INTEGER DEFAULT 0,
       channel2_nudge_state TEXT DEFAULT '',
-      last_emergency_drop_through_tag INTEGER DEFAULT 0,
       last_emergency_input_sample INTEGER DEFAULT 0,
       last_transform_error TEXT DEFAULT '',
       nudge_anchor_message_id TEXT DEFAULT '',
@@ -721,7 +720,6 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     ensureColumn(db, "session_meta", "last_nudge_band", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "last_nudge_undropped", "INTEGER DEFAULT 0");
     ensureColumn(db, "session_meta", "channel2_nudge_state", "TEXT DEFAULT ''");
-    ensureColumn(db, "session_meta", "last_emergency_drop_through_tag", "INTEGER DEFAULT 0");
     ensureColumn(db, "session_meta", "last_emergency_input_sample", "INTEGER DEFAULT 0");
     ensureColumn(db, "session_meta", "last_transform_error", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "nudge_anchor_message_id", "TEXT DEFAULT ''");
@@ -1075,7 +1073,6 @@ function healNullIntegerColumns(db: Database): void {
         ["cache_alert_sent", 0],
         ["new_work_tokens", 0],
         ["total_input_tokens", 0],
-        ["last_emergency_drop_through_tag", 0],
         ["last_emergency_input_sample", 0],
     ];
     for (const [column, fallback] of columns) {

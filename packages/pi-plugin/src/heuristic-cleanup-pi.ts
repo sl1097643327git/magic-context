@@ -54,9 +54,8 @@ import { stripSystemInjection } from "@magic-context/core/hooks/magic-context/sy
 import type { TagTarget } from "@magic-context/core/hooks/magic-context/tag-messages";
 import { stripTagPrefix } from "@magic-context/core/hooks/magic-context/tag-part-guards";
 import {
-	getEmergencyDropWatermark,
 	getEmergencyInputSample,
-	setEmergencyDropResult,
+	setEmergencyDropSample,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { sessionLog } from "@magic-context/core/shared/logger";
 
@@ -301,7 +300,6 @@ export function applyPiHeuristicCleanup(
 	// so each tag drops once. Mirrors OpenCode `applyHeuristicCleanup`.
 	if (config.emergency) {
 		const emergency = config.emergency;
-		const priorWatermark = getEmergencyDropWatermark(db, sessionId);
 		const priorInputSample = getEmergencyInputSample(db, sessionId);
 		// Plan ONLY over tags in the live window that would ACTUALLY reclaim
 		// bytes (canDrop, not mere drop() presence) — keeps the floor math equal
@@ -318,14 +316,12 @@ export function applyPiHeuristicCleanup(
 			protectedTags: config.protectedTags,
 			currentTotalInputTokens: emergency.currentTotalInputTokens,
 			ceilingTokens: emergency.ceilingTokens,
-			priorWatermark,
 			priorInputSample,
+			hasPriorDrop: priorInputSample > 0,
 		});
 		if (plan.shouldDrop) {
 			const toDrop = new Set(plan.tagNumbers);
 			db.transaction(() => {
-				// Advance the watermark only past tags actually dropped.
-				let maxDropped = priorWatermark;
 				for (const tag of tags) {
 					if (!toDrop.has(tag.tagNumber)) continue;
 					if (tag.status !== "active" || tag.type !== "tool") continue;
@@ -335,18 +331,12 @@ export function applyPiHeuristicCleanup(
 						updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
 						updateTagDropMode(db, sessionId, tag.tagNumber, "full");
 						droppedTools++;
-						if (tag.tagNumber > maxDropped) maxDropped = tag.tagNumber;
 					}
 				}
-				// Latch watermark + usage sample together so the next ≥85% pass
-				// on the same stale sample no-ops (idempotence). Mirrors OpenCode.
-				if (droppedTools > 0)
-					setEmergencyDropResult(
-						db,
-						sessionId,
-						maxDropped,
-						emergency.currentTotalInputTokens,
-					);
+				// Latch the usage sample on any ACTING pass (even zero real drops)
+				// so the next ≥85% pass on this stale sample no-ops. Dropped tags
+				// leave status='active' (re-selection guard). Mirrors OpenCode.
+				setEmergencyDropSample(db, sessionId, emergency.currentTotalInputTokens);
 			})();
 			sessionLog(sessionId, `emergency tiered drop: ${plan.reason}`);
 		} else {

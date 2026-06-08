@@ -253,62 +253,18 @@ export function clearPersistedReasoningWatermark(db: Database, sessionId: string
 }
 
 // ---- Tiered emergency-drop watermark (Phase 2) ----
-// `last_emergency_drop_through_tag` is the highest tag number the tiered
-// emergency drop has evicted. The planner only considers tags strictly above
-// it, so each tag is dropped AT MOST ONCE and consecutive ≥85% passes converge
-// instead of re-deriving a different selection (which would bust the cache).
-// Reset to 0 on model / execute-threshold / tool-set / system-prompt-hash
-// change (the events that invalidate the drop rationale).
-interface PersistedEmergencyDropWatermarkRow {
-    last_emergency_drop_through_tag: number;
-}
-
-function isEmergencyDropWatermarkRow(row: unknown): row is PersistedEmergencyDropWatermarkRow {
-    return (
-        typeof row === "object" &&
-        row !== null &&
-        typeof (row as PersistedEmergencyDropWatermarkRow).last_emergency_drop_through_tag ===
-            "number"
-    );
-}
-
-export function getEmergencyDropWatermark(db: Database, sessionId: string): number {
-    const result = db
-        .prepare("SELECT last_emergency_drop_through_tag FROM session_meta WHERE session_id = ?")
-        .get(sessionId);
-    return isEmergencyDropWatermarkRow(result) ? result.last_emergency_drop_through_tag : 0;
-}
-
-export function setEmergencyDropWatermark(
-    db: Database,
-    sessionId: string,
-    tagNumber: number,
-): void {
-    db.transaction(() => {
-        ensureSessionMetaRow(db, sessionId);
-        db.prepare(
-            "UPDATE session_meta SET last_emergency_drop_through_tag = ? WHERE session_id = ?",
-        ).run(Math.max(0, Math.round(tagNumber)), sessionId);
-    })();
-}
-
-export function clearEmergencyDropWatermark(db: Database, sessionId: string): void {
-    db.transaction(() => {
-        ensureSessionMetaRow(db, sessionId);
-        db.prepare(
-            "UPDATE session_meta SET last_emergency_drop_through_tag = 0, last_emergency_input_sample = 0 WHERE session_id = ?",
-        ).run(sessionId);
-    })();
-}
-
 // `last_emergency_input_sample` is the `currentTotalInputTokens` reading at the
-// moment the tiered emergency drop last evicted. The drop reduces the wire, but
-// the provider hasn't re-measured it yet — the persisted usage stays at the
-// pre-drop value until the next assistant response lands. Without this latch a
-// second ≥85% pass on the SAME stale reading recomputes the floor from the
-// now-smaller active tail and over-drops the rest of the tail (and busts the
+// moment the tiered emergency drop last acted. It is the SOLE idempotence latch
+// for the emergency drop (there is intentionally no tag-number watermark — a
+// scalar "dropped-through" cursor wrongly excludes still-active lower-numbered
+// tags after a non-contiguous tier-ordered drop; dropped tags already leave the
+// `status='active'` set, so they can't be re-selected). The drop reduces the
+// wire, but the provider hasn't re-measured it yet — the persisted usage stays
+// at the pre-drop value until the next assistant response lands. Without this
+// latch a second ≥85% pass on the SAME stale reading recomputes the floor from
+// the now-smaller active tail and over-drops the rest of the tail (and busts the
 // cache again). We only re-evaluate once a FRESH provider sample arrives (the
-// reading changes). Reset together with the watermark.
+// reading changes). Reset to 0 on model change (which moves the ceiling).
 interface PersistedEmergencyInputSampleRow {
     last_emergency_input_sample: number;
 }
@@ -328,18 +284,28 @@ export function getEmergencyInputSample(db: Database, sessionId: string): number
     return isEmergencyInputSampleRow(result) ? result.last_emergency_input_sample : 0;
 }
 
-/** Persist the watermark AND the usage sample atomically after a real drop. */
-export function setEmergencyDropResult(
-    db: Database,
-    sessionId: string,
-    tagNumber: number,
-    inputSample: number,
-): void {
+/**
+ * Latch the usage sample after an emergency pass ACTED (plan.shouldDrop), even
+ * when zero tags were actually removed (every target out of sync). Latching on
+ * any acting pass — not only `droppedTools > 0` — stops a zero-reclaim pass from
+ * re-busting the cache every ≥85% pass on the same stale sample; the 95% block
+ * remains the backstop for genuine "nothing left to drop".
+ */
+export function setEmergencyDropSample(db: Database, sessionId: string, inputSample: number): void {
     db.transaction(() => {
         ensureSessionMetaRow(db, sessionId);
         db.prepare(
-            "UPDATE session_meta SET last_emergency_drop_through_tag = ?, last_emergency_input_sample = ? WHERE session_id = ?",
-        ).run(Math.max(0, Math.round(tagNumber)), Math.max(0, Math.round(inputSample)), sessionId);
+            "UPDATE session_meta SET last_emergency_input_sample = ? WHERE session_id = ?",
+        ).run(Math.max(0, Math.round(inputSample)), sessionId);
+    })();
+}
+
+export function clearEmergencyDropSample(db: Database, sessionId: string): void {
+    db.transaction(() => {
+        ensureSessionMetaRow(db, sessionId);
+        db.prepare(
+            "UPDATE session_meta SET last_emergency_input_sample = 0 WHERE session_id = ?",
+        ).run(sessionId);
     })();
 }
 

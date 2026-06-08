@@ -7,9 +7,8 @@ import {
     updateTagStatus,
 } from "../../features/magic-context/storage";
 import {
-    getEmergencyDropWatermark,
     getEmergencyInputSample,
-    setEmergencyDropResult,
+    setEmergencyDropSample,
 } from "../../features/magic-context/storage-meta-persisted";
 import type { TagEntry } from "../../features/magic-context/types";
 import { sessionLog } from "../../shared";
@@ -87,7 +86,6 @@ export function applyHeuristicCleanup(
     // returned plan and advance the persisted watermark so each tag drops once.
     if (config.emergency) {
         const emergency = config.emergency;
-        const priorWatermark = getEmergencyDropWatermark(db, sessionId);
         const priorInputSample = getEmergencyInputSample(db, sessionId);
         // Plan ONLY over tags that are in the live window AND would ACTUALLY
         // reclaim bytes (canDrop excludes absent/incomplete entries that drop()
@@ -103,16 +101,12 @@ export function applyHeuristicCleanup(
             protectedTags: config.protectedTags,
             currentTotalInputTokens: emergency.currentTotalInputTokens,
             ceilingTokens: emergency.ceilingTokens,
-            priorWatermark,
             priorInputSample,
+            hasPriorDrop: priorInputSample > 0,
         });
         if (plan.shouldDrop) {
             const toDrop = new Set(plan.tagNumbers);
             db.transaction(() => {
-                // Advance the watermark ONLY past tags actually dropped (not
-                // merely selected). "absent"/"incomplete" reclaim nothing, so
-                // counting them would over-advance and falsely report reclaim.
-                let maxDropped = priorWatermark;
                 for (const tag of tags) {
                     if (!toDrop.has(tag.tagNumber)) continue;
                     if (tag.status !== "active" || tag.type !== "tool") continue;
@@ -122,20 +116,15 @@ export function applyHeuristicCleanup(
                         updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
                         updateTagDropMode(db, sessionId, tag.tagNumber, "full");
                         droppedTools++;
-                        if (tag.tagNumber > maxDropped) maxDropped = tag.tagNumber;
                     }
                 }
-                // Latch the watermark AND the usage sample together, so the next
-                // ≥85% pass on this same (stale) sample no-ops instead of
-                // over-dropping the remaining tail.
-                if (droppedTools > 0) {
-                    setEmergencyDropResult(
-                        db,
-                        sessionId,
-                        maxDropped,
-                        emergency.currentTotalInputTokens,
-                    );
-                }
+                // Latch the usage sample on any ACTING pass — even if zero tags
+                // were actually removed (targets out of sync) — so the next ≥85%
+                // pass on this same stale sample no-ops instead of re-busting the
+                // cache. Dropped tags leave status='active' (re-selection guard);
+                // the sample is what stops over-dropping the remaining tail. The
+                // 95% block backstops genuine "nothing left to drop".
+                setEmergencyDropSample(db, sessionId, emergency.currentTotalInputTokens);
             })();
             sessionLog(sessionId, `emergency tiered drop: ${plan.reason}`);
         } else {

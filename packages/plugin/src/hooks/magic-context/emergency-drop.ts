@@ -91,8 +91,6 @@ export interface EmergencyDropPlan {
     tagNumbers: number[];
     /** Reclaim target in tokens (for logging). */
     reclaimTokens: number;
-    /** New `last_emergency_drop_through_tag` to persist (>= prior). */
-    newWatermark: number;
     /** Human-readable reason (no-op explanation or drop summary), for logs. */
     reason: string;
 }
@@ -119,14 +117,18 @@ export function planEmergencyDrop(input: {
     currentTotalInputTokens: number;
     /** ceiling = contextLimit × executeThreshold%. */
     ceilingTokens: number;
-    /** last_emergency_drop_through_tag (0 if never dropped). */
-    priorWatermark: number;
     /**
      * last_emergency_input_sample — the `currentTotalInputTokens` reading at the
-     * previous emergency drop (0 if never dropped). Used as an idempotence latch
-     * (see the same-sample no-op below).
+     * previous emergency drop (0 if never dropped). The SOLE idempotence latch:
+     * see the same-sample no-op below. (There is deliberately no tag-number
+     * watermark — a scalar "dropped-through" cursor wrongly excludes still-active
+     * lower-numbered tags after a non-contiguous tier-ordered drop. Dropped tags
+     * leave the `status='active'` set, so they're never re-selected; the sample
+     * latch is what prevents over-dropping the rest of the tail on a stale pass.)
      */
     priorInputSample: number;
+    /** True once any emergency drop has happened (drives the latch + log). */
+    hasPriorDrop: boolean;
 }): EmergencyDropPlan {
     const {
         tags,
@@ -134,15 +136,14 @@ export function planEmergencyDrop(input: {
         protectedTags,
         currentTotalInputTokens,
         ceilingTokens,
-        priorWatermark,
         priorInputSample,
+        hasPriorDrop,
     } = input;
 
     const noop = (reason: string): EmergencyDropPlan => ({
         shouldDrop: false,
         tagNumbers: [],
         reclaimTokens: 0,
-        newWatermark: priorWatermark,
         reason,
     });
 
@@ -162,7 +163,7 @@ export function planEmergencyDrop(input: {
     // and over-drop the rest of the tail (busting the cache again). So once we
     // have dropped at a given usage sample, no-op until a FRESH sample arrives
     // (the reading changes). New measured pressure ⇒ different sample ⇒ release.
-    if (priorWatermark > 0 && currentTotalInputTokens === priorInputSample) {
+    if (hasPriorDrop && currentTotalInputTokens === priorInputSample) {
         return noop("same-input-sample (awaiting fresh usage after prior drop)");
     }
 
@@ -208,11 +209,12 @@ export function planEmergencyDrop(input: {
         }
     }
 
-    // Build evictable candidates per tier.
+    // Build evictable candidates per tier. Only active tags are eligible, so a
+    // tag dropped on a prior pass (now status!=='active') is never re-selected —
+    // that, plus the input-sample latch above, is the full idempotence story.
     const byTier: Record<Tier, EmergencyDropTag[]> = { 1: [], 2: [], 3: [] };
     for (const tag of tags) {
         if (tag.status !== "active" || tag.type !== "tool") continue;
-        if (tag.tagNumber <= priorWatermark) continue; // dropped-once invariant
         if (tag.tagNumber > protectedCutoff) continue; // global protected tail
         const tier = resolveToolTier(tag.toolName);
         if ((tier === 1 || tier === 2) && reserved.has(tag.tagNumber)) continue;
@@ -222,13 +224,11 @@ export function planEmergencyDrop(input: {
     // Walk T3 → T2 → T1, oldest-first within tier, until reclaim met.
     const selected: number[] = [];
     let reclaimed = 0;
-    let maxSelected = priorWatermark;
     outer: for (const tier of [3, 2, 1] as const) {
         const group = byTier[tier];
         group.sort((a, b) => a.tagNumber - b.tagNumber); // oldest first
         for (const tag of group) {
             selected.push(tag.tagNumber);
-            if (tag.tagNumber > maxSelected) maxSelected = tag.tagNumber;
             // Match the floor's tagReclaimBytes exactly: drop() removes output +
             // invocation args + preceding reasoning, so all three reclaim.
             reclaimed += bytesToTokens(tagReclaimBytes(tag));
@@ -237,17 +237,15 @@ export function planEmergencyDrop(input: {
     }
 
     if (selected.length === 0) {
-        // Nothing new to drop (all candidates dropped/reserved/protected). No
-        // cache bust — wait for the session to grow past the watermark or the
-        // 95% block to fire.
-        return noop("no-new-candidates");
+        // Nothing left to drop (all active candidates reserved/protected). No
+        // cache bust — wait for the 95% block to fire.
+        return noop("no-candidates");
     }
 
     return {
         shouldDrop: true,
         tagNumbers: selected,
         reclaimTokens,
-        newWatermark: maxSelected,
         reason: `tiered drop: ${selected.length} tags, reclaim≈${reclaimed}/${reclaimTokens} tokens (floor≈${fixedFloor}, ceiling=${Math.round(ceilingTokens)})`,
     };
 }

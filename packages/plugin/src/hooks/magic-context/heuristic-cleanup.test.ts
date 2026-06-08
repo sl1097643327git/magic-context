@@ -58,7 +58,6 @@ function makeMemoryDatabase(): Database {
       conversation_tokens INTEGER DEFAULT 0,
       tool_call_tokens INTEGER DEFAULT 0,
       cleared_reasoning_through_tag INTEGER DEFAULT 0,
-      last_emergency_drop_through_tag INTEGER DEFAULT 0,
       last_emergency_input_sample INTEGER DEFAULT 0,
       harness TEXT NOT NULL DEFAULT 'opencode'
     );

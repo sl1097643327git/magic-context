@@ -69,7 +69,7 @@ import { getOrCreateSessionMeta } from "@magic-context/core/features/magic-conte
 import {
 	clearDeferredExecutePendingIfMatches,
 	clearDetectedContextLimit,
-	clearEmergencyDropWatermark,
+	clearEmergencyDropSample,
 	clearEmergencyRecovery,
 	clearHistorianFailureState,
 	clearPersistedReasoningWatermark,
@@ -1449,10 +1449,10 @@ export function registerPiContextHandler(
 				clearPersistedReasoningWatermark(options.db, sessionId);
 				clearDetectedContextLimit(options.db, sessionId);
 				clearEmergencyRecovery(options.db, sessionId);
-				// The emergency-drop watermark is keyed to the prior model's
-				// ceiling; a smaller new model must re-evaluate older tags.
+				// The emergency idempotence latch is keyed to the prior model's
+				// ceiling; a smaller new model must re-evaluate the full tail.
 				// Mirrors OpenCode hook-handlers.ts model-change reset.
-				clearEmergencyDropWatermark(options.db, sessionId);
+				clearEmergencyDropSample(options.db, sessionId);
 				sessionMetaForUsage.clearedReasoningThroughTag = 0;
 				sessionMetaForUsage.lastContextPercentage = 0;
 				sessionMetaForUsage.lastInputTokens = 0;

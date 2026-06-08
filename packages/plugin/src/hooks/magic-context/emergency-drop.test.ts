@@ -60,7 +60,7 @@ describe("planEmergencyDrop — guards", () => {
     const base = {
         maxTag: 10,
         protectedTags: 0,
-        priorWatermark: 0,
+        hasPriorDrop: false,
             priorInputSample: 0,
     };
 
@@ -97,7 +97,7 @@ describe("planEmergencyDrop — target math", () => {
             tags,
             maxTag: 10,
             protectedTags: 0,
-            priorWatermark: 0,
+            hasPriorDrop: false,
             priorInputSample: 0,
             currentTotalInputTokens: 30_000,
             ceilingTokens: 160_000,
@@ -114,7 +114,7 @@ describe("planEmergencyDrop — target math", () => {
             tags,
             maxTag: 20,
             protectedTags: 2,
-            priorWatermark: 0,
+            hasPriorDrop: false,
             priorInputSample: 0,
             currentTotalInputTokens: 10_000,
             ceilingTokens: 6_000,
@@ -125,13 +125,11 @@ describe("planEmergencyDrop — target math", () => {
         // never drops the protected tail (19, 20)
         expect(plan.tagNumbers).not.toContain(19);
         expect(plan.tagNumbers).not.toContain(20);
-        // watermark advances to the highest dropped tag
-        expect(plan.newWatermark).toBe(Math.max(...plan.tagNumbers));
     });
 
     it("is idempotent across consecutive ≥85% passes on the same usage sample (no over-drop)", () => {
         // 20 T3 tags × 1000 bytes (≈250 tokens each). currentTotal 100k, ceiling
-        // 60k. First pass drops down to target and persists (watermark, sample).
+        // 60k. First pass drops down to target and latches the usage sample.
         const tags = Array.from({ length: 20 }, (_, i) => tag(i + 1, "bash", 1000));
         const first = planEmergencyDrop({
             tags,
@@ -139,13 +137,12 @@ describe("planEmergencyDrop — target math", () => {
             protectedTags: 0,
             currentTotalInputTokens: 100_000,
             ceilingTokens: 60_000,
-            priorWatermark: 0,
+            hasPriorDrop: false,
             priorInputSample: 0,
         });
         expect(first.shouldDrop).toBe(true);
-        const droppedWatermark = first.newWatermark;
         // Second ≥85% pass BEFORE the provider re-measures: same stale
-        // currentTotalInputTokens, watermark advanced. Must NO-OP — not re-derive
+        // currentTotalInputTokens, sample latched. Must NO-OP — not re-derive
         // and drop the rest of the tail (which would bust the cache again).
         const second = planEmergencyDrop({
             tags,
@@ -153,7 +150,7 @@ describe("planEmergencyDrop — target math", () => {
             protectedTags: 0,
             currentTotalInputTokens: 100_000, // unchanged — provider hasn't re-measured
             ceilingTokens: 60_000,
-            priorWatermark: droppedWatermark,
+            hasPriorDrop: true,
             priorInputSample: 100_000, // latched from the first drop
         });
         expect(second.shouldDrop).toBe(false);
@@ -165,7 +162,7 @@ describe("planEmergencyDrop — target math", () => {
             protectedTags: 0,
             currentTotalInputTokens: 95_000, // new measured pressure
             ceilingTokens: 60_000,
-            priorWatermark: droppedWatermark,
+            hasPriorDrop: true,
             priorInputSample: 100_000,
         });
         // Released (not the same-sample no-op); may or may not drop depending on
@@ -184,7 +181,7 @@ describe("planEmergencyDrop — target math", () => {
             tags: [big, small],
             maxTag: 2,
             protectedTags: 0,
-            priorWatermark: 0,
+            hasPriorDrop: false,
             priorInputSample: 0,
             // tail = (400+40000+8000 + 800) × 0.25 = 12300; floor = 20000-12300
             // = 7700; ceiling 12000 → target 7700+0.3×4300 = 8990 →
@@ -221,7 +218,7 @@ describe("planEmergencyDrop — tier ordering", () => {
             tags,
             maxTag: 6,
             protectedTags: 0,
-            priorWatermark: 0,
+            hasPriorDrop: false,
             priorInputSample: 0,
             currentTotalInputTokens: 6_000,
             ceilingTokens: 1_000,
@@ -239,7 +236,7 @@ describe("planEmergencyDrop — tier ordering", () => {
             tags,
             maxTag: 10,
             protectedTags: 0,
-            priorWatermark: 0,
+            hasPriorDrop: false,
             priorInputSample: 0,
             currentTotalInputTokens: 20_000, // tail = 10×2000 = 20000
             ceilingTokens: 1_000, // target ≈ 300 → reclaim huge
@@ -259,7 +256,7 @@ describe("planEmergencyDrop — tier ordering", () => {
             tags,
             maxTag: 2,
             protectedTags: 0,
-            priorWatermark: 0,
+            hasPriorDrop: false,
             priorInputSample: 0,
             currentTotalInputTokens: 4_000,
             ceilingTokens: 500,
@@ -271,42 +268,52 @@ describe("planEmergencyDrop — tier ordering", () => {
     });
 });
 
-describe("planEmergencyDrop — watermark idempotence (no oscillation)", () => {
-    it("only considers tags above the prior watermark", () => {
-        const tags = Array.from({ length: 10 }, (_, i) => tag(i + 1, "bash", 4000));
+describe("planEmergencyDrop — idempotence via status='active' (no scalar watermark)", () => {
+    it("re-considers ALL still-active tags (no scalar-watermark exclusion of lower tags)", () => {
+        // The regression the scalar watermark caused: after a prior pass dropped
+        // high-numbered tags, lower-numbered tags that are STILL active must
+        // remain eligible. Here tags 6-10 are active and droppable; tags 1-5 were
+        // dropped in a prior pass (status='dropped') so they're naturally skipped.
+        const tags = [
+            ...Array.from({ length: 5 }, (_, i) =>
+                tag(i + 1, "bash", 4000, { status: "dropped" as const }),
+            ),
+            ...Array.from({ length: 5 }, (_, i) => tag(i + 6, "bash", 4000)),
+        ];
         const plan = planEmergencyDrop({
             tags,
             maxTag: 10,
             protectedTags: 0,
-            priorWatermark: 5,
-            priorInputSample: 0, // tags 1-5 already dropped in a prior pass
+            hasPriorDrop: true,
+            priorInputSample: 0, // fresh sample (0) ≠ current → latch released
             currentTotalInputTokens: 10_000,
             ceilingTokens: 1_000,
         });
-        // none of the already-watermarked tags are reselected.
-        for (const n of [1, 2, 3, 4, 5]) {
-            expect(plan.tagNumbers).not.toContain(n);
-        }
-        expect(Math.min(...plan.tagNumbers)).toBeGreaterThan(5);
+        // dropped tags are never reselected (status guard)…
+        for (const n of [1, 2, 3, 4, 5]) expect(plan.tagNumbers).not.toContain(n);
+        // …but every still-ACTIVE tag is eligible, oldest-first.
+        expect(plan.tagNumbers[0]).toBe(6);
     });
 
-    it("no-ops with no new candidates above the watermark", () => {
-        const tags = Array.from({ length: 5 }, (_, i) => tag(i + 1, "bash", 4000));
+    it("no-ops when every active tag is already dropped", () => {
+        const tags = Array.from({ length: 5 }, (_, i) =>
+            tag(i + 1, "bash", 4000, { status: "dropped" as const }),
+        );
         const plan = planEmergencyDrop({
             tags,
             maxTag: 5,
             protectedTags: 0,
-            priorWatermark: 5,
-            priorInputSample: 0, // everything already dropped
+            hasPriorDrop: true,
+            priorInputSample: 0,
             currentTotalInputTokens: 10_000,
             ceilingTokens: 1_000,
         });
+        // No active tail → no-ops (whether via reclaim<=min or no-candidates).
         expect(plan.shouldDrop).toBe(false);
-        expect(plan.reason).toBe("no-new-candidates");
-        expect(plan.newWatermark).toBe(5); // unchanged
+        expect(plan.tagNumbers).toEqual([]);
     });
 
-    it("ignores already-dropped tags even below the watermark", () => {
+    it("ignores already-dropped tags (status='dropped' is the re-selection guard)", () => {
         const tags = [
             tag(1, "bash", 4000, { status: "dropped" }),
             tag(2, "bash", 4000),
@@ -316,7 +323,7 @@ describe("planEmergencyDrop — watermark idempotence (no oscillation)", () => {
             tags,
             maxTag: 3,
             protectedTags: 0,
-            priorWatermark: 0,
+            hasPriorDrop: false,
             priorInputSample: 0,
             currentTotalInputTokens: 3_000,
             ceilingTokens: 200,

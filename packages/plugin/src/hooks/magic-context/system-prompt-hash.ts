@@ -286,8 +286,10 @@ export function createSystemPromptHashHandler(deps: {
         //     prefixes (transform.ts), so they self-manage tool bloat. They take
         //     NONE of the primary's role (no partner frame, memory/search/note
         //     guidance, reduction taxonomy) — just the drop mechanics.
-        //   • ctx_reduce OFF → no §N§ prefix, so the no-reduce variant (like a
-        //     no-reduce primary; effectiveCtxReduceEnabled forces false here).
+        //   • ctx_reduce OFF → NO block at all. The subagent has no §N§ prefix and
+        //     no ctx_reduce tool to act on, so there's nothing to guide; injecting
+        //     the no-reduce PRIMARY block here would leak the partner frame +
+        //     memory/search/note guidance into a bounded, parent-driven subagent.
         let sessionMetaEarly: import("../../features/magic-context/types").SessionMeta | undefined;
         try {
             sessionMetaEarly = getOrCreateSessionMeta(deps.db, sessionId);
@@ -297,8 +299,15 @@ export function createSystemPromptHashHandler(deps: {
         const isSubagentSession = sessionMetaEarly?.isSubagent === true;
         const subagentReduceMode = isSubagentSession && deps.ctxReduceEnabled !== false;
         const effectiveCtxReduceEnabled = isSubagentSession ? false : deps.ctxReduceEnabled;
+        // A ctx_reduce-disabled subagent gets no MC guidance at all.
+        const skipGuidanceForDisabledSubagent =
+            isSubagentSession && deps.ctxReduceEnabled === false;
         const fullPrompt = output.system.join("\n");
-        if (fullPrompt.length > 0 && !fullPrompt.includes(MAGIC_CONTEXT_MARKER)) {
+        if (
+            fullPrompt.length > 0 &&
+            !fullPrompt.includes(MAGIC_CONTEXT_MARKER) &&
+            !skipGuidanceForDisabledSubagent
+        ) {
             const guidance = buildMagicContextSection(
                 null,
                 deps.protectedTags,

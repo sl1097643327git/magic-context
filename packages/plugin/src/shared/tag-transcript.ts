@@ -112,10 +112,11 @@ export interface TagTranscriptResult {
 /**
  * Per-callId aggregation of tool occurrences across the transcript.
  * Built up during the walk and used to:
- *   1. Assign one tag per call_id with byte_size from the LARGEST
- *      occurrence (typically the result, ~4KB) instead of the args
- *      (~58 bytes). Without this, drop projection underestimates
- *      reclaimable bytes by ~70× per tool.
+ *   1. Assign one tag per call_id with byte_size = the tool_RESULT (output)
+ *      size, and inputByteSize = the tool_use (args) size, tracked SEPARATELY
+ *      (mirrors OpenCode tag-messages.ts). Reclaim accounting sums them
+ *      (byteSize + inputByteSize + reasoning); folding args into byte_size too
+ *      would double-count the args for a large-input/small-output tool.
  *   2. Build a single aggregate TagTarget that mutates BOTH the
  *      invocation and result occurrences atomically, so a queued drop
  *      replaces both halves with a sentinel instead of last-write-wins.
@@ -261,7 +262,13 @@ export function tagTranscript(
                         part,
                         kind: part.kind,
                     });
-                    if (toolByteSize > existing.maxByteSize) {
+                    // byte_size tracks OUTPUT bytes only (the tool_result
+                    // occurrence). The invocation args are captured separately in
+                    // inputByteSize below; counting tool_use bytes here too would
+                    // double-count args in the emergency-drop reclaim formula
+                    // (byteSize + inputByteSize + reasoning). Mirrors OpenCode,
+                    // which assigns the tool tag on the result path.
+                    if (part.kind === "tool_result" && toolByteSize > existing.maxByteSize) {
                         existing.maxByteSize = toolByteSize;
                         updateTagByteSize(db, sessionId, existing.tagId, toolByteSize);
                     }
@@ -299,11 +306,17 @@ export function tagTranscript(
                     // First occurrence for this owner+callId identity — reserve
                     // the tag number. Owner stays stable across passes because
                     // transcript message ids are durable.
+                    // byte_size is OUTPUT-only (0 until the tool_result occurrence
+                    // is seen); the invocation args live in inputByteSize. This
+                    // keeps the emergency-drop reclaim formula (byteSize +
+                    // inputByteSize + reasoning) from double-counting args when the
+                    // first occurrence is a large tool_use. Mirrors OpenCode.
+                    const outputByteSize = part.kind === "tool_result" ? toolByteSize : 0;
                     const tagId = tagger.assignToolTag(
                         sessionId,
                         callId,
                         messageId,
-                        toolByteSize,
+                        outputByteSize,
                         db,
                         0,
                         meta.toolName ?? null,
@@ -319,7 +332,7 @@ export function tagTranscript(
                                 kind: part.kind,
                             },
                         ],
-                        maxByteSize: toolByteSize,
+                        maxByteSize: outputByteSize,
                         toolName: meta.toolName ?? null,
                         inputByteSize: part.kind === "tool_use" ? meta.inputByteSize : 0,
                     };
