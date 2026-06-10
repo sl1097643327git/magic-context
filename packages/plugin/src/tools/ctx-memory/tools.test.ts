@@ -478,6 +478,36 @@ describe("createCtxMemoryTools", () => {
             ]);
         });
 
+        it("rejects a PRIMARY-agent merge that includes another project's memory", async () => {
+            const own = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONSTRAINTS",
+                content: "Use bun for scripts",
+            });
+            const foreign = insertMemory(db, {
+                projectPath: "/repo/other-project",
+                category: "CONSTRAINTS",
+                content: "Use bun for build scripts",
+            });
+
+            const result = await tools.ctx_memory.execute(
+                {
+                    action: "merge",
+                    ids: [own.id, foreign.id],
+                    content: "Use bun for all scripts in this repository.",
+                },
+                toolContext("ses-primary", "general"),
+            );
+
+            // Cross-identity merge is dreamer-only; a primary agent must not
+            // be able to mutate another project's memories. Same opaque
+            // "not found" reply as update/archive (no existence oracle).
+            expect(result).toBe(`Error: Memory with ID ${foreign.id} was not found.`);
+            expect(getMemoryById(db, own.id)?.status).toBe("active");
+            expect(getMemoryById(db, foreign.id)?.status).toBe("active");
+            expect(getMutationRows(db, "/repo/other-project", [foreign.id])).toHaveLength(0);
+        });
+
         it("queues superseded rows under each affected project identity when merging across identities", async () => {
             const first = insertMemory(db, {
                 projectPath: "/repo/project-a",

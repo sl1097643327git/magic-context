@@ -1,4 +1,8 @@
 import { describe, expect, it } from "bun:test";
+import {
+	getMemoryById,
+	insertMemory,
+} from "@magic-context/core/features/magic-context/memory/storage-memory";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import { createTestDb, fakeContext } from "../test-utils.test";
 import { createCtxMemoryTool } from "./ctx-memory";
@@ -82,6 +86,66 @@ describe("createCtxMemoryTool", () => {
 			);
 			expect(archived.isError).toBeUndefined();
 			expect(archived.content[0]?.text).toContain("Archived memory");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("rejects a primary-agent merge that includes another project's memory", async () => {
+		const db = createTestDb();
+		try {
+			const primary = createCtxMemoryTool({
+				db,
+				memoryEnabled: true,
+				embeddingEnabled: false,
+				allowDreamerActions: false,
+			});
+			const ctx = fakeContext("ses-memory") as never;
+
+			// One memory in THIS project's identity (resolved from ctx.cwd) and
+			// one under a foreign project path. Cross-identity merge is a
+			// dreamer-only capability; a primary agent must get the same opaque
+			// "not found" reply update/archive use (no existence oracle).
+			const written = await primary.execute(
+				"call-w",
+				{
+					action: "write",
+					category: "CONSTRAINTS",
+					content: "Use bun for scripts.",
+				},
+				new AbortController().signal,
+				undefined,
+				ctx,
+			);
+			expect(written.isError).toBeUndefined();
+			const idMatch = written.content[0]?.text?.match(/ID:\s*(\d+)/);
+			const ownId = idMatch ? Number(idMatch[1]) : Number.NaN;
+			expect(Number.isInteger(ownId)).toBe(true);
+
+			const foreign = insertMemory(db, {
+				projectPath: "/repo/other-project",
+				category: "CONSTRAINTS",
+				content: "Use bun for build scripts.",
+			});
+
+			const result = await primary.execute(
+				"call-m",
+				{
+					action: "merge",
+					ids: [ownId, foreign.id],
+					content: "Use bun for all scripts in this repository.",
+				},
+				new AbortController().signal,
+				undefined,
+				ctx,
+			);
+
+			expect(result.isError).toBe(true);
+			expect(result.content[0]?.text).toBe(
+				`Error: Memory with ID ${foreign.id} was not found.`,
+			);
+			expect(getMemoryById(db, ownId)?.status).toBe("active");
+			expect(getMemoryById(db, foreign.id)?.status).toBe("active");
 		} finally {
 			closeQuietly(db);
 		}

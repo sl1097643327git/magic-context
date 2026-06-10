@@ -381,12 +381,22 @@ export function createCtxMemoryTool(
 					return err("Error: One or more source memories were not found.");
 				}
 
-				// merge intentionally does NOT enforce single-project ownership
-				// (unlike update/delete/archive) — parity with OpenCode. Cross-
-				// identity consolidation is a supported dreamer capability: each
+				// Cross-identity consolidation is a DREAMER-ONLY capability: each
 				// source is superseded under ITS OWN project identity with a
 				// per-project supersede-delta row (see the supersede loop below),
-				// so every affected project's m[1] reconciles correctly.
+				// so every affected project's m[1] reconciles correctly. But
+				// `merge` is in the primary action set too, and a primary agent
+				// must not reach into ANOTHER project's memories — mirror
+				// update/archive ownership (parity with OpenCode).
+				if (!dreamerAllowed) {
+					const foreign = sourceMemories.find(
+						(memory) =>
+							!storedPathBelongsToIdentity(memory.projectPath, projectIdentity),
+					);
+					if (foreign) {
+						return err(`Error: Memory with ID ${foreign.id} was not found.`);
+					}
+				}
 
 				const requestedCategory = params.category?.trim();
 				if (requestedCategory && !isMemoryCategory(requestedCategory)) {

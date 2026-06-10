@@ -404,13 +404,23 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 if (sourceMemories.length !== ids.length) {
                     return "Error: One or more source memories were not found.";
                 }
-                // NOTE: merge intentionally does NOT enforce single-project
-                // ownership (unlike update/delete/archive). Cross-identity
-                // consolidation is a supported dreamer capability — the loop
-                // below supersedes each source under ITS OWN project identity and
-                // queues a per-project supersede-delta row, so every affected
-                // project's m[1] reconciles correctly. See the "merging across
-                // identities" test. Do not add an ownership guard here.
+                // Cross-identity consolidation is a DREAMER-ONLY capability: the
+                // loop below supersedes each source under ITS OWN project identity
+                // and queues a per-project supersede-delta row, so every affected
+                // project's m[1] reconciles. But `merge` is now in the primary
+                // action set too, and a primary agent must not be able to reach
+                // into ANOTHER project's memories. So mirror update/archive: a
+                // non-dreamer caller may only merge memories that all belong to
+                // its own resolved project. The dreamer keeps the cross-identity
+                // path (see the "merging across identities" test).
+                if (toolContext.agent !== DREAMER_AGENT) {
+                    const foreign = sourceMemories.find(
+                        (memory) => !memoryBelongsToProject(memory, projectPath),
+                    );
+                    if (foreign) {
+                        return `Error: Memory with ID ${foreign.id} was not found.`;
+                    }
+                }
 
                 const category =
                     getValidatedCategory(args.category) ?? sourceMemories[0]?.category ?? null;
