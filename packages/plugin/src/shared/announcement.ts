@@ -23,18 +23,18 @@ import { getMagicContextStorageDir } from "./data-path";
  * Bump only when there are user-visible changes worth a startup dialog.
  * Does NOT need to match the published package version.
  */
-export const ANNOUNCEMENT_VERSION = "0.22.0";
+export const ANNOUNCEMENT_VERSION = "0.23.0";
 
 /**
  * Short, user-facing bullet strings. Keep each line ~80 chars or shorter so the
  * TUI dialog renders cleanly without horizontal scroll on a typical terminal.
  */
 export const ANNOUNCEMENT_FEATURES: ReadonlyArray<string> = [
-    "NOW ON BY DEFAULT — Temporal awareness: the agent sees elapsed-time markers (e.g. +2h 15m) between messages and dated compartments, so it knows how long ago things happened. Opt out with temporal_awareness: false.",
-    "NOW ON BY DEFAULT — Auto-search hints: each turn a background ctx_search whispers a compact 'vague recall' when something relevant exists in your memories, past conversation, or git history. No full content injected. Opt out with memory.auto_search.enabled: false.",
-    "Experimental features graduated to stable config: temporal_awareness and caveman_text_compression are now top-level keys; auto_search and git_commit_indexing moved under memory.* . Run `doctor` to migrate old experimental.* settings (your opt-ins/opt-outs are preserved).",
-    "git_commit_indexing (make project history semantically searchable) stays opt-in — enable with memory.git_commit_indexing.enabled: true.",
-    "Audit hardening across both harnesses: memory config-bypass fix, supersede-delta cache-stability fixes, and dashboard correctness fixes.",
+    "Smarter context nudges: gentle <system-reminder> notes on tool outputs replace the old chat nudges — quieter, cache-safe, and they now also help subagents manage their own context.",
+    "The agent can now maintain its own project memories: update, archive (batch), and merge the memories it sees — not just write new ones. Memory categories are schema-enforced.",
+    "Big-session performance: historian trigger and token math moved off the database hot path — multi-second stalls on large sessions are gone (measured 250ms → 2.4ms per pass).",
+    "History compaction unstuck for sparse sessions: the protected-tail boundary is now size-based, so sessions with few user turns compact reliably instead of growing forever (issue #132).",
+    "Fixed: session titles no longer fail to generate in fresh directories (issue #129), plus 20+ correctness fixes from three audit rounds.",
 ];
 
 /**
