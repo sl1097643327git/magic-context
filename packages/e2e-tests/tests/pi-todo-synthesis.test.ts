@@ -407,6 +407,11 @@ describe("pi synthetic todowrite e2e", () => {
 
 		const t0Body = await sendAndCaptureMainRequest("Pi defer replay t0");
 		const t0Bytes = syntheticPairBytes(t0Body, callId);
+		// Presence guard: syntheticPairBytes returns "" when the pair is absent,
+		// so the byte-identity assertion below would pass vacuously if the pair
+		// were missing on BOTH defers (the pre-stable-id behavior). Replay means
+		// present AND byte-identical.
+		expect(t0Bytes).not.toBe("");
 		const metaT0 = readTodoMeta(sessionId);
 
 		const t1Body = await sendAndCaptureMainRequest("Pi defer replay t1");
@@ -469,6 +474,7 @@ describe("pi synthetic todowrite e2e", () => {
 			"Pi legacy self-heal cache bust",
 		);
 		const cacheBustBytes = syntheticPairBytes(cacheBustBody, callId);
+		expect(cacheBustBytes).not.toBe("");
 
 		const after = readTodoMeta(sessionId);
 		expect(after?.todo_synthetic_state_json).toBe(
