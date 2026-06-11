@@ -719,14 +719,19 @@ describe("createTransform", () => {
         await transform({}, { messages: secondPass });
 
         //#then — user message shell is preserved (turn boundary) with truncated
-        // preview; tool-only assistant is fully dropped and its shell stripped.
-        expect(secondPass).toHaveLength(1);
+        // preview; the tool is within the newest-20 skeleton window, so its
+        // shell ALSO survives with a [truncated] skeleton (anti-hallucination
+        // anchor) instead of full removal.
+        expect(secondPass).toHaveLength(2);
         expect(secondPass[0]?.info.role).toBe("user");
         const userShellText = (secondPass[0]?.parts[0] as { text: string }).text;
         expect(userShellText.startsWith("[truncated \u00a71\u00a7]")).toBe(true);
         expect(userShellText.includes("initial user text")).toBe(true);
+        const toolPart = secondPass[1]?.parts[0] as { state?: { output?: string } };
+        expect(toolPart?.state?.output).toBe("[truncated]");
         expect(getTagById(db, "ses-1", 1)?.status).toBe("dropped");
         expect(getTagById(db, "ses-1", 2)?.status).toBe("dropped");
+        expect(getTagById(db, "ses-1", 2)?.dropMode).toBe("truncated");
         expect(clearPendingOps(db, "ses-1")).toBeUndefined();
     });
 

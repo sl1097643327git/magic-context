@@ -44,6 +44,7 @@ import {
     checkCompartmentTrigger,
     FORCE_MATERIALIZE_PERCENTAGE,
 } from "./compartment-trigger";
+import { resolveCtxReduceAvailabilityFromMessages } from "./ctx-reduce-availability";
 import { computeTailTokenEstimate, shouldTriggerChannel2 } from "./ctx-reduce-nudge";
 import { deriveTriggerBudget } from "./derive-budgets";
 import { resolveExecuteThreshold, resolveTrustedContextLimit } from "./event-resolvers";
@@ -358,7 +359,16 @@ export function createTransform(deps: TransformDeps) {
         // need the §N§ prefix + Channel 1 baseline + guidance to use it. A
         // primary with ctx_reduce disabled correctly gets none of these (no
         // tool to act on tags). `undefined === true` for this gate (default on).
-        const ctxReduceEnabledEffective = deps.ctxReduceEnabled !== false;
+        //
+        // ALSO gated on the session's actual tool availability: a parent agent
+        // can spawn this session with an explicit allow-list tools map that
+        // filters ctx_reduce out entirely — §N§ prefixes and nudges for a tool
+        // the model can't call are pure overhead plus cargo-cult risk. The
+        // verdict is frozen per session (first user message's tools map) so it
+        // can never flap mid-session and bust the cache.
+        const ctxReduceEnabledEffective =
+            deps.ctxReduceEnabled !== false &&
+            resolveCtxReduceAvailabilityFromMessages(sessionId, messages);
 
         // Resolve the *session's* working directory, not the OpenCode launch
         // directory. When the user runs `opencode -s <id>` from outside the

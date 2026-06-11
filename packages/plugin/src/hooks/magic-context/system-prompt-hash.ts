@@ -6,6 +6,7 @@ import {
     updateSessionMeta,
 } from "../../features/magic-context/storage";
 import { sessionLog } from "../../shared/logger";
+import { resolveCtxReduceAvailability } from "./ctx-reduce-availability";
 import { clearKeyFilesCacheForSession } from "./key-files-block";
 import { estimateTokens } from "./read-session-formatting";
 
@@ -297,11 +298,19 @@ export function createSystemPromptHashHandler(deps: {
             sessionLog(sessionId, "system-prompt-hash session meta load failed:", error);
         }
         const isSubagentSession = sessionMetaEarly?.isSubagent === true;
-        const subagentReduceMode = isSubagentSession && deps.ctxReduceEnabled !== false;
-        const effectiveCtxReduceEnabled = isSubagentSession ? false : deps.ctxReduceEnabled;
-        // A ctx_reduce-disabled subagent gets no MC guidance at all.
+        // A session whose spawn tools map filters ctx_reduce out (parent
+        // allow-lists) must be treated like ctx_reduce-disabled: reduce
+        // guidance for an uncallable tool is overhead + cargo-cult risk.
+        // Resolved once per session (frozen verdict — no hash flapping).
+        const ctxReduceCallable = resolveCtxReduceAvailability(sessionId);
+        const subagentReduceMode =
+            isSubagentSession && deps.ctxReduceEnabled !== false && ctxReduceCallable;
+        const effectiveCtxReduceEnabled = isSubagentSession
+            ? false
+            : deps.ctxReduceEnabled !== false && ctxReduceCallable;
+        // A subagent with ctx_reduce disabled or uncallable gets no MC guidance.
         const skipGuidanceForDisabledSubagent =
-            isSubagentSession && deps.ctxReduceEnabled === false;
+            isSubagentSession && (deps.ctxReduceEnabled === false || !ctxReduceCallable);
         const fullPrompt = output.system.join("\n");
         if (
             fullPrompt.length > 0 &&
