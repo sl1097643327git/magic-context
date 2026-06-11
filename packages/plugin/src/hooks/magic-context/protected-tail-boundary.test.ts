@@ -184,6 +184,87 @@ describe("protected-tail boundary integration", () => {
         }
     });
 
+    it("never crosses the newest meaningful user message on routine passes (live-prompt floor)", () => {
+        // Tool-heavy in-flight turn: newest user prompt followed by a large
+        // assistant/tool suffix. Pure token sizing would protect only the
+        // assistant suffix and leave the live prompt eligible — the historian
+        // would compact the prompt the agent is actively answering (observed
+        // live: compaction divider rendered at the session tail).
+        useBoundaryTempDataHome("protected-tail-live-prompt-");
+        const sessionId = "ses-live-prompt-floor";
+        const messages: Array<{ id: string; role: string; parts: unknown[] }> = [];
+        // Old eligible history (real content mass).
+        for (let i = 1; i <= 4; i++) {
+            messages.push({
+                id: `m-old-${i}`,
+                role: i % 2 === 1 ? "user" : "assistant",
+                parts: [{ type: "text", text: `old content ${i} `.repeat(600) }],
+            });
+        }
+        // The live prompt (newest meaningful user message).
+        messages.push({
+            id: "m-live-prompt",
+            role: "user",
+            parts: [{ type: "text", text: "Okay now let's check open issues before we start." }],
+        });
+        // In-flight tool-heavy assistant suffix — big enough that the token
+        // target N is satisfied by the suffix alone.
+        for (let i = 1; i <= 4; i++) {
+            messages.push({
+                id: `m-tail-a${i}`,
+                role: "assistant",
+                parts: [
+                    {
+                        type: "tool",
+                        callID: `read:${i}`,
+                        tool: "read",
+                        state: {
+                            status: "completed",
+                            input: { filePath: `/tmp/f${i}.ts` },
+                            output: `tool output ${i} `.repeat(2000),
+                        },
+                    },
+                ],
+            });
+        }
+        const opencodeDb = createBoundaryOpenCodeDb(sessionId, messages);
+        const db = createContextDb();
+        try {
+            const livePromptOrdinal = 5;
+            const snapshot = resolveOpenCodeProtectedTailBoundary({
+                db,
+                sessionId,
+                mode: "trigger",
+                contextLimit: 64_000,
+                executeThresholdPercentage: 65,
+                usage: { percentage: 50, inputTokens: 32_000 },
+                usageSource: "live",
+            });
+            // The live prompt and everything after it stays protected.
+            expect(snapshot.protectedTailStart).toBeLessThanOrEqual(livePromptOrdinal);
+
+            // Emergency-scaled re-resolution (force-path second attempt) is
+            // ALLOWED to cross the floor — sparse sessions must remain
+            // compactable under genuine pressure (#132).
+            const emergency = resolveOpenCodeProtectedTailBoundary({
+                db,
+                sessionId,
+                mode: "trigger",
+                contextLimit: 64_000,
+                executeThresholdPercentage: 65,
+                usage: { percentage: 96, inputTokens: 61_000 },
+                usageSource: "live",
+                emergencyTailScale: 0.25,
+            });
+            expect(emergency.protectedTailStart).toBeGreaterThanOrEqual(
+                snapshot.protectedTailStart,
+            );
+        } finally {
+            closeQuietly(db);
+            closeQuietly(opencodeDb);
+        }
+    });
+
     it("bails out when a boundary snapshot's eligible raw range changes", () => {
         useBoundaryTempDataHome("protected-tail-stale-");
         const sessionId = "ses-stale-boundary";
@@ -193,7 +274,11 @@ describe("protected-tail boundary integration", () => {
         // vacuously 2014 it did for a while, masked by the offset-clamp bug).
         const opencodeDb = createBoundaryOpenCodeDb(sessionId, [
             { id: "m1", role: "user", parts: [{ type: "text", text: "eligible ".repeat(400) }] },
-            { id: "m2", role: "assistant", parts: [{ type: "text", text: "also eligible ".repeat(400) }] },
+            {
+                id: "m2",
+                role: "assistant",
+                parts: [{ type: "text", text: "also eligible ".repeat(400) }],
+            },
             { id: "m3", role: "user", parts: [{ type: "text", text: "protected".repeat(2000) }] },
         ]);
         const db = createContextDb();

@@ -437,6 +437,34 @@ export function resolveProtectedTailBoundary(
     let runtimeFloor = offset;
     if (ctx.migrationFloorActive) runtimeFloor = Math.max(runtimeFloor, ctx.priorBoundaryOrdinal);
     let protectedTailStart = Math.max(boundary, runtimeFloor);
+    // Live-prompt floor: on routine (non-emergency) passes the boundary must
+    // never cross the newest MEANINGFUL user message — compacting the prompt
+    // the agent is actively answering replaces it with a narration mid-turn
+    // and renders the compaction divider at the live tail (observed in
+    // production on a tool-heavy session: the in-flight turn's suffix was all
+    // assistant/tool messages, so pure token sizing left the current prompt
+    // eligible — structurally impossible under v2's user-turn rule, regained
+    // here). Emergency-scaled re-resolution (force_80/95 second attempt) may
+    // deliberately cross it: a sparse session with one user turn and a huge
+    // assistant tail must stay compactable under genuine pressure (#132),
+    // and overflow is strictly worse than narrating the live prompt.
+    // The floor lifts at force pressure (>=80%) for the same reason — the
+    // sparse #132 session (one user turn, huge assistant tail) must expose a
+    // runnable head on the force path's FIRST attempt, not only after the
+    // emergency-scaled retry.
+    if (!ctx.emergencyTailScale && usagePercentage < 80) {
+        let lastMeaningfulUserOrdinal = 0;
+        for (let i = messages.length - 1; i >= 0; i--) {
+            const message = messages[i];
+            if (message.role !== "user") continue;
+            if (!hasMeaningfulUserText(message.parts)) continue;
+            lastMeaningfulUserOrdinal = message.ordinal;
+            break;
+        }
+        if (lastMeaningfulUserOrdinal >= offset) {
+            protectedTailStart = Math.min(protectedTailStart, lastMeaningfulUserOrdinal);
+        }
+    }
     // Keep defer-pass cache keys stable when a tiny token fluctuation would move the ideal by one message.
     if (
         protectedTailStart > offset &&
