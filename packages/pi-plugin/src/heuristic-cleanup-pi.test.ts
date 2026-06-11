@@ -1,10 +1,16 @@
 import { describe, expect, it } from "bun:test";
-import { getTagsBySession } from "@magic-context/core/features/magic-context/storage";
+import {
+	getActiveTagsBySession,
+	getTagsBySession,
+	insertTag,
+	queuePendingOp,
+} from "@magic-context/core/features/magic-context/storage";
 import { createTagger } from "@magic-context/core/features/magic-context/tagger";
 import {
 	applyFlushedStatuses,
 	applyPendingOperations,
 } from "@magic-context/core/hooks/magic-context/apply-operations";
+import type { TagTarget } from "@magic-context/core/hooks/magic-context/tag-messages";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import { tagTranscript } from "@magic-context/core/shared/tag-transcript";
 import { applyPiHeuristicCleanup } from "./heuristic-cleanup-pi";
@@ -293,6 +299,63 @@ describe("applyPiHeuristicCleanup", () => {
 				.map((tag) => tag.status);
 			expect(reduceTags.filter((s) => s === "dropped")).toHaveLength(1);
 			expect(reduceTags.filter((s) => s === "active")).toHaveLength(1);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+});
+
+function makePiDropTarget(): TagTarget {
+	const state = { present: true };
+	return {
+		setContent: () => false,
+		drop: () => {
+			if (!state.present) return "absent";
+			state.present = false;
+			return "removed";
+		},
+		canDrop: () => state.present,
+	};
+}
+
+describe("applyPiHeuristicCleanup emergency floor accounting", () => {
+	it("uses the post-pending-op active tag set for emergency planning", () => {
+		const db = createTestDb();
+		try {
+			const sessionId = "ses-pi-floor-recompute";
+			const targets = new Map<number, TagTarget>();
+			for (let tag = 1; tag <= 4; tag++) {
+				insertTag(db, sessionId, `tool-${tag}`, "tool", 4000, tag, 0, "bash");
+				targets.set(tag, makePiDropTarget());
+			}
+			queuePendingOp(db, sessionId, 1, "drop", 1);
+			queuePendingOp(db, sessionId, 2, "drop", 2);
+
+			applyPendingOperations(sessionId, db, targets, 0);
+			const activeAfterPending = getActiveTagsBySession(db, sessionId);
+			applyPiHeuristicCleanup(
+				sessionId,
+				db,
+				targets,
+				[],
+				{
+					protectedTags: 0,
+					emergency: { currentTotalInputTokens: 7000, ceilingTokens: 6000 },
+				},
+				activeAfterPending,
+			);
+
+			expect(
+				getTagsBySession(db, sessionId).map((tag) => [
+					tag.tagNumber,
+					tag.status,
+				]),
+			).toEqual([
+				[1, "dropped"],
+				[2, "dropped"],
+				[3, "active"],
+				[4, "active"],
+			]);
 		} finally {
 			closeQuietly(db);
 		}

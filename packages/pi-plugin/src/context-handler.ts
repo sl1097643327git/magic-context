@@ -135,7 +135,7 @@ import {
 } from "./compaction-marker-manager-pi";
 import {
 	clearPiChannel1State,
-	computeTailToolTokensPi,
+	computeTailTokenEstimatePi,
 	setPiChannel1Baseline,
 } from "./ctx-reduce-nudge-pi";
 import { detectRecentCommit } from "./detect-recent-commit";
@@ -2194,7 +2194,7 @@ export function registerPiContextHandler(
 					// Real-tokenizer counts from the durable tag store (injected
 					// m[0]/m[1] blocks are never tagged → injected-free live tail).
 					// reclaimable = non-dropped tool OUTPUT; liveTail = conv + tool
-					// I/O. Falls back to the byte-approx walk only if the store read
+					// I/O. Falls back to a byte-approx live-tail walk only if the store read
 					// fails. Mirrors OpenCode's transform path exactly.
 					let tailToolTokens: number;
 					let liveTailTokens: number;
@@ -2203,10 +2203,11 @@ export function registerPiContextHandler(
 						tailToolTokens = agg.toolOutput;
 						liveTailTokens = agg.conversation + agg.toolCall;
 					} catch {
-						tailToolTokens = computeTailToolTokensPi(
+						const estimate = computeTailTokenEstimatePi(
 							outputMessages as unknown[],
 						);
-						liveTailTokens = tailToolTokens;
+						tailToolTokens = estimate.tailToolTokens;
+						liveTailTokens = estimate.liveTailTokens;
 					}
 					// usable = executeThresholdTokens − inputTokens + liveTail (the
 					// agent's working range). Computed BEFORE the baseline write so
@@ -2238,13 +2239,19 @@ export function registerPiContextHandler(
 					if (
 						usageContextLimit &&
 						usageContextLimit > 0 &&
-						resolvedExecuteThresholdPct > 0 &&
-						shouldTriggerChannel2({
+						resolvedExecuteThresholdPct > 0
+					) {
+						const channel2ShouldTrigger = shouldTriggerChannel2({
 							reclaimableTokens: tailToolTokens,
 							usableTokens: usableTokensPi,
-						})
-					) {
-						casChannel2NudgeState(options.db, sessionId, "", "pending");
+						});
+						if (channel2ShouldTrigger) {
+							casChannel2NudgeState(options.db, sessionId, "", "pending");
+						} else {
+							// Cancel stale, undelivered intents when fresh metrics say the
+							// trigger no longer holds; claimed/delivered are never reset.
+							casChannel2NudgeState(options.db, sessionId, "pending", "");
+						}
 					}
 				} else {
 					clearPiChannel1State(sessionId);
@@ -3503,6 +3510,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	let heuristicsExecuted = false;
 	let heuristicsResult: PiHeuristicCleanupResult | null = null;
 	const tActiveTags = performance.now();
+	// Pending ops have already materialized above; reread active tags so the
+	// emergency-drop floor excludes tags reclaimed earlier in this same pass.
 	const activeTags = getActiveTagsBySession(args.db, args.sessionId);
 	logTransformTiming(
 		args.sessionId,

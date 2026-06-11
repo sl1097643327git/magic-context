@@ -175,9 +175,12 @@ the harness I/O differs:
   persist (OpenCode→DB, Pi→JSONL via `appendMessage` on `message_end`) and replay
   verbatim — "free sticky", no anchor/CAS/replay machinery. The metric baseline is
   computed at the end of the pipeline (`pi.on("context")` / OpenCode transform) and
-  read in the tool hook. Pi tool output lives in `toolResult.content[].text`, not
-  OpenCode's `parts[].state.output` — `computeTailToolTokensPi` extracts it, then
-  defers to the shared `tailToolTokensFromStrings`.
+  read in the tool hook. The cadence/band state (`last_nudge_undropped` +
+  `last_nudge_level`) is shared DB state so both harnesses suppress same-band
+  repetition and reset after `ctx_reduce`. Pi tool output lives in
+  `toolResult.content[].text`, not OpenCode's `parts[].state.output` —
+  `computeTailToolTokensPi` extracts it, then defers to the shared
+  `tailToolTokensFromStrings`.
 
 - **Channel 2 (synthetic-user ceiling nudge).** OpenCode MUST use a live-server
   `createOpencodeClient(serverUrl)` + `/session` probe to dodge the plugin
@@ -186,8 +189,9 @@ the harness I/O differs:
   workaround, no live-server client, and no probe** — it is single-process, so
   `sendUserMessage` coalesces natively and the message lands at the tail after the
   current turn. The shared `channel2_nudge_state` lease (pending→claimed→delivered,
-  revert-on-failure) is used identically for the one-ceiling-per-lifetime cap; only
-  the delivery call differs. Both deliver MID-TURN at step boundaries (the point
+  TTL-scoped stale-claim heal, revert only on send failure) is used identically
+  for the one-ceiling-per-lifetime cap; only the delivery call differs. Both
+  deliver MID-TURN at step boundaries (the point
   of the channel: warn while the pile grows): OpenCode from `message.updated`
   (finish=tool-calls OR stop, queued message drains at the next run-loop step);
   Pi primarily from `tool_result` with deliverAs "steer" (queued, pulled at the

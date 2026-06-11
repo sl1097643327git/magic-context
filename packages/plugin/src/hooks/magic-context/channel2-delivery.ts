@@ -13,8 +13,10 @@
 // Lease state machine (cross-process CAS): pending -> claimed -> delivered.
 //   - claim `pending -> claimed` before send (so two processes can't both send)
 //   - on confirmed success: `claimed -> delivered` (cap consumed, terminal)
-//   - on failure: revert `claimed -> pending` (don't burn the one ceiling nudge
-//     on a transient error)
+//   - on send failure: revert `claimed -> pending` (don't burn the one ceiling
+//     nudge on a transient transport error)
+//   - after a successful send: never revert to pending, even if confirmation
+//     fails; the user message may already exist and re-arming duplicates it.
 //
 // Delivery transport is the live-server client ONLY (no in-process fallback):
 // plain TUI's listener 404s the probe, so Channel 2 is disabled there and the
@@ -24,6 +26,7 @@
 import {
     casChannel2NudgeState,
     getChannel2NudgeState,
+    setChannel2NudgeState,
 } from "../../features/magic-context/storage-meta-persisted";
 import {
     getLiveServerClient,
@@ -146,16 +149,42 @@ export async function maybeDeliverChannel2(
             throw new Error("live-server client has no session.promptAsync");
         }
         await session.promptAsync({ path: { id: sessionId }, body });
-
-        // Confirmed: consume the one-shot cap (terminal).
-        casChannel2NudgeState(deps.db, sessionId, "claimed", "delivered");
-        sessionLog(sessionId, "channel2 ceiling nudge delivered");
-        return true;
     } catch (error) {
-        // Revert so the single ceiling nudge isn't permanently burned on a
-        // transient failure; a later event re-attempts.
+        // Revert only when the send itself failed. Once promptAsync returns, the
+        // synthetic user message may already exist; re-arming can duplicate it.
         casChannel2NudgeState(deps.db, sessionId, "claimed", "pending");
         sessionLog(sessionId, "channel2 ceiling nudge delivery failed (will retry):", error);
+        return false;
+    }
+
+    try {
+        // Confirmed: consume the one-shot cap (terminal). The CAS result is
+        // authoritative; a stolen/expired claim must not be treated as delivered.
+        const confirmed = casChannel2NudgeState(deps.db, sessionId, "claimed", "delivered");
+        if (confirmed) {
+            sessionLog(sessionId, "channel2 ceiling nudge delivered");
+            return true;
+        }
+        try {
+            // The send happened. If another process rewound the row before our
+            // confirm, seal the one-shot cap rather than leaving a re-deliverable
+            // pending intent behind. Return false because OUR claim was not the
+            // authoritative terminal transition.
+            setChannel2NudgeState(deps.db, sessionId, "delivered");
+        } catch {
+            // Best-effort; if storage is unavailable we still must not revert.
+        }
+        sessionLog(sessionId, "channel2 ceiling nudge sent but claim confirmation was lost");
+        return false;
+    } catch (error) {
+        // Post-send DB failure: do NOT revert to pending, because the send already
+        // happened and retrying risks a duplicate ceiling nudge.
+        try {
+            setChannel2NudgeState(deps.db, sessionId, "delivered");
+        } catch {
+            // Best-effort; the important invariant is never re-arming here.
+        }
+        sessionLog(sessionId, "channel2 ceiling nudge sent but confirm failed:", error);
         return false;
     }
 }

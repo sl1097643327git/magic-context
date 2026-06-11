@@ -7,6 +7,7 @@ import {
 } from "@magic-context/core/features/magic-context/storage";
 import {
 	clearPiChannel1State,
+	computeTailTokenEstimatePi,
 	computeTailToolTokensPi,
 	maybeChannel1ReminderForToolResult,
 	maybeDeliverChannel2Pi,
@@ -34,6 +35,25 @@ describe("computeTailToolTokensPi", () => {
 		expect(tokens).toBeGreaterThan(9_000);
 		expect(tokens).toBeLessThan(11_000);
 	});
+
+	it("estimates the full live tail separately from reclaimable tool output", () => {
+		const estimate = computeTailTokenEstimatePi([
+			{
+				role: "user",
+				content: [{ type: "text", text: "conversation ".repeat(1000) }],
+			},
+			{
+				role: "assistant",
+				content: [
+					{ type: "toolCall", name: "bash", arguments: { cmd: "echo hi" } },
+				],
+			},
+			toolResultMsg("tool output ".repeat(1000)),
+		]);
+
+		expect(estimate.tailToolTokens).toBeGreaterThan(0);
+		expect(estimate.liveTailTokens).toBeGreaterThan(estimate.tailToolTokens);
+	});
 });
 
 describe("maybeChannel1ReminderForToolResult", () => {
@@ -47,6 +67,7 @@ describe("maybeChannel1ReminderForToolResult", () => {
 			executeThresholdPercentage: 65,
 			lastInputTokens: 150_000, // pressure ≈ (75 / 65) ≈ 1.15
 			turnToolTokens: 0,
+			usableTokens: 60_000,
 			reducedSinceRefresh: false,
 		});
 	}

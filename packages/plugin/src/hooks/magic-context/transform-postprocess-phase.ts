@@ -5,6 +5,7 @@ import {
     clearDeferredExecutePendingIfMatches,
     clearPendingCompactionMarkerStateIf,
     clearPersistedTodoSyntheticAnchor,
+    getActiveTagsBySession,
     getAutoSearchHintDecisions,
     getMaxM0MutationId,
     getNoteNudgeAnchors,
@@ -387,6 +388,12 @@ export async function runPostTransformPhase(
                       minChars: args.cavemanTextCompression.minChars,
                   }
                 : undefined;
+            const heuristicTags = shouldApplyPendingOps
+                ? getActiveTagsBySession(args.db, args.sessionId)
+                : args.tags;
+            // Pending ops run just before heuristics and can drop active tags.
+            // Emergency floor math must see that post-op active set; otherwise
+            // already-reclaimed tags stay in floorTags and the planner over-evicts.
             const cleanup = applyHeuristicCleanup(
                 args.sessionId,
                 args.db,
@@ -410,7 +417,7 @@ export async function runPostTransformPhase(
                             : undefined,
                     caveman: cavemanConfig,
                 },
-                args.tags,
+                heuristicTags,
             );
             logTransformTiming(
                 args.sessionId,

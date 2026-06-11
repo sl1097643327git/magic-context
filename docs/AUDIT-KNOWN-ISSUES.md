@@ -578,9 +578,15 @@ Migration v31 adds `channel2_nudge_state TEXT DEFAULT ''`. An audit may worry th
 pre-v31 rows read `NULL` and break the CAS (`WHERE channel2_nudge_state = ''`).
 SQLite `ALTER TABLE ADD COLUMN ... DEFAULT ''` physically backfills existing rows
 with the default, so they read `''` (verified `IS NULL → 0`), and the
-trigger/delivery CAS matches. A wedged `'claimed'` lease (crash mid-delivery) is
-healed to `'pending'` on every process boot by `healWedgedChannel2Claims`
-(`storage-db.ts`). Accepted as correct.
+trigger/delivery CAS matches.
+
+A wedged `'claimed'` lease (crash mid-delivery) is still healed by
+`healWedgedChannel2Claims` (`storage-db.ts`), but the heal is now TTL-scoped via
+`channel2_nudge_claimed_at`: fresh claims are left alone so a sibling process
+boot cannot steal a live in-flight delivery; stale/legacy claims rewind to
+`'pending'`. After a send succeeds, confirm failures are not reverted to
+`'pending'` because the synthetic user message may already exist. Accepted as
+correct.
 
 ### A37. `NORMAL_HYSTERESIS_TOKENS` (256) eligible-head snap is deliberate (boundary-straddle wobble accepted)
 

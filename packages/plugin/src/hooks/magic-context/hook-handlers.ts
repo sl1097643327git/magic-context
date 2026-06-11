@@ -13,7 +13,10 @@ import {
     clearEmergencyDropSample,
     clearEmergencyRecovery,
     clearHistorianFailureState,
+    getLastNudgeLevel,
     getLastNudgeUndropped,
+    resetLastNudgeCycle,
+    setLastNudgeLevel,
     setLastNudgeUndropped,
 } from "../../features/magic-context/storage-meta-persisted";
 import { clearSidebarSnapshotCache } from "../../plugin/sidebar-snapshot-cache";
@@ -437,11 +440,13 @@ function maybeInjectChannel1Nudge(
         pressure,
         historyBudgetTokens: state.historyBudgetTokens,
         lastNudgeUndropped: getLastNudgeUndropped(args.db, sessionId),
+        lastNudgeLevel: getLastNudgeLevel(args.db, sessionId),
         hasRecentReduce: false, // handled by reducedSinceRefresh above
     });
 
-    // Always persist the cadence watermark so a reduce-driven drop re-arms it.
+    // Always persist the cadence + band state so a reduce-driven drop re-arms it.
     setLastNudgeUndropped(args.db, sessionId, decision.nextLastNudge);
+    setLastNudgeLevel(args.db, sessionId, decision.nextLastNudgeLevel);
     if (!decision.fire) return;
 
     out.output += buildChannel1Reminder(decision.level, decision.undroppedTokens);
@@ -466,6 +471,11 @@ export function createToolExecuteAfterHook(args: {
             // (now smaller) reclaimable tail instead of replaying a stale band.
             const state = args.channel1StateBySession.get(typedInput.sessionID);
             if (state) state.reducedSinceRefresh = true;
+            try {
+                resetLastNudgeCycle(args.db, typedInput.sessionID);
+            } catch (error) {
+                sessionLog(typedInput.sessionID, "channel1 reduce reset failed (ignored):", error);
+            }
         } else {
             // Channel 1: append an in-turn ctx_reduce nudge to this tool's output
             // when reclaimable space + pressure warrant it. Auto-sticky via

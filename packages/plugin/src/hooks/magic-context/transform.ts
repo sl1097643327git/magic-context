@@ -43,7 +43,7 @@ import {
     checkCompartmentTrigger,
     FORCE_MATERIALIZE_PERCENTAGE,
 } from "./compartment-trigger";
-import { computeTailToolTokens, shouldTriggerChannel2 } from "./ctx-reduce-nudge";
+import { computeTailTokenEstimate, shouldTriggerChannel2 } from "./ctx-reduce-nudge";
 import { deriveTriggerBudget } from "./derive-budgets";
 import { resolveExecuteThreshold, resolveTrustedContextLimit } from "./event-resolvers";
 import type { LiveModelBySession } from "./hook-handlers";
@@ -1791,8 +1791,8 @@ export function createTransform(deps: TransformDeps) {
                 // Real-tokenizer counts from the durable tag store (injected
                 // m[0]/m[1] blocks are never tagged, so this is the injected-free
                 // live tail). reclaimable = non-dropped tool OUTPUT; liveTail =
-                // conversation + tool I/O. Falls back to the byte-approx tail walk
-                // only if the store read fails. Replaces the old byte×0.25 path.
+                // conversation + tool I/O. Falls back to a byte-approx live-tail walk
+                // only if the store read fails. Replaces the old output-only path.
                 let tailToolTokens: number;
                 let liveTailTokens: number;
                 try {
@@ -1800,8 +1800,9 @@ export function createTransform(deps: TransformDeps) {
                     tailToolTokens = agg.toolOutput;
                     liveTailTokens = agg.conversation + agg.toolCall;
                 } catch {
-                    tailToolTokens = computeTailToolTokens(messages);
-                    liveTailTokens = tailToolTokens;
+                    const estimate = computeTailTokenEstimate(messages);
+                    tailToolTokens = estimate.tailToolTokens;
+                    liveTailTokens = estimate.liveTailTokens;
                 }
                 const executeThresholdTokens = Math.round(
                     ((resolvedContextLimit ?? 0) * resolvedExecuteThresholdPct) / 100,
@@ -1845,17 +1846,25 @@ export function createTransform(deps: TransformDeps) {
                 // "big reclaimable pile" without a separate pressure gate.
                 // (executeThresholdTokens/usableTokens computed above, alongside
                 // the Channel-1 baseline they're persisted with.)
-                if (
+                const channel2MetricsKnown =
                     fullFeatureMode &&
-                    resolvedContextLimit &&
-                    resolvedExecuteThresholdPct > 0 &&
-                    shouldTriggerChannel2({
+                    resolvedContextLimit !== undefined &&
+                    resolvedContextLimit > 0 &&
+                    resolvedExecuteThresholdPct > 0;
+                if (channel2MetricsKnown) {
+                    const channel2ShouldTrigger = shouldTriggerChannel2({
                         reclaimableTokens: tailToolTokens,
                         usableTokens,
-                    })
-                ) {
+                    });
                     try {
-                        casChannel2NudgeState(db, sessionId, "", "pending");
+                        if (channel2ShouldTrigger) {
+                            casChannel2NudgeState(db, sessionId, "", "pending");
+                        } else {
+                            // Cancel stale, undelivered intents when the same
+                            // trigger predicate no longer holds; never touch an
+                            // in-flight claim or the delivered terminal cap.
+                            casChannel2NudgeState(db, sessionId, "pending", "");
+                        }
                     } catch (error) {
                         sessionLog(sessionId, "channel2 trigger CAS failed (ignored):", error);
                     }

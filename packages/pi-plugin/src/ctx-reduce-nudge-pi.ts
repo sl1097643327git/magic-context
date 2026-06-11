@@ -14,13 +14,17 @@
 //   (anomalyco/opencode#28202). Pi is single-process, so it just calls the
 //   native `pi.sendUserMessage(..., { deliverAs: "followUp" })` — no probe, no
 //   live-server client, no #28202 workaround. The `channel2_nudge_state` lease
-//   is kept purely for the one-ceiling-per-lifetime cap + the
-//   record-in-pipeline / deliver-on-`agent_end` split.
+//   is kept for the one-ceiling-per-lifetime cap + the record-in-pipeline /
+//   deliver-on-`tool_result` or `agent_end` split.
 
 import {
 	casChannel2NudgeState,
 	getChannel2NudgeState,
+	getLastNudgeLevel,
 	getLastNudgeUndropped,
+	resetLastNudgeCycle,
+	setChannel2NudgeState,
+	setLastNudgeLevel,
 	setLastNudgeUndropped,
 } from "@magic-context/core/features/magic-context/storage";
 import {
@@ -30,7 +34,9 @@ import {
 	type Channel1State,
 	computePressure,
 	decideChannel1,
+	isDroppedToolOutput,
 	shouldTriggerChannel2,
+	type TailTokenEstimate,
 	tailToolTokensFromStrings,
 	toolOutputTokens,
 } from "@magic-context/core/hooks/magic-context/ctx-reduce-nudge";
@@ -62,9 +68,10 @@ export function clearPiChannel1State(sessionId: string): void {
 }
 
 /** Mark that the agent ran ctx_reduce since the last baseline refresh (suppress self-nag). */
-export function markPiChannel1Reduced(sessionId: string): void {
+export function markPiChannel1Reduced(sessionId: string, db?: Database): void {
 	const state = channel1StateBySession.get(sessionId);
 	if (state) state.reducedSinceRefresh = true;
+	if (db) resetLastNudgeCycle(db, sessionId);
 }
 
 interface PiTextContent {
@@ -111,6 +118,72 @@ export function computeTailToolTokensPi(messages: readonly unknown[]): number {
 	return tailToolTokensFromStrings(outputs);
 }
 
+function jsonTokens(value: unknown): number {
+	if (value === undefined || value === null) return 0;
+	try {
+		return toolOutputTokens(JSON.stringify(value));
+	} catch {
+		return 0;
+	}
+}
+
+function textTokens(content: unknown): number {
+	if (typeof content === "string") return toolOutputTokens(content);
+	if (!Array.isArray(content)) return 0;
+	let tokens = 0;
+	for (const part of content) {
+		if (!part || typeof part !== "object") continue;
+		const p = part as { type?: unknown; text?: unknown; thinking?: unknown };
+		if (typeof p.text === "string") tokens += toolOutputTokens(p.text);
+		else if (typeof p.thinking === "string")
+			tokens += toolOutputTokens(p.thinking);
+		else if (p.type === "image") tokens += 1200;
+	}
+	return tokens;
+}
+
+export function computeTailTokenEstimatePi(
+	messages: readonly unknown[],
+): TailTokenEstimate {
+	let tailToolTokens = 0;
+	let liveTailTokens = 0;
+	for (const raw of messages) {
+		if (!raw || typeof raw !== "object") continue;
+		const msg = raw as { role?: unknown; content?: unknown };
+		if (msg.role === "toolResult") {
+			const outputText = Array.isArray(msg.content)
+				? toolResultText(msg.content)
+				: typeof msg.content === "string"
+					? msg.content
+					: "";
+			const outputTokens =
+				outputText && !isDroppedToolOutput(outputText)
+					? toolOutputTokens(outputText)
+					: 0;
+			tailToolTokens += outputTokens;
+			liveTailTokens += outputTokens;
+			continue;
+		}
+		if (msg.role === "assistant" && Array.isArray(msg.content)) {
+			for (const part of msg.content) {
+				if (!part || typeof part !== "object") continue;
+				const p = part as {
+					type?: unknown;
+					name?: unknown;
+					arguments?: unknown;
+				};
+				if (p.type === "toolCall") {
+					if (typeof p.name === "string")
+						liveTailTokens += toolOutputTokens(p.name);
+					liveTailTokens += jsonTokens(p.arguments);
+				}
+			}
+		}
+		liveTailTokens += textTokens(msg.content);
+	}
+	return { tailToolTokens, liveTailTokens };
+}
+
 /**
  * Channel 1 decision for a just-finished tool result. Returns the reminder
  * TextContent block to append (so the caller's `tool_result` handler can return
@@ -130,6 +203,7 @@ export function maybeChannel1ReminderForToolResult(args: {
 
 	if (toolName === "ctx_reduce") {
 		state.reducedSinceRefresh = true;
+		resetLastNudgeCycle(db, sessionId);
 		return null;
 	}
 
@@ -157,10 +231,12 @@ export function maybeChannel1ReminderForToolResult(args: {
 		pressure,
 		historyBudgetTokens: state.historyBudgetTokens,
 		lastNudgeUndropped: getLastNudgeUndropped(db, sessionId),
+		lastNudgeLevel: getLastNudgeLevel(db, sessionId),
 		hasRecentReduce: false, // handled by reducedSinceRefresh above
 	});
 
 	setLastNudgeUndropped(db, sessionId, decision.nextLastNudge);
+	setLastNudgeLevel(db, sessionId, decision.nextLastNudgeLevel);
 	if (!decision.fire) return null;
 
 	return {
@@ -224,6 +300,7 @@ export function maybeDeliverChannel2Pi(
 	//   floor. Predicate false → cancel to '' (re-armable).
 	const baseline = channel1StateBySession.get(sessionId);
 	if (!baseline) return false;
+	if (baseline.reducedSinceRefresh) return false;
 	const undropped = baseline.tailToolTokens + baseline.turnToolTokens;
 	if (
 		!shouldTriggerChannel2({
@@ -245,10 +322,35 @@ export function maybeDeliverChannel2Pi(
 		pi.sendUserMessage(buildChannel2Reminder(undropped), {
 			deliverAs,
 		});
-		casChannel2NudgeState(db, sessionId, "claimed", "delivered");
-		return true;
 	} catch {
 		casChannel2NudgeState(db, sessionId, "claimed", "pending");
+		return false;
+	}
+
+	try {
+		const confirmed = casChannel2NudgeState(
+			db,
+			sessionId,
+			"claimed",
+			"delivered",
+		);
+		if (confirmed) return true;
+		try {
+			// The nudge has already been handed to Pi; seal the cap if another
+			// process rewound the claim before our authoritative confirm.
+			setChannel2NudgeState(db, sessionId, "delivered");
+		} catch {
+			// Best-effort; never re-arm after send.
+		}
+		return false;
+	} catch {
+		// The nudge has already been handed to Pi; never re-arm on a post-send
+		// confirm failure, or a transient DB error can duplicate the one-shot cap.
+		try {
+			setChannel2NudgeState(db, sessionId, "delivered");
+		} catch {
+			// Best-effort; never re-arm after send.
+		}
 		return false;
 	}
 }

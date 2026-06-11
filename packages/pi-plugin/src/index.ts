@@ -1249,7 +1249,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			const sessionId = ctx.sessionManager.getSessionId();
 			if (typeof sessionId !== "string" || sessionId.length === 0) return;
 			if (event.toolName === "ctx_reduce") {
-				markPiChannel1Reduced(sessionId);
+				markPiChannel1Reduced(sessionId, db);
 			}
 		} catch (err) {
 			log(

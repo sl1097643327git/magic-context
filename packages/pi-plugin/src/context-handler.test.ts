@@ -81,6 +81,7 @@ describe("registerPiContextHandler", () => {
 			executeThresholdPercentage: 65,
 			lastInputTokens: 0,
 			turnToolTokens: 0,
+			usableTokens: 0,
 			reducedSinceRefresh: false,
 		});
 		trackSessionForProject("proj-evict", victim);

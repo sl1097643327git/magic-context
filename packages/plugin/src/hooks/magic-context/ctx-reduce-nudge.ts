@@ -70,7 +70,12 @@ export const CHANNEL1_SENTINEL = "<system-reminder>";
 export const TOKENS_PER_BYTE = 0.25;
 
 export const CHANNEL1_FLOOR_TOKENS = 10_000;
-export const CHANNEL1_REFIRE_TOKENS = 10_000;
+export const CHANNEL1_REFIRE_FLOOR_TOKENS = 10_000;
+
+export function channel1RefireTokens(historyBudgetTokens: number): number {
+    const scaled = Math.round(0.05 * Math.max(0, historyBudgetTokens));
+    return Math.max(CHANNEL1_REFIRE_FLOOR_TOKENS, scaled);
+}
 // severity = (undropped/budget) × pressure, both ∈ [0,1], so severity ∈ [0,1].
 // undropped and pressure are naturally correlated (a large tail dump raises
 // input → raises pressure), so the metric self-corrects: large pile at genuinely
@@ -79,6 +84,7 @@ export const CHANNEL1_REFIRE_TOKENS = 10_000;
 const S_GENTLE = 0.2;
 const S_FIRM = 0.4;
 const S_URGENT = 0.65;
+const LEVEL_RANK: Record<Channel1Level, number> = { gentle: 1, firm: 2, urgent: 3 };
 
 const DROP_SENTINELS = ["[dropped", "[truncated"];
 
@@ -140,12 +146,76 @@ export function toolOutputTokens(output: string): number {
     return Math.round(byteSize(output) * TOKENS_PER_BYTE);
 }
 
+export interface TailTokenEstimate {
+    /** Non-dropped tool-output tokens: reclaimable by ctx_reduce. */
+    tailToolTokens: number;
+    /** Approximate full live-tail tokens: conversation + tool calls/results. */
+    liveTailTokens: number;
+}
+
+function stringTokens(value: string): number {
+    return Math.round(byteSize(value) * TOKENS_PER_BYTE);
+}
+
+function unknownJsonTokens(value: unknown): number {
+    if (value === undefined || value === null) return 0;
+    try {
+        return stringTokens(JSON.stringify(value));
+    } catch {
+        return 0;
+    }
+}
+
+function textFromPart(part: unknown): string {
+    if (part === null || typeof part !== "object") return "";
+    const p = part as { text?: unknown; content?: unknown; thinking?: unknown };
+    if (typeof p.text === "string") return p.text;
+    if (typeof p.content === "string") return p.content;
+    if (typeof p.thinking === "string") return p.thinking;
+    return "";
+}
+
+/**
+ * Fallback when the tag-token aggregate is temporarily unavailable. It estimates
+ * both reclaimable tool output and the full live tail; using only tool output for
+ * liveTail makes usableTokens look too small and can arm Channel 2 prematurely.
+ */
+export function computeTailTokenEstimate(messages: MessageLike[]): TailTokenEstimate {
+    let toolOutputTokensTotal = 0;
+    let toolCallTokensTotal = 0;
+    let conversationTokens = 0;
+
+    for (const message of messages) {
+        for (const part of message.parts) {
+            if (isToolPartWithStringOutput(part)) {
+                const outputTokens = isDroppedToolOutput(part.state.output)
+                    ? 0
+                    : toolOutputTokens(part.state.output);
+                const inputTokens = unknownJsonTokens(
+                    (part as { state?: { input?: unknown } }).state?.input,
+                );
+                toolOutputTokensTotal += outputTokens;
+                toolCallTokensTotal += outputTokens + inputTokens;
+                continue;
+            }
+            conversationTokens += stringTokens(textFromPart(part));
+        }
+    }
+
+    return {
+        tailToolTokens: toolOutputTokensTotal,
+        liveTailTokens: conversationTokens + toolCallTokensTotal,
+    };
+}
+
 export interface Channel1Decision {
     fire: boolean;
     level: Channel1Level;
     undroppedTokens: number;
     /** Value to persist into `last_nudge_undropped` (caller writes it). */
     nextLastNudge: number;
+    /** Value to persist into `last_nudge_level` (caller writes it). */
+    nextLastNudgeLevel: Channel1Level | "";
 }
 
 /**
@@ -158,18 +228,23 @@ export function decideChannel1(input: {
     pressure: number;
     historyBudgetTokens: number;
     lastNudgeUndropped: number;
+    lastNudgeLevel: Channel1Level | "";
     hasRecentReduce: boolean;
 }): Channel1Decision {
     const { undroppedTokens, pressure, historyBudgetTokens, hasRecentReduce } = input;
 
-    // Re-arm: if the agent reduced (undropped fell below the last-fire mark),
-    // reset the cadence baseline so re-accumulation can nudge again.
-    const lastNudge = undroppedTokens < input.lastNudgeUndropped ? 0 : input.lastNudgeUndropped;
+    // Re-arm: once the agent has reduced (or the measured tail fell below the
+    // last-fire mark), clear BOTH cadence and band state so the next accumulation
+    // starts a fresh gentle→firm→urgent cycle instead of suppressing new signal.
+    const resetCycle = hasRecentReduce || undroppedTokens < input.lastNudgeUndropped;
+    const lastNudge = resetCycle ? 0 : input.lastNudgeUndropped;
+    const lastLevel = resetCycle ? "" : input.lastNudgeLevel;
     const quiet = (): Channel1Decision => ({
         fire: false,
         level: "gentle",
         undroppedTokens,
         nextLastNudge: lastNudge,
+        nextLastNudgeLevel: lastLevel,
     });
 
     // Post-ctx_reduce self-nag suppression: never nudge on a turn where the
@@ -178,10 +253,6 @@ export function decideChannel1(input: {
 
     // Floor: below this much reclaimable space, never fire (working room).
     if (undroppedTokens < CHANNEL1_FLOOR_TOKENS) return quiet();
-
-    // Cadence: only re-fire once undropped has grown another interval since the
-    // last fire (or since a reset).
-    if (undroppedTokens < lastNudge + CHANNEL1_REFIRE_TOKENS) return quiet();
 
     const budget = historyBudgetTokens > 0 ? historyBudgetTokens : undroppedTokens || 1;
     const severity = (undroppedTokens / budget) * pressure;
@@ -193,7 +264,25 @@ export function decideChannel1(input: {
     else if (severity >= S_FIRM) level = "firm";
     else level = "gentle";
 
-    return { fire: true, level, undroppedTokens, nextLastNudge: undroppedTokens };
+    if (lastLevel === "") {
+        // Initial fire cadence scales with the history budget so wide-context
+        // sessions don't hear a reminder every tiny 10k-token increment.
+        if (undroppedTokens < lastNudge + channel1RefireTokens(historyBudgetTokens)) {
+            return quiet();
+        }
+    } else if (LEVEL_RANK[level] <= LEVEL_RANK[lastLevel]) {
+        // Once a band has fired, repetition at that same band is noise; only an
+        // escalation carries new information before the next ctx_reduce reset.
+        return quiet();
+    }
+
+    return {
+        fire: true,
+        level,
+        undroppedTokens,
+        nextLastNudge: undroppedTokens,
+        nextLastNudgeLevel: level,
+    };
 }
 
 /** Compute pressure from prospective per-turn token estimates. */
@@ -245,9 +334,9 @@ export function buildChannel2Reminder(undroppedTokens: number): string {
     const amount = approxThousands(undroppedTokens);
     return (
         `<system-reminder>\n` +
-        `Context is approaching the comparting threshold and ~${amount} tokens of tool output ` +
-        `remain unreduced. Before continuing, drop everything you no longer need with ctx_reduce ` +
-        `so the next steps keep working in a lean context instead of forcing an automatic history comparting.\n` +
+        `Routine context housekeeping is near: a large span of this session will be comparted soon, ` +
+        `and ~${amount} tokens of tool output remain unreduced. Drop spent outputs with ctx_reduce ` +
+        `first so the archived span is the part that matters.\n` +
         `</system-reminder>`
     );
 }
@@ -269,8 +358,8 @@ export function buildChannel1Reminder(level: Channel1Level, undroppedTokens: num
             break;
         case "urgent":
             body =
-                `~${amount} tokens of unreduced tool output and context is approaching the compaction threshold. ` +
-                `Reduce now with ctx_reduce to avoid a forced history comparting.`;
+                `~${amount} tokens of unreduced tool output remain. ` +
+                `A large span of this session will be comparted soon; drop spent outputs with ctx_reduce first so the archived span is the part that matters.`;
             break;
     }
     return `\n\n<system-reminder>\n${body}\n</system-reminder>`;

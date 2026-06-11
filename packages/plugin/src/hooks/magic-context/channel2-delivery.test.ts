@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, mock } from "bun:test";
 import {
     closeDatabase,
+    getChannel2NudgeClaimedAt,
     getChannel2NudgeState,
     openDatabase,
     setChannel2NudgeState,
@@ -90,6 +91,24 @@ describe("maybeDeliverChannel2", () => {
         expect(getChannel2NudgeState(db, "ses-stale")).toBe("");
     });
 
+    it("boot-heals only stale claimed leases, not fresh live claims", () => {
+        useTempDataHome("ch2-ttl-heal-");
+        let db = openDatabase()!;
+        setChannel2NudgeState(db, "ses-fresh-claim", "claimed");
+        setChannel2NudgeState(db, "ses-stale-claim", "claimed");
+        db.prepare(
+            "UPDATE session_meta SET channel2_nudge_claimed_at = ? WHERE session_id = ?",
+        ).run(Date.now() - 180_000, "ses-stale-claim");
+
+        closeDatabase();
+        db = openDatabase()!;
+
+        expect(getChannel2NudgeState(db, "ses-fresh-claim")).toBe("claimed");
+        expect(getChannel2NudgeClaimedAt(db, "ses-fresh-claim")).toBeGreaterThan(0);
+        expect(getChannel2NudgeState(db, "ses-stale-claim")).toBe("pending");
+        expect(getChannel2NudgeClaimedAt(db, "ses-stale-claim")).toBe(0);
+    });
+
     it("delivers via the live-server client and consumes the one-shot cap", async () => {
         useTempDataHome("ch2-deliver-");
         const db = openDatabase()!;
@@ -127,6 +146,39 @@ describe("maybeDeliverChannel2", () => {
         expect(callArg.body.parts[0]!.text).toContain("ctx_reduce");
         // One-shot cap consumed.
         expect(getChannel2NudgeState(db, "ses-go")).toBe("delivered");
+    });
+
+    it("treats a lost post-send confirm CAS as unconfirmed without reverting to pending", async () => {
+        useTempDataHome("ch2-confirm-lost-");
+        const db = openDatabase()!;
+        setChannel2NudgeState(db, "ses-confirm-lost", "pending");
+        setLiveServerWakeAvailable(SERVER, true);
+
+        const promptAsync = mock(async () => {
+            // Simulate a sibling process consuming/cancelling the claim after the
+            // send returns but before this process can confirm claimed→delivered.
+            setChannel2NudgeState(db, "ses-confirm-lost", "");
+        });
+        mock.module("../../shared/live-server-client", () => ({
+            getLiveServerClient: () => ({ session: { promptAsync, messages: async () => [] } }),
+            hasFreshProbe: () => true,
+            probeServerReachable: async () => true,
+            useLiveServerWake: () => true,
+            setLiveServerWakeAvailable: () => {},
+        }));
+
+        const { maybeDeliverChannel2: deliver } = await import("./channel2-delivery");
+        const delivered = await deliver("ses-confirm-lost", {
+            db,
+            serverUrl: SERVER,
+            directory: ".",
+            reclaimableTokens: 30_000,
+            usableTokens: 60_000,
+        });
+
+        expect(promptAsync).toHaveBeenCalledTimes(1);
+        expect(delivered).toBe(false);
+        expect(getChannel2NudgeState(db, "ses-confirm-lost")).toBe("delivered");
     });
 
     it("reverts claimed→pending on send failure (cap not burned)", async () => {

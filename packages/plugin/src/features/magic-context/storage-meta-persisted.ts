@@ -544,13 +544,19 @@ export function clearEmergencyDropSample(db: Database, sessionId: string): void 
     })();
 }
 
-// ---- Channel 1 (in-turn tool-output ctx_reduce nudge) cadence watermark ----
-// `last_nudge_undropped` records the `undropped` byte estimate at the moment
-// Channel 1 last fired. We only re-fire once undropped has grown by another
-// CHANNEL1_REFIRE_INTERVAL since then, and reset it to 0 when undropped falls
-// (post-ctx_reduce/compaction) so re-accumulation re-arms the nudge.
+// ---- Channel 1 (in-turn tool-output ctx_reduce nudge) cadence + band state ----
+// `last_nudge_undropped` records the `undropped` estimate when Channel 1 last
+// fired; `last_nudge_level` records the highest band already surfaced in the
+// current cycle. Both reset after ctx_reduce so the next accumulation can start
+// a fresh gentle→firm→urgent sequence without repeating the same band.
+export type PersistedChannel1NudgeLevel = "" | "gentle" | "firm" | "urgent";
+
 interface PersistedLastNudgeUndroppedRow {
     last_nudge_undropped: number;
+}
+
+interface PersistedLastNudgeLevelRow {
+    last_nudge_level: string;
 }
 
 function isLastNudgeUndroppedRow(row: unknown): row is PersistedLastNudgeUndroppedRow {
@@ -559,6 +565,18 @@ function isLastNudgeUndroppedRow(row: unknown): row is PersistedLastNudgeUndropp
         row !== null &&
         typeof (row as PersistedLastNudgeUndroppedRow).last_nudge_undropped === "number"
     );
+}
+
+function isLastNudgeLevelRow(row: unknown): row is PersistedLastNudgeLevelRow {
+    return (
+        typeof row === "object" &&
+        row !== null &&
+        typeof (row as PersistedLastNudgeLevelRow).last_nudge_level === "string"
+    );
+}
+
+function normalizeLastNudgeLevel(value: string): PersistedChannel1NudgeLevel {
+    return value === "gentle" || value === "firm" || value === "urgent" ? value : "";
 }
 
 export function getLastNudgeUndropped(db: Database, sessionId: string): number {
@@ -578,18 +596,55 @@ export function setLastNudgeUndropped(db: Database, sessionId: string, value: nu
     })();
 }
 
+export function getLastNudgeLevel(db: Database, sessionId: string): PersistedChannel1NudgeLevel {
+    const result = db
+        .prepare("SELECT last_nudge_level FROM session_meta WHERE session_id = ?")
+        .get(sessionId);
+    return isLastNudgeLevelRow(result) ? normalizeLastNudgeLevel(result.last_nudge_level) : "";
+}
+
+export function setLastNudgeLevel(
+    db: Database,
+    sessionId: string,
+    value: PersistedChannel1NudgeLevel,
+): void {
+    db.transaction(() => {
+        ensureSessionMetaRow(db, sessionId);
+        db.prepare("UPDATE session_meta SET last_nudge_level = ? WHERE session_id = ?").run(
+            normalizeLastNudgeLevel(value),
+            sessionId,
+        );
+    })();
+}
+
+export function resetLastNudgeCycle(db: Database, sessionId: string): void {
+    db.transaction(() => {
+        ensureSessionMetaRow(db, sessionId);
+        db.prepare(
+            "UPDATE session_meta SET last_nudge_undropped = 0, last_nudge_level = '' WHERE session_id = ?",
+        ).run(sessionId);
+    })();
+}
+
 // ---- Channel 2 (synthetic-user-message ceiling) one-shot lease/outbox ----
 // State machine stored as a single string in `channel2_nudge_state`:
 //   ''         — no intent (initial)
 //   'pending'  — transform recorded the ceiling condition; deliver on next event
-//   'claimed'  — a delivery attempt is in flight (CAS-claimed before send)
+//   'claimed'  — a delivery attempt is in flight (CAS-claimed before send);
+//                `channel2_nudge_claimed_at` stores the lease timestamp so boot
+//                recovery only rewinds stale claims, never a live sibling send.
 //   'delivered'— confirmed sent; the one ceiling nudge is consumed (terminal)
 // On send failure the caller reverts 'claimed' -> 'pending' so a transient error
-// does not permanently burn the single ceiling nudge.
+// does not permanently burn the single ceiling nudge. After send succeeds, a
+// confirm failure must NOT re-arm; callers leave the lease non-pending.
 export type Channel2NudgeState = "" | "pending" | "claimed" | "delivered";
 
 interface PersistedChannel2StateRow {
     channel2_nudge_state: string;
+}
+
+interface PersistedChannel2ClaimRow {
+    channel2_nudge_claimed_at: number;
 }
 
 function isChannel2StateRow(row: unknown): row is PersistedChannel2StateRow {
@@ -609,6 +664,17 @@ export function getChannel2NudgeState(db: Database, sessionId: string): Channel2
     return raw === "pending" || raw === "claimed" || raw === "delivered" ? raw : "";
 }
 
+export function getChannel2NudgeClaimedAt(db: Database, sessionId: string): number {
+    const result = db
+        .prepare("SELECT channel2_nudge_claimed_at FROM session_meta WHERE session_id = ?")
+        .get(sessionId);
+    return typeof result === "object" &&
+        result !== null &&
+        typeof (result as PersistedChannel2ClaimRow).channel2_nudge_claimed_at === "number"
+        ? (result as PersistedChannel2ClaimRow).channel2_nudge_claimed_at
+        : 0;
+}
+
 export function setChannel2NudgeState(
     db: Database,
     sessionId: string,
@@ -616,10 +682,10 @@ export function setChannel2NudgeState(
 ): void {
     db.transaction(() => {
         ensureSessionMetaRow(db, sessionId);
-        db.prepare("UPDATE session_meta SET channel2_nudge_state = ? WHERE session_id = ?").run(
-            state,
-            sessionId,
-        );
+        const claimedAt = state === "claimed" ? Date.now() : 0;
+        db.prepare(
+            "UPDATE session_meta SET channel2_nudge_state = ?, channel2_nudge_claimed_at = ? WHERE session_id = ?",
+        ).run(state, claimedAt, sessionId);
     })();
 }
 
@@ -637,11 +703,12 @@ export function casChannel2NudgeState(
     let changed = false;
     db.transaction(() => {
         ensureSessionMetaRow(db, sessionId);
+        const claimedAt = to === "claimed" ? Date.now() : 0;
         const result = db
             .prepare(
-                "UPDATE session_meta SET channel2_nudge_state = ? WHERE session_id = ? AND channel2_nudge_state = ?",
+                "UPDATE session_meta SET channel2_nudge_state = ?, channel2_nudge_claimed_at = ? WHERE session_id = ? AND channel2_nudge_state = ?",
             )
-            .run(to, sessionId, from);
+            .run(to, claimedAt, sessionId, from);
         changed = (result.changes ?? 0) > 0;
     })();
     return changed;

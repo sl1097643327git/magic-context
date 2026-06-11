@@ -552,7 +552,9 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       last_nudge_tokens INTEGER DEFAULT 0,
       last_nudge_band TEXT DEFAULT '',
       last_nudge_undropped INTEGER DEFAULT 0,
+      last_nudge_level TEXT DEFAULT '',
       channel2_nudge_state TEXT DEFAULT '',
+      channel2_nudge_claimed_at INTEGER DEFAULT 0,
       last_emergency_input_sample INTEGER DEFAULT 0,
       last_transform_error TEXT DEFAULT '',
       nudge_anchor_message_id TEXT DEFAULT '',
@@ -730,7 +732,9 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
 
     ensureColumn(db, "session_meta", "last_nudge_band", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "last_nudge_undropped", "INTEGER DEFAULT 0");
+    ensureColumn(db, "session_meta", "last_nudge_level", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "channel2_nudge_state", "TEXT DEFAULT ''");
+    ensureColumn(db, "session_meta", "channel2_nudge_claimed_at", "INTEGER DEFAULT 0");
     ensureColumn(db, "session_meta", "last_emergency_input_sample", "INTEGER DEFAULT 0");
     ensureColumn(db, "session_meta", "last_transform_error", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "nudge_anchor_message_id", "TEXT DEFAULT ''");
@@ -1039,31 +1043,27 @@ export function healAllNullColumns(db: Database): void {
     healMissingMemoryBlockIds(db);
 }
 
+const CHANNEL2_CLAIM_TTL_MS = 120_000;
+
 /**
  * Boot heal for a wedged Channel-2 ceiling-nudge lease.
  *
- * The Channel-2 delivery path CAS-claims `channel2_nudge_state` ('pending' →
- * 'claimed') BEFORE sending the synthetic user message, then either confirms
- * ('claimed' → 'delivered') or reverts on a transient failure ('claimed' →
- * 'pending'). If the process crashes in the window between the claim and the
- * confirm/revert, the row is stranded at 'claimed' — and since delivery only
- * acts on 'pending', the session's one-shot ceiling nudge is permanently burned
- * with nothing ever sent.
- *
- * A 'claimed' value that survives a process restart can only mean exactly that
- * crash (the claim and its resolution happen synchronously within one delivery
- * call, never spanning a reboot). So on boot we reset any lingering 'claimed'
- * back to 'pending' so the next near-threshold turn re-attempts. Single targeted
- * UPDATE; runs once per process from the fresh-open path. Best-effort.
+ * The delivery path CAS-claims `pending → claimed` before sending the synthetic
+ * user message. A crash can strand that claim and burn the one-shot cap, but a
+ * sibling process can also be legitimately mid-send against the shared DB. The
+ * claimed_at lease timestamp is the liveness boundary: only old/legacy claims are
+ * rewound to `pending`; fresh claims are left alone so boot recovery never steals
+ * an in-flight delivery.
  */
 function healWedgedChannel2Claims(db: Database): void {
     try {
+        const staleBefore = Date.now() - CHANNEL2_CLAIM_TTL_MS;
         db.prepare(
-            "UPDATE session_meta SET channel2_nudge_state = 'pending' WHERE channel2_nudge_state = 'claimed'",
-        ).run();
+            "UPDATE session_meta SET channel2_nudge_state = 'pending', channel2_nudge_claimed_at = 0 WHERE channel2_nudge_state = 'claimed' AND (channel2_nudge_claimed_at IS NULL OR channel2_nudge_claimed_at = 0 OR channel2_nudge_claimed_at <= ?)",
+        ).run(staleBefore);
     } catch {
-        // Column missing on a very fresh DB before ensureColumn/migration v31
-        // adds it — the migration seeds it as '' so there's nothing to heal.
+        // Columns may be missing on a very fresh DB before ensureColumn/migration
+        // adds them; fresh rows seed the state as '' so there is nothing to heal.
     }
 }
 
@@ -1095,6 +1095,7 @@ function healNullTextColumns(db: Database): void {
     const columns: Array<[string, string]> = [
         ["cache_ttl", ""],
         ["last_nudge_band", ""],
+        ["last_nudge_level", ""],
         ["last_transform_error", ""],
         ["nudge_anchor_message_id", ""],
         ["nudge_anchor_text", ""],
@@ -1149,6 +1150,7 @@ function healNullIntegerColumns(db: Database): void {
         ["new_work_tokens", 0],
         ["total_input_tokens", 0],
         ["last_emergency_input_sample", 0],
+        ["channel2_nudge_claimed_at", 0],
         ["last_usage_context_limit", 0],
         ["prior_boundary_ordinal", 1],
         ["protected_tail_policy_version", 0],

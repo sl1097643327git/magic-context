@@ -5,7 +5,9 @@ import {
     CHANNEL1_SENTINEL,
     CHANNEL2_MIN_RECLAIMABLE,
     CHANNEL2_USABLE_FRACTION,
+    channel1RefireTokens,
     computePressure,
+    computeTailTokenEstimate,
     computeTailToolTokens,
     decideChannel1,
     shouldTriggerChannel2,
@@ -38,12 +40,37 @@ describe("computeTailToolTokens", () => {
     });
 });
 
+describe("computeTailTokenEstimate", () => {
+    it("estimates reclaimable tool output separately from the full live tail", () => {
+        const msg = {
+            info: { id: "m", role: "assistant" },
+            parts: [
+                { type: "text", text: "conversation ".repeat(1000) },
+                {
+                    type: "tool",
+                    state: { input: { cmd: "echo hi" }, output: "tool output ".repeat(1000) },
+                },
+            ],
+        } as unknown as MessageLike;
+
+        const estimate = computeTailTokenEstimate([msg]);
+
+        expect(estimate.tailToolTokens).toBeGreaterThan(0);
+        expect(estimate.liveTailTokens).toBeGreaterThan(estimate.tailToolTokens);
+    });
+});
+
 describe("decideChannel1 — trajectories", () => {
-    const base = { historyBudgetTokens: BUDGET, lastNudgeUndropped: 0, hasRecentReduce: false };
+    const base = {
+        historyBudgetTokens: BUDGET,
+        lastNudgeUndropped: 0,
+        lastNudgeLevel: "" as const,
+        hasRecentReduce: false,
+    };
 
     it("early reading: large undropped, low pressure → silent", () => {
         const d = decideChannel1({ ...base, undroppedTokens: 40_000, pressure: 0.3 });
-        // severity = 0.4 * 0.3 = 0.12 < 0.35, and ceil override needs pressure>=0.5
+        // severity = 0.4 * 0.3 = 0.12 < gentle
         expect(d.fire).toBe(false);
     });
     it("disciplined small working set at high pressure → silent", () => {
@@ -82,15 +109,56 @@ describe("decideChannel1 — trajectories", () => {
         });
         expect(d.fire).toBe(false);
     });
-    it("cadence: does not re-fire until undropped grows another interval", () => {
+    it("budget-scaled cadence uses a 5% interval with a 10k floor", () => {
+        expect(channel1RefireTokens(100_000)).toBe(10_000);
+        expect(channel1RefireTokens(1_000_000)).toBe(50_000);
+    });
+    it("cadence: the initial fire waits for the budget-scaled interval", () => {
         const d = decideChannel1({
             ...base,
-            undroppedTokens: 55_000,
-            pressure: 0.9,
-            lastNudgeUndropped: 50_000,
+            historyBudgetTokens: 1_000_000,
+            undroppedTokens: 40_000,
+            pressure: 10,
         });
-        // grew only 5k < 10k interval → silent
+        // 5% of a 1M-token history budget is 50k, so a 40k pile is below cadence.
         expect(d.fire).toBe(false);
+    });
+    it("band suppression: does not repeat the same level on cadence alone", () => {
+        const d = decideChannel1({
+            ...base,
+            undroppedTokens: 60_000,
+            pressure: 0.5,
+            lastNudgeUndropped: 40_000,
+            lastNudgeLevel: "gentle",
+        });
+        // severity = 0.30 (still gentle); grew 20k but same-band repetition is noise.
+        expect(d.fire).toBe(false);
+    });
+    it("band suppression: fires immediately when severity escalates", () => {
+        const d = decideChannel1({
+            ...base,
+            undroppedTokens: 50_000,
+            pressure: 0.8,
+            lastNudgeUndropped: 45_000,
+            lastNudgeLevel: "gentle",
+        });
+        // severity = 0.40 (firm), an escalation even though cadence grew only 5k.
+        expect(d.fire).toBe(true);
+        expect(d.level).toBe("firm");
+        expect(d.nextLastNudgeLevel).toBe("firm");
+    });
+    it("post-ctx_reduce reset clears the persisted level", () => {
+        const d = decideChannel1({
+            ...base,
+            undroppedTokens: 80_000,
+            pressure: 0.9,
+            lastNudgeUndropped: 70_000,
+            lastNudgeLevel: "urgent",
+            hasRecentReduce: true,
+        });
+        expect(d.fire).toBe(false);
+        expect(d.nextLastNudge).toBe(0);
+        expect(d.nextLastNudgeLevel).toBe("");
     });
     it("cadence re-arms after a reduce drops undropped below last mark", () => {
         const d = decideChannel1({
@@ -98,11 +166,13 @@ describe("decideChannel1 — trajectories", () => {
             undroppedTokens: 30_000,
             pressure: 0.9,
             lastNudgeUndropped: 80_000,
+            lastNudgeLevel: "urgent",
         });
-        // undropped fell below last mark → reset to 0 → 30k ≥ 0+10k.
+        // undropped fell below last mark → reset to 0/none → 30k ≥ 0+10k.
         // severity = 0.3 * 0.9 = 0.27 ≥ 0.2 → gentle, fires again.
         expect(d.fire).toBe(true);
         expect(d.nextLastNudge).toBe(30_000);
+        expect(d.nextLastNudgeLevel).toBe("gentle");
     });
 });
 
