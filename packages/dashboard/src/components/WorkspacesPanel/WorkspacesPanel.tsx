@@ -182,7 +182,7 @@ export default function WorkspacesPanel() {
         </Show>
 
         <Show when={ready() === true}>
-          <div style={{ padding: "0 20px 16px", display: "flex", gap: "8px", "flex-wrap": "wrap" }}>
+          <div style={{ padding: "0 0 16px", display: "flex", gap: "8px", "flex-wrap": "wrap" }}>
             <input
               class="search-input"
               type="text"
@@ -207,7 +207,7 @@ export default function WorkspacesPanel() {
             </div>
           </Show>
 
-          <div class="list-gap" style={{ padding: "0 20px" }}>
+          <div class="list-gap">
             <Index each={workspaces() ?? []}>
               {(ws) => {
                 const item = () => ws() as WorkspaceListItem;
