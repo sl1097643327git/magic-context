@@ -27,6 +27,12 @@ import {
     queueMemoryMutation,
     storedPathBelongsToIdentity,
 } from "../../features/magic-context/storage";
+import {
+    expandWorkspaceIdentitySetWithAliases,
+    resolveStoredPathWorkspaceIdentity,
+    resolveWorkspaceIdentitySet,
+    storedPathBelongsToWorkspace,
+} from "../../features/magic-context/workspaces";
 import { sessionLog } from "../../shared/logger";
 import { CTX_MEMORY_DESCRIPTION, CTX_MEMORY_TOOL_NAME, DEFAULT_SEARCH_LIMIT } from "./constants";
 import {
@@ -281,6 +287,32 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
             // runs `opencode -s <id>` from outside the project.
             const projectPath = deps.resolveProjectPath(toolContext.directory);
             await deps.ensureProjectRegistered?.(toolContext.directory, deps.db);
+            const workspaceIdentitySet = resolveWorkspaceIdentitySet(deps.db, projectPath);
+            const expandedWorkspace = expandWorkspaceIdentitySetWithAliases(
+                deps.db,
+                workspaceIdentitySet.identities,
+            );
+            const workspaceVisibleIdentities =
+                workspaceIdentitySet.identities.length > 1
+                    ? expandedWorkspace.expandedIdentities
+                    : workspaceIdentitySet.identities;
+            const memoryVisibleToTool = (memory: Memory) =>
+                workspaceIdentitySet.identities.length > 1
+                    ? storedPathBelongsToWorkspace(
+                          memory.projectPath,
+                          workspaceIdentitySet.identities,
+                          workspaceVisibleIdentities,
+                          expandedWorkspace.canonicalIdentityByStoredPath,
+                      )
+                    : memoryBelongsToProject(memory, projectPath);
+            const targetIdentityForStoredPath = (rawProjectPath: string) =>
+                workspaceIdentitySet.identities.length > 1
+                    ? (resolveStoredPathWorkspaceIdentity(
+                          rawProjectPath,
+                          workspaceIdentitySet.identities,
+                          expandedWorkspace.canonicalIdentityByStoredPath,
+                      ) ?? projectIdentityForStoredPath(rawProjectPath))
+                    : projectIdentityForStoredPath(rawProjectPath);
             const embeddingSnapshot = getProjectEmbeddingSnapshot(projectPath);
             if (
                 embeddingSnapshot
@@ -362,7 +394,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
 
                 const rawProjectPath = projectPathForMemoryId(deps.db, updateId);
                 const memory = getMemoryById(deps.db, updateId);
-                if (!memory || !rawProjectPath || !memoryBelongsToProject(memory, projectPath)) {
+                if (!memory || !rawProjectPath || !memoryVisibleToTool(memory)) {
                     return `Error: Memory with ID ${updateId} was not found.`;
                 }
                 if (toolContext.agent !== DREAMER_AGENT && !isPrimaryMutableMemory(memory)) {
@@ -372,7 +404,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 const normalizedHash = computeNormalizedHash(content);
                 const duplicate = getMemoryByHash(
                     deps.db,
-                    projectPath,
+                    targetIdentityForStoredPath(rawProjectPath),
                     memory.category,
                     normalizedHash,
                 );
@@ -380,7 +412,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     return `Error: Memory content already exists as ID ${duplicate.id}; merge or archive duplicates instead.`;
                 }
 
-                const projectIdentity = projectIdentityForStoredPath(rawProjectPath);
+                const projectIdentity = targetIdentityForStoredPath(rawProjectPath);
                 deps.db.transaction(() => {
                     updateMemoryContentInCurrentTransaction(
                         deps.db,
@@ -399,7 +431,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 queueMemoryEmbedding({
                     deps,
                     sessionId: toolContext.sessionID,
-                    projectPath,
+                    projectPath: projectIdentity,
                     memoryId: memory.id,
                     content,
                 });
@@ -594,11 +626,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 for (const memoryId of archiveIds) {
                     const rawProjectPath = projectPathForMemoryId(deps.db, memoryId);
                     const memory = getMemoryById(deps.db, memoryId);
-                    if (
-                        !memory ||
-                        !rawProjectPath ||
-                        !memoryBelongsToProject(memory, projectPath)
-                    ) {
+                    if (!memory || !rawProjectPath || !memoryVisibleToTool(memory)) {
                         return `Error: Memory with ID ${memoryId} was not found.`;
                     }
                     if (toolContext.agent !== DREAMER_AGENT && !isPrimaryMutableMemory(memory)) {
@@ -609,7 +637,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     }
                     targets.push({
                         memoryId,
-                        projectIdentity: projectIdentityForStoredPath(rawProjectPath),
+                        projectIdentity: targetIdentityForStoredPath(rawProjectPath),
                     });
                 }
 

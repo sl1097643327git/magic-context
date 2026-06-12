@@ -9,15 +9,24 @@ import { containsProbeVerbatim, extractLiteralProbes } from "./literal-probes";
 import {
     ensureMemoryEmbeddings,
     getMemoriesByProject,
+    getMemoriesByProjects,
     getProjectEmbeddings,
     type Memory,
     peekProjectEmbeddings,
     searchMemoriesFTS,
+    searchMemoriesFTSUnion,
     updateMemoryRetrievalCount,
 } from "./memory";
 import { cosineSimilarity } from "./memory/cosine-similarity";
 import { embedText, getProjectEmbeddingSnapshot, isEmbeddingEnabled } from "./memory/embedding";
 import { sanitizeFtsQuery } from "./memory/storage-memory-fts";
+import {
+    expandWorkspaceIdentitySetWithAliases,
+    resolveStoredPathWorkspaceIdentity,
+    resolveWorkspaceIdentitySet,
+    sourceNameForMemory,
+    type WorkspaceIdentitySet,
+} from "./workspaces";
 
 const DEFAULT_UNIFIED_SEARCH_LIMIT = 10;
 const FTS_SEMANTIC_CANDIDATE_LIMIT = 50;
@@ -101,6 +110,7 @@ export interface MemorySearchResult {
     memoryId: number;
     category: string;
     matchType: "semantic" | "fts" | "hybrid";
+    sourceName?: string;
 }
 
 export interface MessageSearchResult {
@@ -163,6 +173,62 @@ function previewText(text: string): string {
         return normalized;
     }
     return `${normalized.slice(0, RESULT_PREVIEW_LIMIT - 1).trimEnd()}…`;
+}
+
+interface SearchWorkspaceContext {
+    identities: string[];
+    expandedIdentities: string[];
+    namesByIdentity: Map<string, string>;
+    canonicalIdentityByStoredPath: Map<string, string>;
+    isWorkspaced: boolean;
+}
+
+function resolveSearchWorkspaceContext(
+    db: Database,
+    projectPath: string,
+    identitySet?: WorkspaceIdentitySet,
+): SearchWorkspaceContext {
+    const resolved = identitySet ?? resolveWorkspaceIdentitySet(db, projectPath);
+    const expanded = expandWorkspaceIdentitySetWithAliases(db, resolved.identities);
+    return {
+        identities: resolved.identities,
+        expandedIdentities:
+            resolved.identities.length > 1 ? expanded.expandedIdentities : resolved.identities,
+        namesByIdentity: resolved.namesByIdentity,
+        canonicalIdentityByStoredPath:
+            resolved.identities.length > 1
+                ? expanded.canonicalIdentityByStoredPath
+                : new Map(resolved.identities.map((identity) => [identity, identity])),
+        isWorkspaced: resolved.identities.length > 1,
+    };
+}
+
+function memoryWorkspaceIdentity(memory: Memory, workspace: SearchWorkspaceContext): string | null {
+    return resolveStoredPathWorkspaceIdentity(
+        memory.projectPath,
+        workspace.identities,
+        workspace.canonicalIdentityByStoredPath,
+    );
+}
+
+function sourceNamesForSearchMemories(args: {
+    memories: readonly Memory[];
+    projectPath: string;
+    workspace: SearchWorkspaceContext;
+}): Map<number, string> | undefined {
+    if (!args.workspace.isWorkspaced) return undefined;
+    const sourceNames = new Map<number, string>();
+    for (const memory of args.memories) {
+        const source = sourceNameForMemory(
+            memory.projectPath,
+            args.projectPath,
+            args.workspace.identities,
+            args.workspace.namesByIdentity,
+            args.workspace.canonicalIdentityByStoredPath,
+        );
+        if (source) sourceNames.set(memory.id, source);
+    }
+    return sourceNames.size > 0 ? sourceNames : undefined;
 }
 
 function getMessageSearchStatement(db: Database): PreparedStatement {
@@ -231,6 +297,8 @@ async function getSemanticScores(args: {
      *  same vector to memory + git-commit searches so we never embed the
      *  same query twice in parallel. */
     queryEmbedding: Float32Array | null;
+    queryModelId?: string | null;
+    workspace?: SearchWorkspaceContext;
 }): Promise<Map<number, number>> {
     const semanticScores = new Map<number, number>();
 
@@ -238,24 +306,71 @@ async function getSemanticScores(args: {
         return semanticScores;
     }
 
-    const cachedEmbeddings = getProjectEmbeddings(args.db, args.projectPath);
-    const embeddings = await ensureMemoryEmbeddings({
-        db: args.db,
-        projectIdentity: args.projectPath,
-        memories: args.memories,
-        existingEmbeddings: cachedEmbeddings,
-    });
+    if (!args.workspace?.isWorkspaced) {
+        const cachedEmbeddings = getProjectEmbeddings(args.db, args.projectPath);
+        const embeddings = await ensureMemoryEmbeddings({
+            db: args.db,
+            projectIdentity: args.projectPath,
+            memories: args.memories,
+            existingEmbeddings: cachedEmbeddings,
+        });
 
-    for (const memory of args.memories) {
-        const memoryEmbedding = embeddings.get(memory.id);
-        if (!memoryEmbedding) {
-            continue;
+        for (const memory of args.memories) {
+            const memoryEmbedding = embeddings.get(memory.id);
+            if (!memoryEmbedding) {
+                continue;
+            }
+
+            semanticScores.set(
+                memory.id,
+                normalizeCosineScore(
+                    cosineSimilarity(args.queryEmbedding, memoryEmbedding.embedding),
+                ),
+            );
         }
 
-        semanticScores.set(
-            memory.id,
-            normalizeCosineScore(cosineSimilarity(args.queryEmbedding, memoryEmbedding)),
-        );
+        return semanticScores;
+    }
+
+    if (!args.queryModelId || args.queryModelId === "off") {
+        return semanticScores;
+    }
+
+    const workspace = args.workspace;
+    const memoriesByIdentity = new Map<string, Memory[]>();
+    for (const memory of args.memories) {
+        const identity = memoryWorkspaceIdentity(memory, workspace);
+        if (!identity) continue;
+        const list = memoriesByIdentity.get(identity) ?? [];
+        list.push(memory);
+        memoriesByIdentity.set(identity, list);
+    }
+
+    const ownMemories = memoriesByIdentity.get(args.projectPath) ?? [];
+    if (ownMemories.length > 0) {
+        const ownEmbeddings = getProjectEmbeddings(args.db, args.projectPath);
+        await ensureMemoryEmbeddings({
+            db: args.db,
+            projectIdentity: args.projectPath,
+            memories: ownMemories,
+            existingEmbeddings: ownEmbeddings,
+        });
+    }
+
+    for (const identity of workspace.identities) {
+        const memberMemories = memoriesByIdentity.get(identity) ?? [];
+        if (memberMemories.length === 0) continue;
+        const cachedEmbeddings = getProjectEmbeddings(args.db, identity);
+        for (const memory of memberMemories) {
+            const memoryEmbedding = cachedEmbeddings.get(memory.id);
+            if (!memoryEmbedding || memoryEmbedding.modelId !== args.queryModelId) continue;
+            semanticScores.set(
+                memory.id,
+                normalizeCosineScore(
+                    cosineSimilarity(args.queryEmbedding, memoryEmbedding.embedding),
+                ),
+            );
+        }
     }
 
     return semanticScores;
@@ -266,9 +381,17 @@ function getFtsMatches(args: {
     projectPath: string;
     query: string;
     limit: number;
+    workspace?: SearchWorkspaceContext;
 }): Memory[] {
     try {
-        return searchMemoriesFTS(args.db, args.projectPath, args.query, args.limit);
+        return args.workspace?.isWorkspaced
+            ? searchMemoriesFTSUnion(
+                  args.db,
+                  args.workspace.expandedIdentities,
+                  args.query,
+                  args.limit,
+              )
+            : searchMemoriesFTS(args.db, args.projectPath, args.query, args.limit);
     } catch (error) {
         log(
             `[search] FTS query failed for "${args.query}": ${error instanceof Error ? error.message : String(error)}`,
@@ -285,15 +408,19 @@ function selectSemanticCandidates(args: {
     memories: Memory[];
     projectPath: string;
     ftsMatches: Memory[];
+    workspace?: SearchWorkspaceContext;
 }): Memory[] {
     if (args.ftsMatches.length === 0) {
         return args.memories;
     }
 
     const candidateIds = new Set(args.ftsMatches.map((memory) => memory.id));
-    const cachedEmbeddings = peekProjectEmbeddings(args.projectPath);
-
-    if (cachedEmbeddings) {
+    const embeddingProjects = args.workspace?.isWorkspaced
+        ? args.workspace.identities
+        : [args.projectPath];
+    for (const projectPath of embeddingProjects) {
+        const cachedEmbeddings = peekProjectEmbeddings(projectPath);
+        if (!cachedEmbeddings) continue;
         for (const memoryId of cachedEmbeddings.keys()) {
             candidateIds.add(memoryId);
         }
@@ -308,6 +435,7 @@ function mergeMemoryResults(args: {
     ftsScores: Map<number, number>;
     limit: number;
     visibleMemoryIds?: Set<number> | null;
+    sourceNameByMemoryId?: ReadonlyMap<number, string>;
 }): MemorySearchResult[] {
     const memoryById = new Map(args.memories.map((memory) => [memory.id, memory]));
     const candidateIds = new Set<number>([...args.semanticScores.keys(), ...args.ftsScores.keys()]);
@@ -353,6 +481,7 @@ function mergeMemoryResults(args: {
             memoryId: memory.id,
             category: memory.category,
             matchType,
+            sourceName: args.sourceNameByMemoryId?.get(memory.id),
         });
     }
 
@@ -376,13 +505,17 @@ async function searchMemories(args: {
      *  unifiedSearch embeds once and passes the same vector here and to
      *  searchGitCommitsAsync — never embed twice for one query. */
     queryEmbedding: Float32Array | null;
+    queryModelId?: string | null;
+    workspace?: SearchWorkspaceContext;
     visibleMemoryIds?: Set<number> | null;
 }): Promise<MemorySearchResult[]> {
     if (!args.memoryEnabled) {
         return [];
     }
 
-    const memories = getMemoriesByProject(args.db, args.projectPath);
+    const memories = args.workspace?.isWorkspaced
+        ? getMemoriesByProjects(args.db, args.workspace.expandedIdentities)
+        : getMemoriesByProject(args.db, args.projectPath);
     if (memories.length === 0) {
         return [];
     }
@@ -392,18 +525,22 @@ async function searchMemories(args: {
         projectPath: args.projectPath,
         query: args.query,
         limit: FTS_SEMANTIC_CANDIDATE_LIMIT,
+        workspace: args.workspace,
     });
     const ftsScores = getFtsScores(ftsMatches);
     const semanticCandidates = selectSemanticCandidates({
         memories,
         projectPath: args.projectPath,
         ftsMatches,
+        workspace: args.workspace,
     });
     const semanticScores = await getSemanticScores({
         db: args.db,
         projectPath: args.projectPath,
         memories: semanticCandidates,
         queryEmbedding: args.queryEmbedding,
+        queryModelId: args.queryModelId,
+        workspace: args.workspace,
     });
 
     return mergeMemoryResults({
@@ -412,6 +549,17 @@ async function searchMemories(args: {
         ftsScores,
         limit: args.limit,
         visibleMemoryIds: args.visibleMemoryIds,
+        sourceNameByMemoryId: sourceNamesForSearchMemories({
+            memories,
+            projectPath: args.projectPath,
+            workspace: args.workspace ?? {
+                identities: [args.projectPath],
+                expandedIdentities: [args.projectPath],
+                namesByIdentity: new Map(),
+                canonicalIdentityByStoredPath: new Map([[args.projectPath, args.projectPath]]),
+                isWorkspaced: false,
+            },
+        }),
     });
 }
 
@@ -931,6 +1079,7 @@ export async function unifiedSearch(
     // Wait for the single embed call (if any) and then run the two
     // embedding-dependent searches in parallel using the same vector.
     const queryEmbedding = await queryEmbeddingPromise;
+    const workspace = resolveSearchWorkspaceContext(db, projectPath);
     const embeddingModelId = getProjectEmbeddingSnapshot(projectPath)?.modelId;
     const compartmentResults = runCompartmentChunks
         ? searchCompartmentChunks({
@@ -958,6 +1107,9 @@ export async function unifiedSearch(
                   limit: tierLimit,
                   memoryEnabled: true,
                   queryEmbedding,
+                  queryModelId:
+                      embeddingModelId && embeddingModelId !== "off" ? embeddingModelId : null,
+                  workspace,
                   visibleMemoryIds: options.visibleMemoryIds,
               })
             : Promise.resolve([] as MemorySearchResult[]),

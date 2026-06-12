@@ -1,15 +1,15 @@
 import { log } from "../../../shared/logger";
 import type { Database } from "../../../shared/sqlite";
 import { embedBatchForProject, getProjectEmbeddingSnapshot } from "./embedding";
-import { saveEmbedding } from "./storage-memory-embeddings";
+import { type StoredMemoryEmbedding, saveEmbedding } from "./storage-memory-embeddings";
 import type { Memory } from "./types";
 
 export async function ensureMemoryEmbeddings(args: {
     db: Database;
     projectIdentity: string;
     memories: Memory[];
-    existingEmbeddings: Map<number, Float32Array>;
-}): Promise<Map<number, Float32Array>> {
+    existingEmbeddings: Map<number, StoredMemoryEmbedding>;
+}): Promise<Map<number, StoredMemoryEmbedding>> {
     const snapshot = getProjectEmbeddingSnapshot(args.projectIdentity);
     if (!snapshot?.enabled) {
         return args.existingEmbeddings;
@@ -33,7 +33,7 @@ export async function ensureMemoryEmbeddings(args: {
 
         // Stage results before committing — only merge into the in-memory cache after
         // the transaction succeeds, so a rollback doesn't leave stale Map entries.
-        const staged = new Map<number, Float32Array>();
+        const staged = new Map<number, StoredMemoryEmbedding>();
         args.db.transaction(() => {
             for (const [index, memory] of missingMemories.entries()) {
                 const embedding = result.vectors[index];
@@ -42,7 +42,7 @@ export async function ensureMemoryEmbeddings(args: {
                 }
 
                 saveEmbedding(args.db, memory.id, embedding, result.modelId);
-                staged.set(memory.id, embedding);
+                staged.set(memory.id, { embedding, modelId: result.modelId });
             }
         })();
 

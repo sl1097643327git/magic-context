@@ -36,7 +36,7 @@ export function getSchemaFenceRejection(): {
     return lastSchemaFenceRejection;
 }
 
-export const LATEST_SUPPORTED_VERSION = 33;
+export const LATEST_SUPPORTED_VERSION = 34;
 
 export interface OpenDatabaseOptions {
     dbPath?: string;
@@ -516,6 +516,24 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       rekeyed_at INTEGER NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS workspaces (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS workspace_members (
+      workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+      project_path TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      display_path TEXT NOT NULL,
+      added_at INTEGER NOT NULL,
+      PRIMARY KEY (workspace_id, project_path)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_member_unique ON workspace_members(project_path);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_member_name ON workspace_members(workspace_id, display_name);
+
     CREATE TABLE IF NOT EXISTS v22_backfill_failures (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       table_name TEXT NOT NULL,
@@ -627,6 +645,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       deferred_execute_state TEXT,
       cached_m0_bytes BLOB,
       cached_m0_project_memory_epoch INTEGER,
+      cached_m0_workspace_fingerprint TEXT,
       cached_m0_project_user_profile_version INTEGER,
       cached_m0_max_compartment_seq INTEGER,
       cached_m0_max_memory_id INTEGER,
@@ -911,6 +930,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     ensureColumn(db, "memories", "importance", "INTEGER");
     ensureColumn(db, "session_meta", "cached_m0_bytes", "BLOB");
     ensureColumn(db, "session_meta", "cached_m0_project_memory_epoch", "INTEGER");
+    ensureColumn(db, "session_meta", "cached_m0_workspace_fingerprint", "TEXT");
     ensureColumn(db, "session_meta", "cached_m0_project_user_profile_version", "INTEGER");
     ensureColumn(db, "session_meta", "cached_m0_max_compartment_seq", "INTEGER");
     ensureColumn(db, "session_meta", "cached_m0_max_memory_id", "INTEGER");
@@ -990,6 +1010,22 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
         new_project_path TEXT NOT NULL,
         rekeyed_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS workspaces (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS workspace_members (
+        workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        project_path TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        display_path TEXT NOT NULL,
+        added_at INTEGER NOT NULL,
+        PRIMARY KEY (workspace_id, project_path)
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_member_unique ON workspace_members(project_path);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_member_name ON workspace_members(workspace_id, display_name);
       CREATE TABLE IF NOT EXISTS v22_backfill_failures (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         table_name TEXT NOT NULL,

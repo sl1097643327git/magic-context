@@ -61,6 +61,7 @@ function createDb(): Database {
       tool_call_tokens INTEGER DEFAULT 0,
       cleared_reasoning_through_tag INTEGER DEFAULT 0,
       last_todo_state TEXT DEFAULT '',
+      cached_m0_workspace_fingerprint TEXT,
       harness TEXT NOT NULL DEFAULT 'opencode'
     );
   `);

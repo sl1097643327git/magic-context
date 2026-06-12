@@ -60,6 +60,12 @@ import {
 	type ContextDatabase,
 	queueMemoryMutation,
 } from "@magic-context/core/features/magic-context/storage";
+import {
+	expandWorkspaceIdentitySetWithAliases,
+	resolveStoredPathWorkspaceIdentity,
+	resolveWorkspaceIdentitySet,
+	storedPathBelongsToWorkspace,
+} from "@magic-context/core/features/magic-context/workspaces";
 import { log } from "@magic-context/core/shared/logger";
 import { CTX_MEMORY_DESCRIPTION } from "@magic-context/core/tools/ctx-memory/constants";
 import { type Static, Type } from "typebox";
@@ -254,6 +260,35 @@ export function createCtxMemoryTool(
 
 			const projectIdentity = resolveProjectIdentity(ctx.cwd);
 			await deps.ensureProjectRegistered?.(ctx.cwd, deps.db);
+			const workspaceIdentitySet = resolveWorkspaceIdentitySet(
+				deps.db,
+				projectIdentity,
+			);
+			const expandedWorkspace = expandWorkspaceIdentitySetWithAliases(
+				deps.db,
+				workspaceIdentitySet.identities,
+			);
+			const workspaceVisibleIdentities =
+				workspaceIdentitySet.identities.length > 1
+					? expandedWorkspace.expandedIdentities
+					: workspaceIdentitySet.identities;
+			const memoryVisibleToTool = (memory: Memory) =>
+				workspaceIdentitySet.identities.length > 1
+					? storedPathBelongsToWorkspace(
+							memory.projectPath,
+							workspaceIdentitySet.identities,
+							workspaceVisibleIdentities,
+							expandedWorkspace.canonicalIdentityByStoredPath,
+						)
+					: storedPathBelongsToIdentity(memory.projectPath, projectIdentity);
+			const targetIdentityForStoredPath = (rawProjectPath: string) =>
+				workspaceIdentitySet.identities.length > 1
+					? (resolveStoredPathWorkspaceIdentity(
+							rawProjectPath,
+							workspaceIdentitySet.identities,
+							expandedWorkspace.canonicalIdentityByStoredPath,
+						) ?? normalizeStoredProjectPath(rawProjectPath))
+					: normalizeStoredProjectPath(rawProjectPath);
 			const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
 			if (
 				snapshot
@@ -335,10 +370,7 @@ export function createCtxMemoryTool(
 				}
 
 				const memory = getMemoryById(deps.db, updateId);
-				if (
-					!memory ||
-					!storedPathBelongsToIdentity(memory.projectPath, projectIdentity)
-				) {
+				if (!memory || !memoryVisibleToTool(memory)) {
 					return err(`Error: Memory with ID ${updateId} was not found.`);
 				}
 				if (!dreamerAllowed && !isPrimaryMutableMemory(memory)) {
@@ -346,9 +378,10 @@ export function createCtxMemoryTool(
 				}
 
 				const normalizedHash = computeNormalizedHash(content);
+				const targetIdentity = targetIdentityForStoredPath(memory.projectPath);
 				const duplicate = getMemoryByHash(
 					deps.db,
-					projectIdentity,
+					targetIdentity,
 					memory.category,
 					normalizedHash,
 				);
@@ -361,14 +394,19 @@ export function createCtxMemoryTool(
 				deps.db.transaction(() => {
 					updateMemoryContent(deps.db, memory.id, content, normalizedHash);
 					queueMemoryMutation(deps.db, {
-						projectPath: projectIdentity,
+						projectPath: targetIdentity,
 						mutationType: "update",
 						targetMemoryId: memory.id,
 						category: memory.category,
 						newContent: content,
 					});
 				})();
-				queueEmbedding({ deps, projectIdentity, memoryId: memory.id, content });
+				queueEmbedding({
+					deps,
+					projectIdentity: targetIdentity,
+					memoryId: memory.id,
+					content,
+				});
 				return ok(`Updated memory [ID: ${memory.id}] in ${memory.category}.`);
 			}
 
@@ -593,10 +631,7 @@ export function createCtxMemoryTool(
 				// half-archive a batch (all-or-nothing, matching the transaction).
 				for (const memoryId of archiveIds) {
 					const memory = getMemoryById(deps.db, memoryId);
-					if (
-						!memory ||
-						!storedPathBelongsToIdentity(memory.projectPath, projectIdentity)
-					) {
+					if (!memory || !memoryVisibleToTool(memory)) {
 						return err(`Error: Memory with ID ${memoryId} was not found.`);
 					}
 					if (!dreamerAllowed && !isPrimaryMutableMemory(memory)) {
@@ -606,13 +641,22 @@ export function createCtxMemoryTool(
 						return err(inactiveMemoryError(memoryId, "archiving"));
 					}
 				}
+				const targets = archiveIds.map((memoryId) => {
+					const memory = getMemoryById(deps.db, memoryId);
+					if (!memory)
+						throw new Error(`validated memory ${memoryId} disappeared`);
+					return {
+						memoryId,
+						projectIdentity: targetIdentityForStoredPath(memory.projectPath),
+					};
+				});
 				deps.db.transaction(() => {
-					for (const memoryId of archiveIds) {
-						archiveMemory(deps.db, memoryId, params.reason);
+					for (const target of targets) {
+						archiveMemory(deps.db, target.memoryId, params.reason);
 						queueMemoryMutation(deps.db, {
-							projectPath: projectIdentity,
+							projectPath: target.projectIdentity,
 							mutationType: "archive",
-							targetMemoryId: memoryId,
+							targetMemoryId: target.memoryId,
 						});
 					}
 				})();

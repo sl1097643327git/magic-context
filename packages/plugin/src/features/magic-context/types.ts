@@ -68,6 +68,7 @@ export interface SessionMeta {
     cachedM0Bytes: Buffer | null;
     cachedM1Bytes: Buffer | null;
     cachedM0ProjectMemoryEpoch: number | null;
+    cachedM0WorkspaceFingerprint: string | null;
     cachedM0ProjectUserProfileVersion: number | null;
     cachedM0MaxCompartmentSeq: number | null;
     cachedM0MaxMemoryId: number | null;

@@ -3,6 +3,12 @@ import type { Database, Statement as PreparedStatement } from "../../../shared/s
 interface EmbeddingRow {
     memoryId: number;
     embedding: Uint8Array | ArrayBuffer;
+    modelId: string | null;
+}
+
+export interface StoredMemoryEmbedding {
+    embedding: Float32Array;
+    modelId: string | null;
 }
 
 interface StoredModelIdRow {
@@ -23,7 +29,11 @@ function isEmbeddingBlob(value: unknown): value is Uint8Array | ArrayBuffer {
 function isEmbeddingRow(row: unknown): row is EmbeddingRow {
     if (row === null || typeof row !== "object") return false;
     const candidate = row as Record<string, unknown>;
-    return typeof candidate.memoryId === "number" && isEmbeddingBlob(candidate.embedding);
+    return (
+        typeof candidate.memoryId === "number" &&
+        isEmbeddingBlob(candidate.embedding) &&
+        (candidate.modelId === null || typeof candidate.modelId === "string")
+    );
 }
 
 function toFloat32Array(blob: Uint8Array | ArrayBuffer): Float32Array {
@@ -50,7 +60,7 @@ function getLoadAllEmbeddingsStatement(db: Database): PreparedStatement {
     let stmt = loadAllEmbeddingsStatements.get(db);
     if (!stmt) {
         stmt = db.prepare(
-            "SELECT memory_embeddings.memory_id AS memoryId, memory_embeddings.embedding AS embedding FROM memory_embeddings INNER JOIN memories ON memories.id = memory_embeddings.memory_id WHERE memories.project_path = ? ORDER BY memory_embeddings.memory_id ASC",
+            "SELECT memory_embeddings.memory_id AS memoryId, memory_embeddings.embedding AS embedding, memory_embeddings.model_id AS modelId FROM memory_embeddings INNER JOIN memories ON memories.id = memory_embeddings.memory_id WHERE memories.project_path = ? ORDER BY memory_embeddings.memory_id ASC",
         );
         loadAllEmbeddingsStatements.set(db, stmt);
     }
@@ -109,12 +119,18 @@ export function saveEmbedding(
     getSaveEmbeddingStatement(db).run(memoryId, blob, modelId);
 }
 
-export function loadAllEmbeddings(db: Database, projectPath: string): Map<number, Float32Array> {
+export function loadAllEmbeddings(
+    db: Database,
+    projectPath: string,
+): Map<number, StoredMemoryEmbedding> {
     const rows = getLoadAllEmbeddingsStatement(db).all(projectPath).filter(isEmbeddingRow);
-    const embeddings = new Map<number, Float32Array>();
+    const embeddings = new Map<number, StoredMemoryEmbedding>();
 
     for (const row of rows) {
-        embeddings.set(row.memoryId, toFloat32Array(row.embedding));
+        embeddings.set(row.memoryId, {
+            embedding: toFloat32Array(row.embedding),
+            modelId: row.modelId,
+        });
     }
 
     return embeddings;

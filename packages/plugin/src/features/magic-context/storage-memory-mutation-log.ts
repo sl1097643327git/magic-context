@@ -108,6 +108,35 @@ export function getMemoryMutation(db: Database, id: number): MemoryMutationLogRo
     return row ? toMemoryMutation(row) : null;
 }
 
+function uniqueProjectPaths(projectPaths: readonly string[]): string[] {
+    return [...new Set(projectPaths.filter((path) => path.length > 0))];
+}
+
+function placeholders(values: readonly unknown[]): string {
+    return values.map(() => "?").join(", ");
+}
+
+function coalesceMutations(rows: MemoryMutationLogDbRow[]): MemoryMutationLogRow[] {
+    const chosenByTarget = new Map<number, MemoryMutationLogRow>();
+    for (const dbRow of rows) {
+        const candidate = toMemoryMutation(dbRow);
+        const current = chosenByTarget.get(candidate.targetMemoryId);
+        if (!current) {
+            chosenByTarget.set(candidate.targetMemoryId, candidate);
+            continue;
+        }
+        const currentTerminal = isTerminalMutation(current);
+        const candidateTerminal = isTerminalMutation(candidate);
+        if (currentTerminal && !candidateTerminal) continue;
+        if (!currentTerminal && candidateTerminal) {
+            chosenByTarget.set(candidate.targetMemoryId, candidate);
+            continue;
+        }
+        chosenByTarget.set(candidate.targetMemoryId, candidate);
+    }
+    return [...chosenByTarget.values()].sort((left, right) => left.id - right.id);
+}
+
 export function getMemoryMutationsForRender(
     db: Database,
     projectPath: string,
@@ -135,30 +164,58 @@ export function getMemoryMutationsForRender(
     // non-terminal `update` regardless of id order — otherwise an update queued
     // after an archive would render the memory as still-present/updated even
     // though it left the active set (it won't appear in the next m[0] baseline).
-    const chosenByTarget = new Map<number, MemoryMutationLogRow>();
-    for (const dbRow of rows) {
-        const candidate = toMemoryMutation(dbRow);
-        const current = chosenByTarget.get(candidate.targetMemoryId);
-        if (!current) {
-            chosenByTarget.set(candidate.targetMemoryId, candidate);
-            continue;
-        }
-        const currentTerminal = isTerminalMutation(current);
-        const candidateTerminal = isTerminalMutation(candidate);
-        if (currentTerminal && !candidateTerminal) continue; // keep terminal over later update
-        if (!currentTerminal && candidateTerminal) {
-            chosenByTarget.set(candidate.targetMemoryId, candidate); // terminal supersedes update
-            continue;
-        }
-        // Same terminality → newest id wins (rows are ASC, so candidate is newer).
-        chosenByTarget.set(candidate.targetMemoryId, candidate);
+    return coalesceMutations(rows);
+}
+
+export function getMemoryMutationsForRenderByProjects(
+    db: Database,
+    projectPaths: readonly string[],
+    afterId: number | null | undefined,
+    renderedMemoryIds: readonly number[],
+): MemoryMutationLogRow[] {
+    if (renderedMemoryIds.length === 0) return [];
+    const identities = uniqueProjectPaths(projectPaths);
+    if (identities.length === 0) return [];
+    if (identities.length === 1) {
+        return getMemoryMutationsForRender(db, identities[0], afterId, renderedMemoryIds);
     }
-    return [...chosenByTarget.values()].sort((left, right) => left.id - right.id);
+
+    const uniqueIds = [...new Set(renderedMemoryIds)].sort((left, right) => left - right);
+    const rows = db
+        .prepare(
+            `SELECT id, project_path, mutation_type, target_memory_id,
+                    superseded_by_id, category, new_content, queued_at
+               FROM memory_mutation_log
+              WHERE project_path IN (${placeholders(identities)})
+                AND id > ?
+                AND target_memory_id IN (${placeholders(uniqueIds)})
+              ORDER BY id ASC`,
+        )
+        .all(...identities, afterId ?? 0, ...uniqueIds) as MemoryMutationLogDbRow[];
+
+    return coalesceMutations(rows);
 }
 
 export function getMaxMemoryMutationId(db: Database, projectPath: string): number | null {
     const row = db
         .prepare("SELECT MAX(id) AS max_id FROM memory_mutation_log WHERE project_path = ?")
         .get(projectPath) as { max_id: number | null } | undefined;
+    return row?.max_id ?? null;
+}
+
+export function getMaxMemoryMutationIdForProjects(
+    db: Database,
+    projectPaths: readonly string[],
+): number | null {
+    const identities = uniqueProjectPaths(projectPaths);
+    if (identities.length === 0) return null;
+    if (identities.length === 1) return getMaxMemoryMutationId(db, identities[0]);
+    const row = db
+        .prepare(
+            `SELECT MAX(id) AS max_id
+               FROM memory_mutation_log
+              WHERE project_path IN (${placeholders(identities)})`,
+        )
+        .get(...identities) as { max_id: number | null } | undefined;
     return row?.max_id ?? null;
 }

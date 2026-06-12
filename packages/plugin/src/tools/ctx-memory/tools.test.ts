@@ -78,6 +78,30 @@ function createTestDb(): Database {
         CREATE INDEX IF NOT EXISTS idx_memory_mutation_log_project
             ON memory_mutation_log(project_path, id);
 
+        CREATE TABLE IF NOT EXISTS workspaces (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS workspace_members (
+            workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            project_path TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            display_path TEXT NOT NULL,
+            added_at INTEGER NOT NULL,
+            PRIMARY KEY (workspace_id, project_path)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_member_unique ON workspace_members(project_path);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_member_name ON workspace_members(workspace_id, display_name);
+
+        CREATE TABLE IF NOT EXISTS v22_identity_rekey_map (
+            old_project_path TEXT PRIMARY KEY,
+            new_project_path TEXT NOT NULL,
+            rekeyed_at INTEGER NOT NULL
+        );
+
         CREATE
         VIRTUAL
         TABLE IF
@@ -392,7 +416,68 @@ describe("createCtxMemoryTools", () => {
         });
     });
 
+    it("archives a foreign workspace memory under the target identity", async () => {
+        db.exec(`
+                INSERT INTO workspaces (id, name, created_at, updated_at) VALUES (1, 'ws', 1, 1);
+                INSERT INTO workspace_members (workspace_id, project_path, display_name, display_path, added_at)
+                VALUES (1, '/repo/project', 'Own', '/repo/project', 1),
+                       (1, '/repo/foreign', 'Foreign', '/repo/foreign', 1);
+            `);
+        const memory = insertMemory(db, {
+            projectPath: "/repo/foreign",
+            category: "KNOWN_ISSUES",
+            content: "Foreign issue is visible through workspace.",
+        });
+
+        const result = await tools.ctx_memory.execute(
+            { action: "archive", ids: [memory.id] },
+            toolContext(),
+        );
+
+        expect(result).toContain("Archived memory");
+        expect(getMemoryById(db, memory.id)?.status).toBe("archived");
+        expect(getMemoryMutationsForRender(db, "/repo/foreign", 0, [memory.id])).toHaveLength(1);
+    });
+
     describe("#given update action", () => {
+        it("updates a foreign workspace memory with duplicate checks and mutations under the target identity", async () => {
+            db.exec(`
+                INSERT INTO workspaces (id, name, created_at, updated_at) VALUES (1, 'ws', 1, 1);
+                INSERT INTO workspace_members (workspace_id, project_path, display_name, display_path, added_at)
+                VALUES (1, '/repo/project', 'Own', '/repo/project', 1),
+                       (1, '/repo/foreign', 'Foreign', '/repo/foreign', 1);
+            `);
+            insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "USER_DIRECTIVES",
+                content: "Use the shared formatter.",
+            });
+            const foreign = insertMemory(db, {
+                projectPath: "/repo/foreign",
+                category: "USER_DIRECTIVES",
+                content: "Old foreign directive.",
+            });
+
+            const result = await tools.ctx_memory.execute(
+                {
+                    action: "update",
+                    ids: [foreign.id],
+                    content: "Use the shared formatter.",
+                },
+                toolContext(),
+            );
+
+            expect(result).toContain(`Updated memory [ID: ${foreign.id}]`);
+            expect(getMemoryById(db, foreign.id)?.content).toBe("Use the shared formatter.");
+            const ownMutations = getMemoryMutationsForRender(db, "/repo/project", 0, [foreign.id]);
+            const foreignMutations = getMemoryMutationsForRender(db, "/repo/foreign", 0, [
+                foreign.id,
+            ]);
+            expect(ownMutations).toHaveLength(0);
+            expect(foreignMutations).toHaveLength(1);
+            expect(foreignMutations[0]?.projectPath).toBe("/repo/foreign");
+        });
+
         it("updates memory content and invalidates stale embeddings", async () => {
             const memory = insertMemory(db, {
                 projectPath: "/repo/project",

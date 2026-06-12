@@ -4,6 +4,7 @@ import {
 	getMemoryById,
 	insertMemory,
 } from "@magic-context/core/features/magic-context/memory/storage-memory";
+import { getMemoryMutationsForRender } from "@magic-context/core/features/magic-context/storage";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import { createTestDb, fakeContext } from "../test-utils.test";
 import { createCtxMemoryTool } from "./ctx-memory";
@@ -87,6 +88,102 @@ describe("createCtxMemoryTool", () => {
 			);
 			expect(archived.isError).toBeUndefined();
 			expect(archived.content[0]?.text).toContain("Archived memory");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("updates a foreign workspace memory under the target identity", async () => {
+		const db = createTestDb();
+		try {
+			const primary = createCtxMemoryTool({
+				db,
+				memoryEnabled: true,
+				embeddingEnabled: false,
+				allowDreamerActions: false,
+			});
+			const ctx = fakeContext("ses-memory") as never;
+			const ownIdentity = resolveProjectIdentity((ctx as { cwd: string }).cwd);
+			db.exec(`
+				INSERT INTO workspaces (id, name, created_at, updated_at) VALUES (1, 'ws', 1, 1);
+				INSERT INTO workspace_members (workspace_id, project_path, display_name, display_path, added_at)
+				VALUES (1, '${ownIdentity}', 'Own', '${ownIdentity}', 1),
+				       (1, 'git:foreign', 'Foreign', '/foreign', 1);
+			`);
+			insertMemory(db, {
+				projectPath: ownIdentity,
+				category: "USER_DIRECTIVES",
+				content: "Use the shared formatter.",
+			});
+			const foreign = insertMemory(db, {
+				projectPath: "git:foreign",
+				category: "USER_DIRECTIVES",
+				content: "Old foreign directive.",
+			});
+
+			const result = await primary.execute(
+				"call-u",
+				{
+					action: "update",
+					ids: [foreign.id],
+					content: "Use the shared formatter.",
+				},
+				new AbortController().signal,
+				undefined,
+				ctx,
+			);
+
+			expect(result.isError).toBeUndefined();
+			expect(getMemoryById(db, foreign.id)?.content).toBe(
+				"Use the shared formatter.",
+			);
+			expect(
+				getMemoryMutationsForRender(db, ownIdentity, 0, [foreign.id]),
+			).toHaveLength(0);
+			expect(
+				getMemoryMutationsForRender(db, "git:foreign", 0, [foreign.id]),
+			).toHaveLength(1);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("archives a foreign workspace memory under the target identity", async () => {
+		const db = createTestDb();
+		try {
+			const primary = createCtxMemoryTool({
+				db,
+				memoryEnabled: true,
+				embeddingEnabled: false,
+				allowDreamerActions: false,
+			});
+			const ctx = fakeContext("ses-memory") as never;
+			const ownIdentity = resolveProjectIdentity((ctx as { cwd: string }).cwd);
+			db.exec(`
+				INSERT INTO workspaces (id, name, created_at, updated_at) VALUES (1, 'ws', 1, 1);
+				INSERT INTO workspace_members (workspace_id, project_path, display_name, display_path, added_at)
+				VALUES (1, '${ownIdentity}', 'Own', '${ownIdentity}', 1),
+				       (1, 'git:foreign', 'Foreign', '/foreign', 1);
+			`);
+			const foreign = insertMemory(db, {
+				projectPath: "git:foreign",
+				category: "KNOWN_ISSUES",
+				content: "Foreign issue.",
+			});
+
+			const result = await primary.execute(
+				"call-a",
+				{ action: "archive", ids: [foreign.id] },
+				new AbortController().signal,
+				undefined,
+				ctx,
+			);
+
+			expect(result.isError).toBeUndefined();
+			expect(getMemoryById(db, foreign.id)?.status).toBe("archived");
+			expect(
+				getMemoryMutationsForRender(db, "git:foreign", 0, [foreign.id]),
+			).toHaveLength(1);
 		} finally {
 			closeQuietly(db);
 		}

@@ -68,8 +68,10 @@ export {
 } from "./storage-m0-mutation-log";
 export {
     getMaxMemoryMutationId,
+    getMaxMemoryMutationIdForProjects,
     getMemoryMutation,
     getMemoryMutationsForRender,
+    getMemoryMutationsForRenderByProjects,
     type MemoryMutationLogRow,
     type MemoryMutationType,
     queueMemoryMutation,
@@ -243,3 +245,16 @@ export {
     type V22BackfillErrorClass,
     type V22BackfillFailureRow,
 } from "./storage-v22-backfill-failures";
+export {
+    bumpEpochsForWorkspaceMemberSet,
+    bumpEpochsForWorkspaceMembers,
+    computeWorkspaceEpochFingerprint,
+    type ExpandedWorkspaceIdentitySet,
+    expandWorkspaceIdentitySet,
+    expandWorkspaceIdentitySetWithAliases,
+    resolveStoredPathWorkspaceIdentity,
+    resolveWorkspaceIdentitySet,
+    sourceNameForMemory,
+    storedPathBelongsToWorkspace,
+    type WorkspaceIdentitySet,
+} from "./workspaces";

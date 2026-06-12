@@ -5,7 +5,7 @@ import { shouldKeepSubagents } from "../../../shared/keep-subagents";
 import { sessionLog } from "../../../shared/logger";
 import { parseProviderModel } from "../../../shared/resolve-fallbacks";
 import type { Database } from "../../../shared/sqlite";
-import { bumpProjectMemoryEpoch } from "../storage";
+import { bumpEpochsForWorkspaceMembers } from "../storage";
 import { insertUserMemoryCandidates } from "../user-memory/storage-user-memory";
 import { resolveProjectIdentity } from "./project-identity";
 import { deleteMemory, getAllActiveMemoriesForMigration, insertMemory } from "./storage-memory";
@@ -238,7 +238,7 @@ export function applyMemoryMigration(
         // with the recategorized set (the additive maxMemoryId path would not
         // catch the deletions).
         if (removed > 0 || inserted > 0) {
-            bumpProjectMemoryEpoch(db, projectPath);
+            bumpEpochsForWorkspaceMembers(db, projectPath);
         }
     })();
     return { removed, inserted };

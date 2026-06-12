@@ -20,8 +20,8 @@ function createTestDb(): Database {
     return database;
 }
 
-function toNumbers(embedding: Float32Array | undefined): number[] {
-    return embedding ? Array.from(embedding) : [];
+function toNumbers(embedding: { embedding: Float32Array } | undefined): number[] {
+    return embedding ? Array.from(embedding.embedding) : [];
 }
 
 afterEach(() => {

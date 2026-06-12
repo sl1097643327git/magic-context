@@ -1270,6 +1270,79 @@ const MIGRATIONS: Migration[] = [
             `);
         },
     },
+
+    {
+        version: 34,
+        description: "workspace tables and m[0] workspace fingerprint cache reset",
+        up: (db: Database) => {
+            db.exec(`
+                CREATE TABLE IF NOT EXISTS workspaces (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS workspace_members (
+                    workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                    project_path TEXT NOT NULL,
+                    display_name TEXT NOT NULL,
+                    display_path TEXT NOT NULL,
+                    added_at INTEGER NOT NULL,
+                    PRIMARY KEY (workspace_id, project_path)
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_member_unique
+                    ON workspace_members(project_path);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_member_name
+                    ON workspace_members(workspace_id, display_name);
+            `);
+
+            const hasSessionMeta = db
+                .prepare(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_meta' LIMIT 1",
+                )
+                .get();
+            if (!hasSessionMeta) return;
+
+            ensureColumn(db, "session_meta", "cached_m0_workspace_fingerprint", "TEXT");
+            const columns = new Set(
+                (
+                    db.prepare("PRAGMA table_info(session_meta)").all() as Array<{ name?: string }>
+                ).map((column) => column.name),
+            );
+            const clears: Array<[string, string | number | null]> = [
+                ["cached_m0_bytes", null],
+                ["cached_m1_bytes", null],
+                ["cached_m0_project_memory_epoch", null],
+                ["cached_m0_workspace_fingerprint", null],
+                ["cached_m0_project_user_profile_version", null],
+                ["cached_m0_max_compartment_seq", null],
+                ["cached_m0_max_memory_id", null],
+                ["cached_m0_max_mutation_id", null],
+                ["cached_m0_max_memory_mutation_id", null],
+                ["cached_m0_project_docs_hash", null],
+                ["cached_m0_materialized_at", null],
+                ["cached_m0_session_facts_version", null],
+                ["cached_m0_upgrade_state", null],
+                ["cached_m0_system_hash", null],
+                ["cached_m0_tool_set_hash", null],
+                ["cached_m0_model_key", null],
+                ["cached_m0_last_baseline_end_message_id", null],
+                ["memory_block_cache", ""],
+                ["memory_block_ids", ""],
+                ["memory_block_count", 0],
+            ];
+            const setClauses: string[] = [];
+            const values: Array<string | number | null> = [];
+            for (const [column, value] of clears) {
+                if (!columns.has(column)) continue;
+                setClauses.push(`${column} = ?`);
+                values.push(value);
+            }
+            if (setClauses.length > 0) {
+                db.prepare(`UPDATE session_meta SET ${setClauses.join(", ")}`).run(...values);
+            }
+        },
+    },
 ];
 
 /**

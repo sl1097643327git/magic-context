@@ -40,7 +40,7 @@ async function main() {
     // Compute similarities
     const scored = Array.from(allEmbeddings.entries()).map(([memoryId, embedding]) => ({
         memoryId,
-        similarity: cosineSimilarity(queryEmbedding, embedding),
+        similarity: cosineSimilarity(queryEmbedding, embedding.embedding),
     }));
 
     scored.sort((a, b) => b.similarity - a.similarity);

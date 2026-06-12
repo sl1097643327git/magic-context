@@ -25,7 +25,12 @@
  *     historyRefreshSessions signal.
  */
 
-import { getMemoriesByProject } from "@magic-context/core/features/magic-context/memory/storage-memory";
+import {
+	getMaxMemoryIdForProjects,
+	getMemoriesByProject,
+	getMemoriesByProjects,
+	readNewMemoriesForM1Union,
+} from "@magic-context/core/features/magic-context/memory/storage-memory";
 import type { Memory } from "@magic-context/core/features/magic-context/memory/types";
 import {
 	type ContextDatabase,
@@ -35,7 +40,9 @@ import {
 	getCompartments,
 	getMaxM0MutationId,
 	getMaxMemoryMutationId,
+	getMaxMemoryMutationIdForProjects,
 	getMemoryMutationsForRender,
+	getMemoryMutationsForRenderByProjects,
 	getOrCreateSessionMeta,
 	getProjectState,
 	persistCachedM0,
@@ -46,6 +53,12 @@ import {
 	type UserMemory,
 } from "@magic-context/core/features/magic-context/user-memory/storage-user-memory";
 import {
+	computeWorkspaceEpochFingerprint,
+	expandWorkspaceIdentitySetWithAliases,
+	resolveWorkspaceIdentitySet,
+	sourceNameForMemory,
+} from "@magic-context/core/features/magic-context/workspaces";
+import {
 	DEFAULT_HISTORY_BUDGET_TOKENS,
 	extractM0Block,
 	renderCompartmentAtTier,
@@ -54,11 +67,14 @@ import {
 import {
 	DEFAULT_MEMORY_BUDGET_TOKENS,
 	DEFAULT_USER_PROFILE_BUDGET_TOKENS,
+	type MemoryRenderOptions,
 	type PreparedCompartmentInjection,
 	prepareCompartmentInjection,
 	renderMemoryBlockV2,
 	trimMemoriesToBudgetV2,
 	trimUserMemoriesToBudget,
+	trimWorkspaceMemoriesToBudgetV2,
+	type WorkspaceRenderContext,
 } from "@magic-context/core/hooks/magic-context/inject-compartments";
 import { buildKeyFilesBlock } from "@magic-context/core/hooks/magic-context/key-files-block";
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
@@ -441,6 +457,7 @@ interface FrozenM0Inputs {
 	compartments: PiCompartment[];
 	memories: Memory[];
 	userProfile: UserMemory[];
+	workspace: WorkspaceRenderContext;
 }
 
 /**
@@ -507,12 +524,69 @@ function memoryProjectPath(state: PiM0M1State): string | undefined {
 	return state.memoryEnabled === false ? undefined : state.projectIdentity;
 }
 
+function resolveWorkspaceRenderContextPi(
+	state: PiM0M1State,
+	db: ContextDatabase,
+): WorkspaceRenderContext {
+	const memPath = memoryProjectPath(state);
+	if (!memPath) {
+		return {
+			identities: [],
+			expandedIdentities: [],
+			namesByIdentity: new Map(),
+			canonicalIdentityByStoredPath: new Map(),
+			isWorkspaced: false,
+		};
+	}
+	const identitySet = resolveWorkspaceIdentitySet(db, memPath);
+	const expanded = expandWorkspaceIdentitySetWithAliases(
+		db,
+		identitySet.identities,
+	);
+	return {
+		identities: identitySet.identities,
+		expandedIdentities:
+			identitySet.identities.length > 1
+				? expanded.expandedIdentities
+				: identitySet.identities,
+		namesByIdentity: identitySet.namesByIdentity,
+		canonicalIdentityByStoredPath:
+			identitySet.identities.length > 1
+				? expanded.canonicalIdentityByStoredPath
+				: new Map(
+						identitySet.identities.map((identity) => [identity, identity]),
+					),
+		isWorkspaced: identitySet.identities.length > 1,
+	};
+}
+
+function sourceNamesForPiMemories(args: {
+	memories: readonly Memory[];
+	projectPath?: string;
+	workspace: WorkspaceRenderContext;
+}): Map<number, string> | undefined {
+	if (!args.projectPath || !args.workspace.isWorkspaced) return undefined;
+	const names = new Map<number, string>();
+	for (const memory of args.memories) {
+		const source = sourceNameForMemory(
+			memory.projectPath,
+			args.projectPath,
+			args.workspace.identities,
+			args.workspace.namesByIdentity,
+			args.workspace.canonicalIdentityByStoredPath,
+		);
+		if (source) names.set(memory.id, source);
+	}
+	return names.size > 0 ? names : undefined;
+}
+
 export interface PiM0SnapshotMarkers {
 	maxCompartmentSeq: number;
 	maxMemoryId: number;
 	maxMutationId: number;
 	maxMemoryMutationId: number;
 	projectMemoryEpoch: number;
+	workspaceFingerprint: string | null;
 	projectUserProfileVersion: number;
 	projectDocsHash: string;
 	sessionFactsVersion: number;
@@ -673,6 +747,7 @@ function getCachedMarkers(
 		maxMutationId: meta.cachedM0MaxMutationId,
 		maxMemoryMutationId: meta.cachedM0MaxMemoryMutationId,
 		projectMemoryEpoch: meta.cachedM0ProjectMemoryEpoch,
+		workspaceFingerprint: meta.cachedM0WorkspaceFingerprint,
 		projectUserProfileVersion: meta.cachedM0ProjectUserProfileVersion,
 		projectDocsHash: meta.cachedM0ProjectDocsHash,
 		sessionFactsVersion: meta.cachedM0SessionFactsVersion,
@@ -715,9 +790,12 @@ function readCurrentMarkersFromCompartments(
 	projectDocsHash?: string,
 ): PiM0SnapshotMarkers {
 	const memPath = memoryProjectPath(state);
-	const memories = memPath
-		? getMemoriesByProject(db, memPath, ["active", "permanent"])
-		: [];
+	const workspace = resolveWorkspaceRenderContextPi(state, db);
+	const maxMemoryId = memPath
+		? workspace.isWorkspaced
+			? getMaxMemoryIdForProjects(db, workspace.expandedIdentities)
+			: getMaxMemoryIdForProjects(db, [memPath])
+		: 0;
 	const projectState = memPath ? getProjectState(db, memPath) : undefined;
 	const globalState = getProjectState(db, GLOBAL_USER_PROFILE_PROJECT_PATH);
 	return {
@@ -733,18 +811,20 @@ function readCurrentMarkersFromCompartments(
 						EMPTY_MAX_COMPARTMENT_SEQ,
 					)
 				: EMPTY_MAX_COMPARTMENT_SEQ,
-		maxMemoryId:
-			memories.length > 0
-				? memories.reduce(
-						(max, memory) => (memory.id > max ? memory.id : max),
-						0,
-					)
-				: 0,
+		maxMemoryId,
 		maxMutationId: getMaxM0MutationId(db, state.sessionId) ?? 0,
 		maxMemoryMutationId: memPath
-			? (getMaxMemoryMutationId(db, memPath) ?? 0)
+			? workspace.isWorkspaced
+				? (getMaxMemoryMutationIdForProjects(
+						db,
+						workspace.expandedIdentities,
+					) ?? 0)
+				: (getMaxMemoryMutationId(db, memPath) ?? 0)
 			: 0,
 		projectMemoryEpoch: projectState?.projectMemoryEpoch ?? 0,
+		workspaceFingerprint: workspace.isWorkspaced
+			? computeWorkspaceEpochFingerprint(db, workspace.identities)
+			: null,
 		projectUserProfileVersion: globalState?.projectUserProfileVersion ?? 0,
 		projectDocsHash:
 			projectDocsHash ??
@@ -830,7 +910,19 @@ export function mustMaterializePi(
 	if (current.projectDocsHash !== (meta.cachedM0ProjectDocsHash ?? "")) {
 		return { value: true, reason: "project_docs_change" };
 	}
-	if (current.projectMemoryEpoch !== (meta.cachedM0ProjectMemoryEpoch ?? 0)) {
+	if (
+		current.workspaceFingerprint !== null ||
+		(meta.cachedM0WorkspaceFingerprint ?? null) !== null
+	) {
+		if (
+			current.workspaceFingerprint !==
+			(meta.cachedM0WorkspaceFingerprint ?? null)
+		) {
+			return { value: true, reason: "project_memory_change" };
+		}
+	} else if (
+		current.projectMemoryEpoch !== (meta.cachedM0ProjectMemoryEpoch ?? 0)
+	) {
 		return { value: true, reason: "project_memory_change" };
 	}
 	// Use !== (not >), matching OpenCode mustMaterialize: a max-id that DECREASES
@@ -881,11 +973,21 @@ export function renderM0Pi(
 	memoriesOverride?: Memory[],
 	compartmentsOverride?: PiCompartment[],
 	userProfileOverride?: UserMemory[],
+	workspaceOverride?: WorkspaceRenderContext,
 ): string {
 	const memPath = memoryProjectPath(state);
+	const workspace =
+		workspaceOverride ?? resolveWorkspaceRenderContextPi(state, db);
 	const allMemories =
 		memoriesOverride ??
-		(memPath ? getMemoriesByProject(db, memPath, ["active", "permanent"]) : []);
+		(memPath
+			? workspace.isWorkspaced
+				? getMemoriesByProjects(db, workspace.expandedIdentities, [
+						"active",
+						"permanent",
+					])
+				: getMemoriesByProject(db, memPath, ["active", "permanent"])
+			: []);
 	// Use the V2 trim + render helpers (shared with OpenCode) so both harnesses
 	// emit the SAME structured <project-memory><memory id= category= importance=>
 	// shape and the same permanent-first / importance-DESC ordering. A divergent
@@ -893,16 +995,33 @@ export function renderM0Pi(
 	// Always trim with the default memory-budget fallback (matching OpenCode),
 	// not gated on a truthy injectionBudgetTokens — an unset budget must NOT mean
 	// "render every memory untrimmed", which would grow m[0] without bound.
+	const memoryRenderOptions: MemoryRenderOptions = {
+		sourceNameByMemoryId: sourceNamesForPiMemories({
+			memories: allMemories,
+			projectPath: memPath,
+			workspace,
+		}),
+	};
 	const memories =
 		allMemories.length > 0
-			? trimMemoriesToBudgetV2(
-					state.sessionId,
-					allMemories,
-					state.injectionBudgetTokens ?? DEFAULT_MEMORY_BUDGET_TOKENS,
-				).renderOrder
+			? workspace.isWorkspaced
+				? trimWorkspaceMemoriesToBudgetV2(
+						state.sessionId,
+						allMemories,
+						state.injectionBudgetTokens ?? DEFAULT_MEMORY_BUDGET_TOKENS,
+						workspace,
+						memoryRenderOptions,
+					).renderOrder
+				: trimMemoriesToBudgetV2(
+						state.sessionId,
+						allMemories,
+						state.injectionBudgetTokens ?? DEFAULT_MEMORY_BUDGET_TOKENS,
+					).renderOrder
 			: allMemories;
 	const memoryBlock =
-		memories.length > 0 ? renderMemoryBlockV2(memories) : undefined;
+		memories.length > 0
+			? renderMemoryBlockV2(memories, "project-memory", memoryRenderOptions)
+			: undefined;
 	// v2: decay-render compartments via the shared module (same validated curve
 	// as OpenCode). Facts are NOT rendered (v2 faithful: facts = promoted
 	// memories, surfaced via memoryBlock / <project-memory>).
@@ -956,13 +1075,35 @@ export function renderM0Pi(
 function renderedMemoryIdsForPi(
 	state: PiM0M1State,
 	memories: readonly Memory[],
+	workspace?: WorkspaceRenderContext,
+	db?: ContextDatabase,
 ): number[] {
 	if (memories.length === 0) return [];
-	return trimMemoriesToBudgetV2(
-		state.sessionId,
-		[...memories],
-		state.injectionBudgetTokens ?? DEFAULT_MEMORY_BUDGET_TOKENS,
-	).renderOrder.map((memory) => memory.id);
+	const resolvedWorkspace =
+		workspace ?? (db ? resolveWorkspaceRenderContextPi(state, db) : undefined);
+	const renderOptions: MemoryRenderOptions = resolvedWorkspace
+		? {
+				sourceNameByMemoryId: sourceNamesForPiMemories({
+					memories,
+					projectPath: memoryProjectPath(state),
+					workspace: resolvedWorkspace,
+				}),
+			}
+		: {};
+	const trimmed = resolvedWorkspace?.isWorkspaced
+		? trimWorkspaceMemoriesToBudgetV2(
+				state.sessionId,
+				[...memories],
+				state.injectionBudgetTokens ?? DEFAULT_MEMORY_BUDGET_TOKENS,
+				resolvedWorkspace,
+				renderOptions,
+			)
+		: trimMemoriesToBudgetV2(
+				state.sessionId,
+				[...memories],
+				state.injectionBudgetTokens ?? DEFAULT_MEMORY_BUDGET_TOKENS,
+			);
+	return trimmed.renderOrder.map((memory) => memory.id);
 }
 
 /** Raised when the m[0] snapshot changed between the read-markers phase and the
@@ -1004,9 +1145,22 @@ function readFrozenM0InputsPi(
 	// writer cannot make m[0] include rows that m[1] still considers "new".
 	const memPath = memoryProjectPath(state);
 	const read = db.transaction(() => {
+		const workspace = resolveWorkspaceRenderContextPi(state, db);
 		const compartments = getCompartments(db, state.sessionId);
 		const memories = memPath
-			? getMemoriesByProject(db, memPath, ["active", "permanent"], memoryCutoff)
+			? workspace.isWorkspaced
+				? getMemoriesByProjects(
+						db,
+						workspace.expandedIdentities,
+						["active", "permanent"],
+						memoryCutoff,
+					)
+				: getMemoriesByProject(
+						db,
+						memPath,
+						["active", "permanent"],
+						memoryCutoff,
+					)
 			: [];
 		const userProfile = safeGetActiveUserMemoriesPi(db);
 		const projectState = memPath ? getProjectState(db, memPath) : undefined;
@@ -1017,15 +1171,24 @@ function readFrozenM0InputsPi(
 					compartment.sequence > max ? compartment.sequence : max,
 				EMPTY_MAX_COMPARTMENT_SEQ,
 			),
-			maxMemoryId: memories.reduce(
-				(max, memory) => (memory.id > max ? memory.id : max),
-				0,
-			),
+			maxMemoryId: memPath
+				? workspace.isWorkspaced
+					? getMaxMemoryIdForProjects(db, workspace.expandedIdentities)
+					: getMaxMemoryIdForProjects(db, [memPath])
+				: 0,
 			maxMutationId: getMaxM0MutationId(db, state.sessionId) ?? 0,
 			maxMemoryMutationId: memPath
-				? (getMaxMemoryMutationId(db, memPath) ?? 0)
+				? workspace.isWorkspaced
+					? (getMaxMemoryMutationIdForProjects(
+							db,
+							workspace.expandedIdentities,
+						) ?? 0)
+					: (getMaxMemoryMutationId(db, memPath) ?? 0)
 				: 0,
 			projectMemoryEpoch: projectState?.projectMemoryEpoch ?? 0,
+			workspaceFingerprint: workspace.isWorkspaced
+				? computeWorkspaceEpochFingerprint(db, workspace.identities)
+				: null,
 			projectUserProfileVersion: globalState?.projectUserProfileVersion ?? 0,
 			projectDocsHash: docs.canonicalHash,
 			sessionFactsVersion: getSessionFactsVersion(db, state.sessionId),
@@ -1037,7 +1200,7 @@ function readFrozenM0InputsPi(
 			systemHash: (state.hardSignals ?? EMPTY_PI_HARD_SIGNALS).systemHash,
 			modelKey: (state.hardSignals ?? EMPTY_PI_HARD_SIGNALS).modelKey,
 		};
-		return { docs, markers, compartments, memories, userProfile };
+		return { docs, markers, compartments, memories, userProfile, workspace };
 	});
 	return read();
 }
@@ -1069,6 +1232,7 @@ function renderFreshM0PiNonPersisted(
 		frozen.memories,
 		frozen.compartments,
 		frozen.userProfile,
+		frozen.workspace,
 	);
 	let attempts = 0;
 	while (
@@ -1085,13 +1249,19 @@ function renderFreshM0PiNonPersisted(
 			frozen.memories,
 			frozen.compartments,
 			frozen.userProfile,
+			frozen.workspace,
 		);
 		attempts += 1;
 	}
 	return {
 		m0,
 		snapshotMarkers: frozen.markers,
-		renderedMemoryIds: renderedMemoryIdsForPi(state, frozen.memories),
+		renderedMemoryIds: renderedMemoryIdsForPi(
+			state,
+			frozen.memories,
+			frozen.workspace,
+			db,
+		),
 	};
 }
 
@@ -1112,7 +1282,12 @@ export function materializeM0Pi(
 	const snapshotMemories = frozen.memories;
 	const snapshotCompartments = frozen.compartments;
 	const snapshotUserProfile = frozen.userProfile;
-	const renderedMemoryIds = renderedMemoryIdsForPi(state, snapshotMemories);
+	const renderedMemoryIds = renderedMemoryIdsForPi(
+		state,
+		snapshotMemories,
+		frozen.workspace,
+		db,
+	);
 	// Over-budget tightening loop (matches OpenCode materializeM0): if the
 	// rendered m[0] exceeds the history budget, escalate the decay pressure and
 	// re-render up to 3x so tight budgets demote more aggressively. Without this,
@@ -1126,6 +1301,7 @@ export function materializeM0Pi(
 		snapshotMemories,
 		snapshotCompartments,
 		snapshotUserProfile,
+		frozen.workspace,
 	);
 	const historyBudget =
 		state.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS;
@@ -1144,6 +1320,7 @@ export function materializeM0Pi(
 			snapshotMemories,
 			snapshotCompartments,
 			snapshotUserProfile,
+			frozen.workspace,
 		);
 		attempts += 1;
 	}
@@ -1172,8 +1349,13 @@ export function materializeM0Pi(
 		// m[0] — they surface in m[1] via the persisted maxMemoryId watermark. The
 		// memory-mutation cursor IS included because a materialization pass must
 		// reconcile every non-additive memory change up to its persisted cursor.
+		const memoryEpochStale =
+			current.workspaceFingerprint !== null ||
+			snapshotMarkers.workspaceFingerprint !== null
+				? current.workspaceFingerprint !== snapshotMarkers.workspaceFingerprint
+				: current.projectMemoryEpoch !== snapshotMarkers.projectMemoryEpoch;
 		const stale =
-			current.projectMemoryEpoch !== snapshotMarkers.projectMemoryEpoch ||
+			memoryEpochStale ||
 			current.projectUserProfileVersion !==
 				snapshotMarkers.projectUserProfileVersion ||
 			current.maxCompartmentSeq !== snapshotMarkers.maxCompartmentSeq ||
@@ -1206,6 +1388,7 @@ export function materializeM0Pi(
 		persistCachedM0(db, state.sessionId, {
 			m0Bytes,
 			projectMemoryEpoch: snapshotMarkers.projectMemoryEpoch,
+			workspaceFingerprint: snapshotMarkers.workspaceFingerprint,
 			projectUserProfileVersion: snapshotMarkers.projectUserProfileVersion,
 			maxCompartmentSeq: snapshotMarkers.maxCompartmentSeq,
 			maxMemoryId: snapshotMarkers.maxMemoryId,
@@ -1317,18 +1500,26 @@ function renderedKeyFilesBlockPi(
 function renderMemoryUpdatesBlockPi(args: {
 	db: ContextDatabase;
 	projectPath: string;
+	workspace: WorkspaceRenderContext;
 	afterId: number;
 	renderedMemoryIds: readonly number[];
 }): { block: string; count: number } {
 	if (args.renderedMemoryIds.length === 0) return { block: "", count: 0 };
 
 	const renderedIds = new Set(args.renderedMemoryIds);
-	const mutations = getMemoryMutationsForRender(
-		args.db,
-		args.projectPath,
-		args.afterId,
-		args.renderedMemoryIds,
-	);
+	const mutations = args.workspace.isWorkspaced
+		? getMemoryMutationsForRenderByProjects(
+				args.db,
+				args.workspace.expandedIdentities,
+				args.afterId,
+				args.renderedMemoryIds,
+			)
+		: getMemoryMutationsForRender(
+				args.db,
+				args.projectPath,
+				args.afterId,
+				args.renderedMemoryIds,
+			);
 	if (mutations.length === 0) return { block: "", count: 0 };
 
 	const lines = [
@@ -1383,6 +1574,7 @@ function renderM1PiWithMetadata(
 	compartmentsOverride?: readonly PiCompartment[],
 ): RenderM1PiResult {
 	const sections: string[] = [];
+	const workspace = resolveWorkspaceRenderContextPi(state, db);
 	const keyFiles = renderedKeyFilesBlockPi(state, db, preRenderedKeyFilesBlock);
 	if (keyFiles) sections.push(keyFiles);
 
@@ -1391,6 +1583,7 @@ function renderM1PiWithMetadata(
 		? renderMemoryUpdatesBlockPi({
 				db,
 				projectPath: memPath,
+				workspace,
 				afterId: markers.maxMemoryMutationId,
 				renderedMemoryIds,
 			})
@@ -1409,16 +1602,27 @@ function renderM1PiWithMetadata(
 	}
 
 	const newMemories = memPath
-		? getMemoriesByProject(
-				db,
-				memPath,
-				["active", "permanent"],
-				// Freeze expiry to the m[0] materialization timestamp (parity with
-				// OpenCode readNewMemoriesForM1): defer passes replay the same markers,
-				// so a memory crossing expires_at between passes can't silently shift
-				// m[1].
-				markers.materializedAt,
-			).filter((memory) => memory.id > markers.maxMemoryId)
+		? workspace.isWorkspaced
+			? readNewMemoriesForM1Union(
+					db,
+					workspace.expandedIdentities,
+					markers.maxMemoryId,
+					// Freeze expiry to the m[0] materialization timestamp (parity with
+					// OpenCode readNewMemoriesForM1): defer passes replay the same markers,
+					// so a memory crossing expires_at between passes can't silently shift
+					// m[1].
+					markers.materializedAt,
+				)
+			: getMemoriesByProject(
+					db,
+					memPath,
+					["active", "permanent"],
+					// Freeze expiry to the m[0] materialization timestamp (parity with
+					// OpenCode readNewMemoriesForM1): defer passes replay the same markers,
+					// so a memory crossing expires_at between passes can't silently shift
+					// m[1].
+					markers.materializedAt,
+				).filter((memory) => memory.id > markers.maxMemoryId)
 		: [];
 	if (newMemories.length > 0) {
 		// Trim to 25% of the memory budget and V2-render with the "new-memories"
@@ -1427,14 +1631,23 @@ function renderM1PiWithMetadata(
 		// m[0] materializations (m[1] is the volatile delta; it must stay small).
 		const memoryBudget =
 			state.injectionBudgetTokens ?? DEFAULT_MEMORY_BUDGET_TOKENS;
+		const memoryRenderOptions: MemoryRenderOptions = {
+			sourceNameByMemoryId: sourceNamesForPiMemories({
+				memories: newMemories,
+				projectPath: memPath,
+				workspace,
+			}),
+		};
 		const trimmedNewMemories = trimMemoriesToBudgetV2(
 			state.sessionId,
 			newMemories,
 			Math.max(1, Math.floor(memoryBudget * 0.25)),
+			memoryRenderOptions,
 		).renderOrder;
 		const newMemoriesBlock = renderMemoryBlockV2(
 			trimmedNewMemories,
 			"new-memories",
+			memoryRenderOptions,
 		);
 		if (newMemoriesBlock) sections.push(newMemoriesBlock);
 	}
@@ -1489,6 +1702,7 @@ interface CachedPiM0M1Row {
 	cached_m0_bytes: Buffer | Uint8Array | null;
 	cached_m1_bytes: Buffer | Uint8Array | null;
 	cached_m0_project_memory_epoch: number | null;
+	cached_m0_workspace_fingerprint: string | null;
 	cached_m0_project_user_profile_version: number | null;
 	cached_m0_max_compartment_seq: number | null;
 	cached_m0_max_memory_id: number | null;
@@ -1537,6 +1751,7 @@ function readCachedPiM0M1Row(
 		.prepare(
 			`SELECT cached_m0_bytes, cached_m1_bytes,
 					cached_m0_project_memory_epoch,
+					cached_m0_workspace_fingerprint,
 					cached_m0_project_user_profile_version,
 					cached_m0_max_compartment_seq,
 					cached_m0_max_memory_id,
@@ -1579,6 +1794,7 @@ function markersFromCachedPiRow(
 		maxMutationId: row.cached_m0_max_mutation_id,
 		maxMemoryMutationId: row.cached_m0_max_memory_mutation_id,
 		projectMemoryEpoch: row.cached_m0_project_memory_epoch,
+		workspaceFingerprint: row.cached_m0_workspace_fingerprint,
 		projectUserProfileVersion: row.cached_m0_project_user_profile_version,
 		projectDocsHash: row.cached_m0_project_docs_hash ?? "",
 		materializedAt: row.cached_m0_materialized_at,
@@ -2006,16 +2222,21 @@ export function injectM0M1Pi(
 		state.sessionId,
 		`injected m[0]/m[1] into Pi messages (${m0.length} + ${m1.length} bytes, materialized=${materialized}${decision.reason ? ` reason=${decision.reason}` : ""})`,
 	);
+	const memPath = memoryProjectPath(state);
+	const workspace = resolveWorkspaceRenderContextPi(state, db);
+	const memoryCount = memPath
+		? workspace.isWorkspaced
+			? getMemoriesByProjects(db, workspace.expandedIdentities, [
+					"active",
+					"permanent",
+				]).length
+			: getMemoriesByProject(db, memPath, ["active", "permanent"]).length
+		: 0;
 	return {
 		injected: true,
 		compartmentCount: getCompartments(db, state.sessionId).length,
 		factCount: 0, // v2: facts retired as a render source (facts = promoted memories)
-		memoryCount: memoryProjectPath(state)
-			? getMemoriesByProject(db, memoryProjectPath(state) as string, [
-					"active",
-					"permanent",
-				]).length
-			: 0,
+		memoryCount,
 		skippedVisibleMessages,
 		m0Materialized: materialized,
 		m0Reason: decision.reason,

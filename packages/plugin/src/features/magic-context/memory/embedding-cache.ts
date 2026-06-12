@@ -1,8 +1,8 @@
 import type { Database } from "../../../shared/sqlite";
-import { loadAllEmbeddings } from "./storage-memory-embeddings";
+import { loadAllEmbeddings, type StoredMemoryEmbedding } from "./storage-memory-embeddings";
 
 interface ProjectEmbeddingCacheEntry {
-    embeddings: Map<number, Float32Array>;
+    embeddings: Map<number, StoredMemoryEmbedding>;
     expiresAt: number;
 }
 
@@ -26,7 +26,10 @@ function getValidCacheEntry(projectPath: string): ProjectEmbeddingCacheEntry | n
     return entry;
 }
 
-export function getProjectEmbeddings(db: Database, projectPath: string): Map<number, Float32Array> {
+export function getProjectEmbeddings(
+    db: Database,
+    projectPath: string,
+): Map<number, StoredMemoryEmbedding> {
     const cached = getValidCacheEntry(projectPath);
     if (cached) {
         return cached.embeddings;
@@ -40,7 +43,9 @@ export function getProjectEmbeddings(db: Database, projectPath: string): Map<num
     return embeddings;
 }
 
-export function peekProjectEmbeddings(projectPath: string): Map<number, Float32Array> | null {
+export function peekProjectEmbeddings(
+    projectPath: string,
+): Map<number, StoredMemoryEmbedding> | null {
     return getValidCacheEntry(projectPath)?.embeddings ?? null;
 }
 

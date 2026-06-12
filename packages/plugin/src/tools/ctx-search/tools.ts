@@ -60,8 +60,9 @@ function formatAge(committedAtMs: number): string {
 
 function formatResult(result: UnifiedSearchResult, index: number): string {
     if (result.source === "memory") {
+        const source = result.sourceName ? ` source=${result.sourceName}` : "";
         return [
-            `[${index}] [memory] score=${result.score.toFixed(2)} id=${result.memoryId} category=${result.category} match=${result.matchType}`,
+            `[${index}] [memory] score=${result.score.toFixed(2)} id=${result.memoryId} category=${result.category}${source} match=${result.matchType}`,
             result.content,
         ].join("\n");
     }

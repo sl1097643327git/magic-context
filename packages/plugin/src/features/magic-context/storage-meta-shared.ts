@@ -29,6 +29,7 @@ export interface SessionMetaRow {
     cached_m0_bytes: Buffer | Uint8Array | null;
     cached_m1_bytes: Buffer | Uint8Array | null;
     cached_m0_project_memory_epoch: number | null;
+    cached_m0_workspace_fingerprint: string | null;
     cached_m0_project_user_profile_version: number | null;
     cached_m0_max_compartment_seq: number | null;
     cached_m0_max_memory_id: number | null;
@@ -78,6 +79,7 @@ export const SESSION_META_SELECT_COLUMNS = [
     "cached_m0_bytes",
     "cached_m1_bytes",
     "cached_m0_project_memory_epoch",
+    "cached_m0_workspace_fingerprint",
     "cached_m0_project_user_profile_version",
     "cached_m0_max_compartment_seq",
     "cached_m0_max_memory_id",
@@ -126,6 +128,7 @@ export const META_COLUMNS: Record<string, string> = {
     cachedM0Bytes: "cached_m0_bytes",
     cachedM1Bytes: "cached_m1_bytes",
     cachedM0ProjectMemoryEpoch: "cached_m0_project_memory_epoch",
+    cachedM0WorkspaceFingerprint: "cached_m0_workspace_fingerprint",
     cachedM0ProjectUserProfileVersion: "cached_m0_project_user_profile_version",
     cachedM0MaxCompartmentSeq: "cached_m0_max_compartment_seq",
     cachedM0MaxMemoryId: "cached_m0_max_memory_id",
@@ -166,6 +169,7 @@ export const NULL_BIND_META_KEYS = new Set([
     "cachedM0Bytes",
     "cachedM1Bytes",
     "cachedM0ProjectMemoryEpoch",
+    "cachedM0WorkspaceFingerprint",
     "cachedM0ProjectUserProfileVersion",
     "cachedM0MaxCompartmentSeq",
     "cachedM0MaxMemoryId",
@@ -238,6 +242,7 @@ export function isSessionMetaRow(row: unknown): row is SessionMetaRow {
         isBlobOrNull(r.cached_m0_bytes) &&
         isBlobOrNull(r.cached_m1_bytes) &&
         isNumberOrNull(r.cached_m0_project_memory_epoch) &&
+        isStringOrNull(r.cached_m0_workspace_fingerprint) &&
         isNumberOrNull(r.cached_m0_project_user_profile_version) &&
         isNumberOrNull(r.cached_m0_max_compartment_seq) &&
         isNumberOrNull(r.cached_m0_max_memory_id) &&
@@ -289,6 +294,7 @@ export function getDefaultSessionMeta(sessionId: string): SessionMeta {
         cachedM0Bytes: null,
         cachedM1Bytes: null,
         cachedM0ProjectMemoryEpoch: null,
+        cachedM0WorkspaceFingerprint: null,
         cachedM0ProjectUserProfileVersion: null,
         cachedM0MaxCompartmentSeq: null,
         cachedM0MaxMemoryId: null,
@@ -402,6 +408,7 @@ export function toSessionMeta(row: SessionMetaRow): SessionMeta {
         cachedM0Bytes: toBufferOrNull(row.cached_m0_bytes),
         cachedM1Bytes: toBufferOrNull(row.cached_m1_bytes),
         cachedM0ProjectMemoryEpoch: numOrNull(row.cached_m0_project_memory_epoch),
+        cachedM0WorkspaceFingerprint: stringOrNull(row.cached_m0_workspace_fingerprint),
         cachedM0ProjectUserProfileVersion: numOrNull(row.cached_m0_project_user_profile_version),
         cachedM0MaxCompartmentSeq: numOrNull(row.cached_m0_max_compartment_seq),
         cachedM0MaxMemoryId: numOrNull(row.cached_m0_max_memory_id),
@@ -431,6 +438,7 @@ export function toSessionMeta(row: SessionMetaRow): SessionMeta {
 export interface PersistCachedM0Payload {
     m0Bytes: Buffer;
     projectMemoryEpoch: number | null;
+    workspaceFingerprint?: string | null;
     projectUserProfileVersion: number | null;
     maxCompartmentSeq: number;
     maxMemoryId: number | null;
@@ -455,6 +463,7 @@ export function persistCachedM0(
         `UPDATE session_meta SET
             cached_m0_bytes = ?,
             cached_m0_project_memory_epoch = ?,
+            cached_m0_workspace_fingerprint = ?,
             cached_m0_project_user_profile_version = ?,
             cached_m0_max_compartment_seq = ?,
             cached_m0_max_memory_id = ?,
@@ -471,6 +480,7 @@ export function persistCachedM0(
     ).run(
         Buffer.from(payload.m0Bytes),
         payload.projectMemoryEpoch,
+        payload.workspaceFingerprint ?? null,
         payload.projectUserProfileVersion,
         payload.maxCompartmentSeq,
         payload.maxMemoryId,
@@ -498,6 +508,7 @@ export function clearCachedM0M1(db: Database, sessionId: string): void {
         ["cached_m0_bytes", null],
         ["cached_m1_bytes", null],
         ["cached_m0_project_memory_epoch", null],
+        ["cached_m0_workspace_fingerprint", null],
         ["cached_m0_project_user_profile_version", null],
         ["cached_m0_max_compartment_seq", null],
         ["cached_m0_max_memory_id", null],

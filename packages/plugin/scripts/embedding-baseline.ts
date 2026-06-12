@@ -328,14 +328,14 @@ async function run() {
             const memVec = embeddings.get(memory.id);
             if (!memVec) continue;
             // Cross-model dim check: if dimensions differ the snapshot is bogus.
-            if (memVec.length !== vector.length) {
+            if (memVec.embedding.length !== vector.length) {
                 console.error(
-                    `[baseline] dimension mismatch: query dim=${vector.length} memory dim=${memVec.length} ` +
+                    `[baseline] dimension mismatch: query dim=${vector.length} memory dim=${memVec.embedding.length} ` +
                         `(memoryId=${memory.id}). The DB still holds old model vectors; let proactive embed complete first.`,
                 );
                 process.exit(1);
             }
-            const score = cosineSimilarity(vector, memVec);
+            const score = cosineSimilarity(vector, memVec.embedding);
             scored.push({ memoryId: memory.id, score });
         }
 

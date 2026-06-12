@@ -249,7 +249,7 @@ describe("storage-memory", () => {
             saveEmbedding(db, memory.id, new Float32Array([0.1, 0.2]), "local:model-a");
 
             const initialCache = getProjectEmbeddings(db, "/repo/project");
-            expect(Array.from(initialCache.get(memory.id) ?? [])).toEqual(
+            expect(Array.from(initialCache.get(memory.id)?.embedding ?? [])).toEqual(
                 Array.from(new Float32Array([0.1, 0.2])),
             );
 
@@ -348,7 +348,9 @@ describe("storage-memory", () => {
             const embeddings = loadAllEmbeddings(db, "/repo/project");
 
             expect(Array.from(embeddings.keys())).toEqual([memoryA.id]);
-            expect(Array.from(embeddings.get(memoryA.id) ?? [])).toEqual([0.25, 0.5, 0.75]);
+            expect(Array.from(embeddings.get(memoryA.id)?.embedding ?? [])).toEqual([
+                0.25, 0.5, 0.75,
+            ]);
             expect(getStoredModelId(db, "/repo/project")).toBe("local:model-a");
 
             deleteEmbedding(db, memoryA.id);

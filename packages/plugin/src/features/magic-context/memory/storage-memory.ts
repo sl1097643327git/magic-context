@@ -1,4 +1,5 @@
 import type { Database, Statement as PreparedStatement } from "../../../shared/sqlite";
+import { MEMORY_CATEGORY_ORDER_SQL } from "./constants";
 import { invalidateMemory, invalidateProject } from "./embedding-cache";
 import { computeNormalizedHash } from "./normalize-hash";
 import type {
@@ -512,6 +513,84 @@ export function getMemoriesByProject(
  * deleted, 27 expired KNOWN_ISSUES stranded). Migration is a re-categorization,
  * so it re-evaluates every active row regardless of TTL.
  */
+
+function sqlPlaceholders(values: readonly unknown[]): string {
+    return values.map(() => "?").join(", ");
+}
+
+function uniqueValues(values: readonly string[]): string[] {
+    return [...new Set(values.filter((value) => value.length > 0))];
+}
+
+export function getMemoriesByProjects(
+    db: Database,
+    projectPaths: readonly string[],
+    statuses: MemoryStatus[] = ["active", "permanent"],
+    expiryCutoff: number = Date.now(),
+): Memory[] {
+    const identities = uniqueValues(projectPaths);
+    if (identities.length === 0 || statuses.length === 0) return [];
+    if (identities.length === 1) {
+        return getMemoriesByProject(db, identities[0], statuses, expiryCutoff);
+    }
+
+    const rows = db
+        .prepare(
+            `SELECT ${getMemorySelectColumns(db)}
+               FROM memories
+              WHERE project_path IN (${sqlPlaceholders(identities)})
+                AND status IN (${sqlPlaceholders(statuses)})
+                AND (expires_at IS NULL OR expires_at > ?)
+              ORDER BY category ASC, updated_at DESC, id ASC`,
+        )
+        .all(...identities, ...statuses, expiryCutoff)
+        .filter(isMemoryRow);
+
+    return rows.map(toMemory);
+}
+
+export function getMaxMemoryIdForProjects(db: Database, projectPaths: readonly string[]): number {
+    const identities = uniqueValues(projectPaths);
+    if (identities.length === 0) return 0;
+    if (identities.length === 1) {
+        const row = db
+            .prepare("SELECT COALESCE(MAX(id), 0) AS max_id FROM memories WHERE project_path = ?")
+            .get(identities[0]) as { max_id?: number } | undefined;
+        return typeof row?.max_id === "number" ? row.max_id : 0;
+    }
+    const row = db
+        .prepare(
+            `SELECT COALESCE(MAX(id), 0) AS max_id
+               FROM memories
+              WHERE project_path IN (${sqlPlaceholders(identities)})`,
+        )
+        .get(...identities) as { max_id?: number } | undefined;
+    return typeof row?.max_id === "number" ? row.max_id : 0;
+}
+
+export function readNewMemoriesForM1Union(
+    db: Database,
+    projectPaths: readonly string[],
+    afterId: number,
+    expiryCutoff: number,
+): Memory[] {
+    const identities = uniqueValues(projectPaths);
+    if (identities.length === 0) return [];
+    const rows = db
+        .prepare(
+            `SELECT ${getMemorySelectColumns(db)}
+               FROM memories
+              WHERE project_path IN (${sqlPlaceholders(identities)})
+                AND id > ?
+                AND status IN ('active', 'permanent')
+                AND (expires_at IS NULL OR expires_at > ?)
+              ORDER BY ${MEMORY_CATEGORY_ORDER_SQL}, id ASC`,
+        )
+        .all(...identities, afterId, expiryCutoff)
+        .filter(isMemoryRow);
+    return rows.map(toMemory);
+}
+
 export function getAllActiveMemoriesForMigration(db: Database, projectPath: string): Memory[] {
     const rows = getActiveMemoriesNoExpiryStatement(db).all(projectPath).filter(isMemoryRow);
     return rows.map(toMemory);
