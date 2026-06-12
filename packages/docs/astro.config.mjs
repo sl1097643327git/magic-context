@@ -1,12 +1,18 @@
 // @ts-check
 import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
+import starlightThemeObsidian from "starlight-theme-obsidian";
 
 // https://astro.build/config
 export default defineConfig({
     site: "https://docs.cortexkit.io",
+    base: "/magic-context",
+    // Nest output under /magic-context so the deployed asset tree matches the
+    // URL space — sibling CortexKit plugin docs will share this subdomain.
+    outDir: "./dist-root/magic-context",
     integrations: [
         starlight({
+            plugins: [starlightThemeObsidian({ graph: false, backlinks: false })],
             title: "Magic Context",
             description:
                 "Persistent memory and self-managing context for OpenCode and Pi coding agents.",

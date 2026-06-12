@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "astro dev",
     "start": "astro dev",
-    "build": "astro build",
+    "build": "astro build && cp root-redirect.html dist-root/index.html",
     "preview": "astro preview",
     "astro": "astro",
     "deploy": "astro build && wrangler deploy"
@@ -13,7 +13,9 @@
   "dependencies": {
     "@astrojs/starlight": "^0.34.0",
     "astro": "^5.7.0",
-    "sharp": "^0.34.5"
+    "sharp": "^0.34.5",
+    "starlight-site-graph": "^0.5.0",
+    "starlight-theme-obsidian": "^0.4.1"
   },
   "private": true,
   "devDependencies": {
