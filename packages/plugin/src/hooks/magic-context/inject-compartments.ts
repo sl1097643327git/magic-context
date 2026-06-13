@@ -1066,11 +1066,13 @@ export function mustMaterialize(args: {
     // via the maxMemoryId watermark; memory mutations use the m[1] reconcile
     // cursor. max_mutation_id (structural compartment delete/merge/recomp) IS a
     // trigger because it changes the rendered m[0] baseline content.
+    //
+    // NOTE: projectDocsHash is deliberately NOT a trigger. Project docs are part
+    // of m[0], but docs-only edits must not evict the cached prefix; materializeM0
+    // reads fresh docs whenever a natural HARD fold happens and stores that hash
+    // with the bytes it actually rendered.
     if (args.state.cachedM0MaxMutationId !== current.maxMutationId) {
         return { value: true, reason: "max_mutation_id" };
-    }
-    if ((args.state.cachedM0ProjectDocsHash ?? "") !== current.projectDocsHash) {
-        return { value: true, reason: "project_docs_hash" };
     }
     if ((args.state.cachedM0UpgradeState ?? null) !== current.upgradeState) {
         return { value: true, reason: "upgrade_state" };
@@ -1631,7 +1633,6 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             current.maxCompartmentSeq !== snapshotMarkers.maxCompartmentSeq ||
             current.maxMutationId !== snapshotMarkers.maxMutationId ||
             current.maxMemoryMutationId !== snapshotMarkers.maxMemoryMutationId ||
-            current.projectDocsHash !== snapshotMarkers.projectDocsHash ||
             current.sessionFactsVersion !== snapshotMarkers.sessionFactsVersion ||
             current.upgradeState !== snapshotMarkers.upgradeState;
         if (stale) {
@@ -2037,7 +2038,9 @@ function cachedRowMatchesState(row: CachedM0M1Row, state: M0M1State): boolean {
         row.cached_m0_max_memory_id === state.cachedM0MaxMemoryId &&
         row.cached_m0_max_mutation_id === state.cachedM0MaxMutationId &&
         row.cached_m0_max_memory_mutation_id === state.cachedM0MaxMemoryMutationId &&
-        (row.cached_m0_project_docs_hash ?? "") === (state.cachedM0ProjectDocsHash ?? "") &&
+        // Project-docs hash is inert for CAS decisions: byte-different m[0] rows
+        // fail the buffer compare above, while hash-only drift with identical bytes
+        // must still refresh m[1] against the current cached prefix.
         row.cached_m0_materialized_at === state.cachedM0MaterializedAt &&
         row.cached_m0_session_facts_version === state.cachedM0SessionFactsVersion &&
         (row.cached_m0_upgrade_state ?? null) === (state.cachedM0UpgradeState ?? null) &&

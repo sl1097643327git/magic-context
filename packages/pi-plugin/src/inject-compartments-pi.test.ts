@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appendCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
@@ -1078,6 +1078,94 @@ describe("injectM0M1Pi", () => {
 			closeQuietly(db);
 		}
 	});
+
+	it("soft m1 refresh CAS rejects byte-different m[0] even when non-doc markers match", () => {
+		const db = createTestDb();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-m1-soft-cas-bytes-"));
+		const originalExec = db.exec.bind(db);
+		try {
+			const state = piState("ses-pi-m1-soft-cas-bytes", cwd);
+			injectM0M1Pi(
+				state,
+				db,
+				[userMessage("hello", 10)] as never,
+				undefined,
+				true,
+			);
+			const siblingM0 = Buffer.from(
+				`<session-history>${"byte mismatch ".repeat(300)}</session-history>`,
+				"utf8",
+			);
+			let injectedSibling = false;
+			db.exec = ((sql: string) => {
+				if (sql === "BEGIN IMMEDIATE" && !injectedSibling) {
+					injectedSibling = true;
+					db.prepare(
+						"UPDATE session_meta SET cached_m0_bytes = ?, cached_m1_bytes = ? WHERE session_id = ?",
+					).run(
+						siblingM0,
+						Buffer.from("sibling cached pi m1 byte mismatch", "utf8"),
+						state.sessionId,
+					);
+				}
+				return originalExec(sql);
+			}) as typeof db.exec;
+
+			const bust = [userMessage("bust", 11)];
+			const result = injectM0M1Pi(state, db, bust as never, undefined, true);
+
+			expect(injectedSibling).toBe(true);
+			expect(result.m0Materialized).toBe(false);
+			expect(textOf(bust[0] as never)).toBe(siblingM0.toString("utf8"));
+			expect(textOf(bust[1] as never)).toBe(
+				"sibling cached pi m1 byte mismatch",
+			);
+		} finally {
+			db.exec = originalExec as typeof db.exec;
+			closeQuietly(db);
+		}
+	});
+
+	it("soft m1 refresh CAS treats docs-hash-only marker drift as a match", () => {
+		const db = createTestDb();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-m1-soft-cas-docs-"));
+		const originalExec = db.exec.bind(db);
+		try {
+			const state = piState("ses-pi-m1-soft-cas-docs", cwd);
+			const first = [userMessage("hello", 10)];
+			injectM0M1Pi(state, db, first as never, undefined, true);
+			const baselineM0 = textOf(first[0] as never);
+			insertMemory(db, {
+				projectPath: state.projectIdentity,
+				category: "ARCHITECTURE",
+				content: "Pi docs-hash-only CAS delta memory",
+				sourceType: "agent",
+			});
+			let changedDocsMarker = false;
+			db.exec = ((sql: string) => {
+				if (sql === "BEGIN IMMEDIATE" && !changedDocsMarker) {
+					changedDocsMarker = true;
+					db.prepare(
+						"UPDATE session_meta SET cached_m0_project_docs_hash = ? WHERE session_id = ?",
+					).run("docs-only-marker-drift", state.sessionId);
+				}
+				return originalExec(sql);
+			}) as typeof db.exec;
+
+			const bust = [userMessage("bust", 11)];
+			const result = injectM0M1Pi(state, db, bust as never, undefined, true);
+
+			expect(changedDocsMarker).toBe(true);
+			expect(result.m0Materialized).toBe(false);
+			expect(textOf(bust[0] as never)).toBe(baselineM0);
+			expect(textOf(bust[1] as never)).toContain(
+				"Pi docs-hash-only CAS delta memory",
+			);
+		} finally {
+			db.exec = originalExec as typeof db.exec;
+			closeQuietly(db);
+		}
+	});
 });
 
 describe("renderM0Pi sibling-block layout (OpenCode parity)", () => {
@@ -1279,6 +1367,76 @@ describe("mustMaterializePi — SOFT/HARD taxonomy (parity with OpenCode)", () =
 				value: false,
 				reason: null,
 			});
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("does NOT materialize m[0] on a project docs hash change", () => {
+		const db = createTestDb();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-tax-docs-soft-"));
+		try {
+			const state = {
+				...piState("ses-pi-tax-docs-soft", cwd),
+				hardSignals: baseHard,
+			};
+			writeFileSync(join(cwd, "ARCHITECTURE.md"), "# Old Pi docs\n");
+			injectM0M1Pi(
+				state,
+				db,
+				[userMessage("hi", 10)] as never,
+				undefined,
+				true,
+			);
+
+			writeFileSync(join(cwd, "ARCHITECTURE.md"), "# New Pi docs\n");
+
+			expect(mustMaterializePi(state, db)).toEqual({
+				value: false,
+				reason: null,
+			});
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("folds current project docs on the next natural HARD materialization", () => {
+		const db = createTestDb();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-tax-docs-hard-"));
+		try {
+			const state = {
+				...piState("ses-pi-tax-docs-hard", cwd),
+				hardSignals: baseHard,
+			};
+			writeFileSync(join(cwd, "ARCHITECTURE.md"), "# Old Pi architecture\n");
+			const first = [userMessage("hi", 10)];
+			injectM0M1Pi(state, db, first as never, undefined, true);
+			expect(textOf(first[0] as never)).toContain("Old Pi architecture");
+
+			writeFileSync(
+				join(cwd, "ARCHITECTURE.md"),
+				"# Updated Pi architecture\nFresh Pi docs folded on hard bust.\n",
+			);
+			const changed = {
+				...state,
+				hardSignals: { ...baseHard, systemHash: "sys-v2" },
+			};
+			const second = [userMessage("hi again", 11)];
+			const result = injectM0M1Pi(
+				changed,
+				db,
+				second as never,
+				undefined,
+				true,
+			);
+
+			expect(result.m0Materialized).toBe(true);
+			expect(result.m0Reason).toBe("system_hash");
+			expect(textOf(second[0] as never)).toContain("Updated Pi architecture");
+			expect(textOf(second[0] as never)).toContain(
+				"Fresh Pi docs folded on hard bust.",
+			);
+			expect(textOf(second[0] as never)).not.toContain("Old Pi architecture");
 		} finally {
 			closeQuietly(db);
 		}

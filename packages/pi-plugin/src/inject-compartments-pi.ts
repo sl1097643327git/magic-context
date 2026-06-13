@@ -907,9 +907,6 @@ export function mustMaterializePi(
 	if (meta.cachedM0UpgradeState !== current.upgradeState) {
 		return { value: true, reason: "renderer_upgrade" };
 	}
-	if (current.projectDocsHash !== (meta.cachedM0ProjectDocsHash ?? "")) {
-		return { value: true, reason: "project_docs_change" };
-	}
 	if (
 		current.workspaceFingerprint !== null ||
 		(meta.cachedM0WorkspaceFingerprint ?? null) !== null
@@ -943,6 +940,9 @@ export function mustMaterializePi(
 	// maxMemoryId watermark, so they must not bust the m[0] cache. Memory
 	// mutations use cachedM0MaxMemoryMutationId as an m[1] reconcile cursor,
 	// not as a materialization trigger; keep it out of this trigger set.
+	// projectDocsHash is also NOT a trigger: docs-only edits ride along until a
+	// natural HARD fold, which reads fresh docs and persists the hash matching the
+	// bytes it rendered.
 	// session_facts is retired as a render source (facts = promoted memories),
 	// so its version is pinned to 0 and never triggers either.
 	return { value: false, reason: null };
@@ -1361,7 +1361,6 @@ export function materializeM0Pi(
 			current.maxCompartmentSeq !== snapshotMarkers.maxCompartmentSeq ||
 			current.maxMutationId !== snapshotMarkers.maxMutationId ||
 			current.maxMemoryMutationId !== snapshotMarkers.maxMemoryMutationId ||
-			current.projectDocsHash !== snapshotMarkers.projectDocsHash ||
 			// Inert today (both harnesses pin sessionFactsVersion to 0 — facts are
 			// retired in v2), but kept for structural parity with OpenCode
 			// materializeM0 so the two stale checks can't silently drift if either
@@ -1830,8 +1829,9 @@ function cachedPiRowMatchesSnapshot(args: {
 		rowMarkers.maxMemoryId === args.markers.maxMemoryId &&
 		rowMarkers.maxMutationId === args.markers.maxMutationId &&
 		rowMarkers.maxMemoryMutationId === args.markers.maxMemoryMutationId &&
-		(rowMarkers.projectDocsHash ?? "") ===
-			(args.markers.projectDocsHash ?? "") &&
+		// Project-docs hash is inert for CAS decisions: byte-different m[0] rows
+		// fail the buffer compare above, while hash-only drift with identical bytes
+		// must still refresh m[1] against the current cached prefix.
 		rowMarkers.materializedAt === args.markers.materializedAt &&
 		rowMarkers.sessionFactsVersion === args.markers.sessionFactsVersion &&
 		(rowMarkers.upgradeState ?? null) === (args.markers.upgradeState ?? null) &&

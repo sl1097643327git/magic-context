@@ -222,9 +222,22 @@ function cachedPrefixBytes(segs: Segment[], divergeIdx: number): { bytes: number
 }
 
 function fmtTime(iso: string): string {
-    // dumps are UTC; show HH:MM:SS UTC for direct correlation with meta.
-    const m = iso.match(/T(\d{2}:\d{2}:\d{2})/);
-    return m ? m[1] : iso;
+    // Dumps are UTC; the dashboard renders local time (UTC+2), so include the date
+    // here to keep multi-day dump sets unambiguous when correlating views.
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+    const dd = String(d.getUTCDate()).padStart(2, "0");
+    const hh = String(d.getUTCHours()).padStart(2, "0");
+    const mi = String(d.getUTCMinutes()).padStart(2, "0");
+    const ss = String(d.getUTCSeconds()).padStart(2, "0");
+    return `${mm}-${dd} ${hh}:${mi}:${ss} UTC`;
+}
+
+function lastBreakpointIndex(segs: Segment[]): number {
+    let last = -1;
+    for (let i = 0; i < segs.length; i += 1) if (segs[i].breakpoint) last = i;
+    return last;
 }
 
 function main(): void {
@@ -243,18 +256,19 @@ function main(): void {
     console.log(`Session: ${snaps[0].session}`);
     console.log(`Dumps:   ${snaps.length}  (dir: ${opts.dir})`);
     console.log("");
+    console.log("Dashboard times are local (UTC+2); table times are UTC.");
     console.log(
-        "time(UTC) | segs | verdict | first-divergence        | cachedPrefix@breakpoint",
+        "time(UTC)          | segs | verdict | first-divergence        | prevBytes → curBytes        | cachedPrefix@breakpoint",
     );
     console.log(
-        "----------|------|---------|-------------------------|------------------------",
+        "-------------------|------|---------|-------------------------|-----------------------------|------------------------",
     );
 
     for (let k = 0; k < snaps.length; k += 1) {
         const cur = snaps[k];
         if (k === 0) {
             console.log(
-                `${fmtTime(cur.createdAt)} | ${String(cur.segments.length).padStart(4)} | BASE    | (first request)         |`,
+                `${fmtTime(cur.createdAt)} | ${String(cur.segments.length).padStart(4)} | BASE    | (first request)         |                             |`,
             );
             continue;
         }
@@ -262,24 +276,22 @@ function main(): void {
         const idx = firstDivergence(prev.segments, cur.segments);
         if (idx === -1) {
             console.log(
-                `${fmtTime(cur.createdAt)} | ${String(cur.segments.length).padStart(4)} | SAME    | (identical to prev)     |`,
+                `${fmtTime(cur.createdAt)} | ${String(cur.segments.length).padStart(4)} | SAME    | (identical to prev)     |                             |`,
             );
             continue;
         }
         const seg = cur.segments[idx] ?? prev.segments[idx];
-        const lastBreakpointIdx = (() => {
-            let last = -1;
-            for (let i = 0; i < cur.segments.length; i += 1) if (cur.segments[i].breakpoint) last = i;
-            return last;
-        })();
-        // STABLE: divergence is only in the growing tail at/after the final
-        // breakpoint (expected — new turn appended). BUST: divergence lands
-        // before the final breakpoint, invalidating cached prefix it should keep.
-        const verdict = idx >= lastBreakpointIdx ? "STABLE" : "BUST";
+        // The reusable cache was written at PREV's breakpoints. OpenCode moves the
+        // tail breakpoint forward every request, so judging against CUR's final
+        // breakpoint mislabels ordinary tail growth as a bust.
+        const prevLastBreakpoint = lastBreakpointIndex(prev.segments);
+        const verdict = idx > prevLastBreakpoint ? "STABLE" : "BUST";
+        const prevPrefix = cachedPrefixBytes(prev.segments, prev.segments.length);
         const cp = cachedPrefixBytes(cur.segments, idx);
+        const byteDelta = `${prevPrefix.bytes.toLocaleString()}B → ${cp.bytes.toLocaleString()}B`;
         const segId = seg?.id ?? `seg[${idx}]`;
         console.log(
-            `${fmtTime(cur.createdAt)} | ${String(cur.segments.length).padStart(4)} | ${verdict.padEnd(7)} | ${segId.padEnd(23)} | ${cp.at} (${cp.bytes.toLocaleString()}B)`,
+            `${fmtTime(cur.createdAt)} | ${String(cur.segments.length).padStart(4)} | ${verdict.padEnd(7)} | ${segId.padEnd(23)} | ${byteDelta.padEnd(27)} | ${cp.at} (${cp.bytes.toLocaleString()}B)`,
         );
 
         if ((opts.showDiff || opts.allBusts) && verdict === "BUST") {

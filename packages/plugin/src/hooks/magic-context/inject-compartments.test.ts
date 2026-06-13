@@ -599,7 +599,9 @@ describe("m[0]/m[1] materialization", () => {
         ).toBe("max_mutation_id");
     });
 
-    it("mustMaterialize detects project docs hash changes", () => {
+    it("mustMaterialize treats project docs hash changes as a SOFT defer input", () => {
+        // Project docs live in the frozen prefix, but docs-only edits must not
+        // force a fold: they ride along until a natural HARD bust refreshes m[0].
         db = makeDb();
         const projectDirectory = makeProjectDir();
         materializeM0({
@@ -619,8 +621,57 @@ describe("m[0]/m[1] materialization", () => {
                 state,
                 projectPath: PROJECT_PATH,
                 projectDirectory,
-            }).reason,
-        ).toBe("project_docs_hash");
+            }),
+        ).toEqual({ value: false, reason: null });
+    });
+
+    it("folds current project docs on the next natural HARD materialization", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        writeFileSync(join(projectDirectory, "ARCHITECTURE.md"), "# Old architecture\n");
+        const state = readStateFromMeta();
+        const first = [userMessage("m1", "hello")];
+        injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: first,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            hardSignals: {
+                systemHash: "sys-v1",
+                modelKey: "model-v1",
+                cacheExpired: false,
+                lastResponseTime: 0,
+            },
+        });
+        expect(renderedText(first[0])).toContain("Old architecture");
+
+        writeFileSync(
+            join(projectDirectory, "ARCHITECTURE.md"),
+            "# Updated architecture\nFresh docs folded on hard bust.\n",
+        );
+        const second = [userMessage("m2", "hello again")];
+        const result = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: second,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            hardSignals: {
+                systemHash: "sys-v2",
+                modelKey: "model-v1",
+                cacheExpired: false,
+                lastResponseTime: 0,
+            },
+        });
+
+        expect(result.m0RematerializedThisPass).toBe(true);
+        expect(result.decision.reason).toBe("system_hash");
+        expect(renderedText(second[0])).toContain("Updated architecture");
+        expect(renderedText(second[0])).toContain("Fresh docs folded on hard bust.");
+        expect(renderedText(second[0])).not.toContain("Old architecture");
     });
 
     it("v2: a session facts version bump does NOT trigger re-materialization", () => {
@@ -1366,5 +1417,84 @@ describe("m[0]/m[1] materialization", () => {
         expect(result.m1Text).toBe("sibling cached m1");
         expect(renderedText(bust[1])).toBe("sibling cached m1");
         expect(state.cachedM0MaxMemoryId).toBe(99);
+    });
+
+    it("soft m1 refresh CAS rejects byte-different m[0] even when non-doc markers match", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        const state = readStateFromMeta();
+        injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: [userMessage("m1", "hello")],
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            isCacheBustingPass: true,
+        });
+        const siblingM0 = Buffer.from(
+            `<session-history>${"byte mismatch ".repeat(300)}</session-history>`,
+            "utf8",
+        );
+        db.prepare(
+            "UPDATE session_meta SET cached_m0_bytes = ?, cached_m1_bytes = ? WHERE session_id = ?",
+        ).run(siblingM0, Buffer.from("sibling cached m1 byte mismatch", "utf8"), SESSION_ID);
+
+        const bust = [userMessage("m2", "bust")];
+        const result = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: bust,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            isCacheBustingPass: true,
+        });
+
+        expect(result.m0RematerializedThisPass).toBe(false);
+        expect(result.m1Text).toBe("sibling cached m1 byte mismatch");
+        expect(renderedText(bust[0])).toBe(siblingM0.toString("utf8"));
+        expect(state.cachedM0Bytes?.toString("utf8")).toBe(siblingM0.toString("utf8"));
+    });
+
+    it("soft m1 refresh CAS accepts docs-hash-only marker drift when m[0] bytes match", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        const state = readStateFromMeta();
+        const first = [userMessage("m1", "hello")];
+        injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: first,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            isCacheBustingPass: true,
+        });
+        const baselineM0 = renderedText(first[0]);
+        insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "ARCHITECTURE",
+            content: "docs-hash-only CAS delta memory",
+        });
+        db.prepare(
+            "UPDATE session_meta SET cached_m0_project_docs_hash = ? WHERE session_id = ?",
+        ).run("docs-only-marker-drift", SESSION_ID);
+
+        const bust = [userMessage("m2", "bust")];
+        const result = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: bust,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            isCacheBustingPass: true,
+        });
+
+        expect(result.m0RematerializedThisPass).toBe(false);
+        expect(renderedText(bust[0])).toBe(baselineM0);
+        expect(result.m1Text).toContain("docs-hash-only CAS delta memory");
+        expect(renderedText(bust[1])).toContain("docs-hash-only CAS delta memory");
     });
 });
