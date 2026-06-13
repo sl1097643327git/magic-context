@@ -37,6 +37,7 @@ import {
     injectM0M1,
     type M0HardSignals,
     type M0M1State,
+    mustMaterialize,
     type PreparedCompartmentInjection,
     renderCompartmentInjection,
 } from "./inject-compartments";
@@ -221,10 +222,39 @@ export async function runPostTransformPhase(
     const emergencyBypassCompartmentGate = forceMaterialization;
     const deferredMaterialize = args.canConsumeDeferredLate && deferredMaterializationWasPending;
     const materializationRequested = isExplicitFlush || deferredMaterialize;
+    // Known-bust fold: if m[0] is going to HARD-fold this pass (epoch / model /
+    // system-hash / ttl-idle / mutation-id / upgrade — whatever mustMaterialize
+    // decides), the Anthropic prefix is being re-cached regardless. Drain the
+    // queued tool-drops + run heuristics into THAT bust instead of busting a
+    // second time on a later execute pass. ADVISORY-ONLY: early-true widens the
+    // gates below; early-false changes nothing — injectM0M1 keeps its own
+    // independent late mustMaterialize recheck, so a cross-process epoch/mutation
+    // bump arriving after this point still folds (and its drops drain on a later
+    // pass, exactly as today). Correctness is never worse than today; the cost is
+    // one extra mustMaterialize (indexed DB reads + a cached docs stat).
+    // Kept a SEPARATE boolean — NEVER folded into materializationRequested, which
+    // drives the lastResponseTime TTL reset and pendingMaterialization cleanup;
+    // folding in would suppress those and oscillate.
+    const m0M1EnabledForFold =
+        args.fullFeatureMode &&
+        args.m0M1 !== undefined &&
+        (!!args.m0M1.projectPath || !!args.m0M1.projectDirectory);
+    const m0HardFoldThisPass =
+        m0M1EnabledForFold && args.m0M1
+            ? mustMaterialize({
+                  db: args.db,
+                  sessionId: args.sessionId,
+                  state: args.sessionMeta as M0M1State,
+                  projectPath: args.m0M1.projectPath,
+                  projectDirectory: args.m0M1.projectDirectory,
+                  hardSignals: args.m0M1.hardSignals,
+              }).value
+            : false;
     const shouldReadPendingOps =
         materializationRequested ||
         args.schedulerDecision === "execute" ||
         forceMaterialization ||
+        m0HardFoldThisPass ||
         compartmentRunning;
     const pendingOps = shouldReadPendingOps ? getPendingOps(args.db, args.sessionId) : [];
     const hasPendingUserOps = pendingOps.length > 0;
@@ -236,7 +266,8 @@ export async function runPostTransformPhase(
     const shouldApplyPendingOps =
         (args.schedulerDecision === "execute" ||
             materializationRequested ||
-            forceMaterialization) &&
+            forceMaterialization ||
+            m0HardFoldThisPass) &&
         (!compartmentRunning || emergencyBypassCompartmentGate);
     // Heuristic cleanup runs for ALL sessions — primary and subagent. Subagents
     // previously skipped heuristics entirely (via fullFeatureMode gate), which
@@ -266,6 +297,12 @@ export async function runPostTransformPhase(
         (!compartmentRunning || emergencyBypassCompartmentGate) &&
         (materializationRequested ||
             forceMaterialization ||
+            // Known m[0] hard-fold this pass: the prefix busts regardless, so
+            // running heuristics here folds the drops into the one bust. Bypasses
+            // the once-per-turn guard deliberately (the guard exists to avoid
+            // mid-turn cache busts; this pass busts anyway), so a hard fold that
+            // lands mid-turn still drains.
+            m0HardFoldThisPass ||
             // ≥85% emergency floor for BOTH primary and subagent. For a primary
             // this coincides with forceMaterialization (fullFeatureMode && ≥85%);
             // for a subagent (no forceMaterialization) it's the only path that
@@ -307,9 +344,11 @@ export async function runPostTransformPhase(
               ? "deferred_materialization"
               : forceMaterialization
                 ? `force_materialization (${args.contextUsage.percentage.toFixed(1)}% >= ${args.forceMaterializationPercentage}%)`
-                : subagentRerun
-                  ? `scheduler_execute_subagent_rerun (pendingOps=${pendingOps.length}, scheduler=${args.schedulerDecision})`
-                  : `scheduler_execute (pendingOps=${pendingOps.length}, scheduler=${args.schedulerDecision})`;
+                : m0HardFoldThisPass && args.schedulerDecision !== "execute"
+                  ? `m0_hard_fold (drain folded into known m[0] bust, scheduler=${args.schedulerDecision})`
+                  : subagentRerun
+                    ? `scheduler_execute_subagent_rerun (pendingOps=${pendingOps.length}, scheduler=${args.schedulerDecision})`
+                    : `scheduler_execute (pendingOps=${pendingOps.length}, scheduler=${args.schedulerDecision})`;
         sessionLog(
             args.sessionId,
             `heuristics WILL RUN — reason=${reason}, context=${args.contextUsage.percentage.toFixed(1)}%, turn=${args.currentTurnId}`,
@@ -574,10 +613,8 @@ export async function runPostTransformPhase(
         }
     }
 
-    const m0M1Enabled =
-        args.fullFeatureMode &&
-        args.m0M1 !== undefined &&
-        (!!args.m0M1.projectPath || !!args.m0M1.projectDirectory);
+    // Same gate computed once at the top for the known-bust fold decision.
+    const m0M1Enabled = m0M1EnabledForFold;
     if (m0M1Enabled && args.m0M1) {
         const tInjectM0M1 = performance.now();
         try {

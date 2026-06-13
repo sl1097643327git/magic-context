@@ -13,6 +13,7 @@ import {
 } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { Database } from "../../shared/sqlite";
+import { injectM0M1, type M0HardSignals } from "./inject-compartments";
 import type { MessageLike, TagTarget } from "./tag-messages";
 import {
     checkM0MutationDriftAndSignal,
@@ -213,6 +214,101 @@ describe("postprocess emergency drop accounting", () => {
             [3, "active"],
             [4, "active"],
         ]);
+    });
+});
+
+describe("known m[0] hard-fold folds the execute pass in", () => {
+    const FOLD_PROJECT = "/tmp/test-hardfold-project";
+    const BASE_HARD: M0HardSignals = {
+        systemHash: "sys-v1",
+        modelKey: "anthropic/opus",
+        cacheExpired: false,
+        lastResponseTime: 0,
+    };
+
+    function materializeBaseline(sessionId: string) {
+        // Fold a baseline m[0] so the session is past first_render and markers are
+        // captured; subsequent passes only HARD-fold on a real marker change.
+        injectM0M1({
+            db,
+            sessionId,
+            state: getOrCreateSessionMeta(db, sessionId),
+            projectPath: FOLD_PROJECT,
+            projectDirectory: FOLD_PROJECT,
+            historyBudgetTokens: 98_000,
+            isCacheBustingPass: true,
+            hardSignals: BASE_HARD,
+        });
+    }
+
+    it("drains queued pending ops on a DEFER scheduler pass when m[0] HARD-folds", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-hardfold-drain";
+        materializeBaseline(sessionId);
+
+        // A tool tag + a queued drop for it, exactly as a prior execute pass left.
+        const message = makeToolMessage("tool-1");
+        insertTag(db, sessionId, "tool-1", "tool", 4000, 1, 0, "bash");
+        queuePendingOp(db, sessionId, 1, "drop", 1);
+        const targets = new Map<number, TagTarget>([[1, makeDropTarget(message)]]);
+
+        // Scheduler says DEFER (below execute threshold), but the model key changed
+        // → m[0] will HARD-fold this pass. The fold should pull the queued drop in.
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, [message], {
+                schedulerDecision: "defer",
+                contextUsage: { percentage: 40, inputTokens: 4000 },
+                targets,
+                currentTurnId: "turn-hardfold",
+                m0M1: {
+                    projectPath: FOLD_PROJECT,
+                    projectDirectory: FOLD_PROJECT,
+                    historyBudgetTokens: 98_000,
+                    hardSignals: {
+                        ...BASE_HARD,
+                        modelKey: "anthropic/sonnet", // ← the HARD trigger
+                    },
+                },
+            }),
+        );
+
+        // The queued drop materialized on the (otherwise-defer) hard-fold pass.
+        expect(getTagsBySession(db, sessionId).find((t) => t.tagNumber === 1)?.status).toBe(
+            "dropped",
+        );
+    });
+
+    it("does NOT drain on a plain DEFER pass with no hard fold (baseline behavior)", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-nofold-nodrain";
+        materializeBaseline(sessionId);
+
+        const message = makeToolMessage("tool-1");
+        insertTag(db, sessionId, "tool-1", "tool", 4000, 1, 0, "bash");
+        queuePendingOp(db, sessionId, 1, "drop", 1);
+        const targets = new Map<number, TagTarget>([[1, makeDropTarget(message)]]);
+
+        // Same defer pass but markers UNCHANGED → no hard fold → drop stays queued.
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, [message], {
+                schedulerDecision: "defer",
+                contextUsage: { percentage: 40, inputTokens: 4000 },
+                targets,
+                currentTurnId: "turn-nofold",
+                m0M1: {
+                    projectPath: FOLD_PROJECT,
+                    projectDirectory: FOLD_PROJECT,
+                    historyBudgetTokens: 98_000,
+                    hardSignals: BASE_HARD,
+                },
+            }),
+        );
+
+        expect(getTagsBySession(db, sessionId).find((t) => t.tagNumber === 1)?.status).toBe(
+            "active",
+        );
     });
 });
 
