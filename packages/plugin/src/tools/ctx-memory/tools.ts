@@ -31,6 +31,7 @@ import {
     expandWorkspaceIdentitySetWithAliases,
     resolveStoredPathWorkspaceIdentity,
     resolveWorkspaceIdentitySet,
+    resolveWorkspaceShareCategories,
     storedPathBelongsToWorkspace,
 } from "../../features/magic-context/workspaces";
 import { sessionLog } from "../../shared/logger";
@@ -296,15 +297,6 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 workspaceIdentitySet.identities.length > 1
                     ? expandedWorkspace.expandedIdentities
                     : workspaceIdentitySet.identities;
-            const memoryVisibleToTool = (memory: Memory) =>
-                workspaceIdentitySet.identities.length > 1
-                    ? storedPathBelongsToWorkspace(
-                          memory.projectPath,
-                          workspaceIdentitySet.identities,
-                          workspaceVisibleIdentities,
-                          expandedWorkspace.canonicalIdentityByStoredPath,
-                      )
-                    : memoryBelongsToProject(memory, projectPath);
             const targetIdentityForStoredPath = (rawProjectPath: string) =>
                 workspaceIdentitySet.identities.length > 1
                     ? (resolveStoredPathWorkspaceIdentity(
@@ -313,6 +305,36 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                           expandedWorkspace.canonicalIdentityByStoredPath,
                       ) ?? projectIdentityForStoredPath(rawProjectPath))
                     : projectIdentityForStoredPath(rawProjectPath);
+            // The workspace's share-category policy, identical to the render path
+            // (resolveWorkspaceRenderContext): null = share all categories.
+            const toolShareCategories =
+                workspaceIdentitySet.identities.length > 1
+                    ? resolveWorkspaceShareCategories(deps.db, projectPath)
+                    : null;
+            // Tool visibility MUST match render visibility, or the agent could
+            // mutate (update/archive) a foreign workspace memory it can't even
+            // see. Own-project memories: every category is mutable. Foreign
+            // member memories: only when shared — shareCategories===null shares
+            // all, an empty list shares none, otherwise only the listed
+            // categories. Mirrors buildWorkspaceMemorySqlFilter's own/foreign split.
+            const memoryVisibleToTool = (memory: Memory): boolean => {
+                if (workspaceIdentitySet.identities.length <= 1) {
+                    return memoryBelongsToProject(memory, projectPath);
+                }
+                if (
+                    !storedPathBelongsToWorkspace(
+                        memory.projectPath,
+                        workspaceIdentitySet.identities,
+                        workspaceVisibleIdentities,
+                        expandedWorkspace.canonicalIdentityByStoredPath,
+                    )
+                ) {
+                    return false;
+                }
+                const isOwn = targetIdentityForStoredPath(memory.projectPath) === projectPath;
+                if (isOwn) return true;
+                return toolShareCategories === null || toolShareCategories.includes(memory.category);
+            };
             const embeddingSnapshot = getProjectEmbeddingSnapshot(projectPath);
             if (
                 embeddingSnapshot

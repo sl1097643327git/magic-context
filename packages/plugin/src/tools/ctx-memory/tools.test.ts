@@ -82,7 +82,8 @@ function createTestDb(): Database {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE,
             created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL
+            updated_at INTEGER NOT NULL,
+            share_categories TEXT
         );
 
         CREATE TABLE IF NOT EXISTS workspace_members (
@@ -437,6 +438,77 @@ describe("createCtxMemoryTools", () => {
         expect(result).toContain("Archived memory");
         expect(getMemoryById(db, memory.id)?.status).toBe("archived");
         expect(getMemoryMutationsForRender(db, "/repo/foreign", 0, [memory.id])).toHaveLength(1);
+    });
+
+    it("REFUSES to archive a foreign memory in a NON-shared category", async () => {
+        // Workspace shares only CONSTRAINTS. A foreign member's ARCHITECTURE
+        // memory is invisible in the render — the tool must not mutate it either.
+        db.exec(`
+                INSERT INTO workspaces (id, name, created_at, updated_at, share_categories)
+                VALUES (1, 'ws', 1, 1, '["CONSTRAINTS"]');
+                INSERT INTO workspace_members (workspace_id, project_path, display_name, display_path, added_at)
+                VALUES (1, '/repo/project', 'Own', '/repo/project', 1),
+                       (1, '/repo/foreign', 'Foreign', '/repo/foreign', 1);
+            `);
+        const foreignHidden = insertMemory(db, {
+            projectPath: "/repo/foreign",
+            category: "ARCHITECTURE",
+            content: "Foreign architecture detail not shared with this project.",
+        });
+
+        const result = await tools.ctx_memory.execute(
+            { action: "archive", ids: [foreignHidden.id] },
+            toolContext(),
+        );
+
+        expect(result).not.toContain("Archived memory");
+        expect(getMemoryById(db, foreignHidden.id)?.status).toBe("active");
+    });
+
+    it("still archives a foreign memory in a SHARED category", async () => {
+        db.exec(`
+                INSERT INTO workspaces (id, name, created_at, updated_at, share_categories)
+                VALUES (1, 'ws', 1, 1, '["CONSTRAINTS"]');
+                INSERT INTO workspace_members (workspace_id, project_path, display_name, display_path, added_at)
+                VALUES (1, '/repo/project', 'Own', '/repo/project', 1),
+                       (1, '/repo/foreign', 'Foreign', '/repo/foreign', 1);
+            `);
+        const foreignShared = insertMemory(db, {
+            projectPath: "/repo/foreign",
+            category: "CONSTRAINTS",
+            content: "Foreign constraint shared with this project.",
+        });
+
+        const result = await tools.ctx_memory.execute(
+            { action: "archive", ids: [foreignShared.id] },
+            toolContext(),
+        );
+
+        expect(result).toContain("Archived memory");
+        expect(getMemoryById(db, foreignShared.id)?.status).toBe("archived");
+    });
+
+    it("always allows mutating OWN-project memory regardless of share categories", async () => {
+        db.exec(`
+                INSERT INTO workspaces (id, name, created_at, updated_at, share_categories)
+                VALUES (1, 'ws', 1, 1, '["CONSTRAINTS"]');
+                INSERT INTO workspace_members (workspace_id, project_path, display_name, display_path, added_at)
+                VALUES (1, '/repo/project', 'Own', '/repo/project', 1),
+                       (1, '/repo/foreign', 'Foreign', '/repo/foreign', 1);
+            `);
+        const own = insertMemory(db, {
+            projectPath: "/repo/project",
+            category: "ARCHITECTURE", // own project, non-shared category — still mutable
+            content: "Own architecture detail.",
+        });
+
+        const result = await tools.ctx_memory.execute(
+            { action: "archive", ids: [own.id] },
+            toolContext(),
+        );
+
+        expect(result).toContain("Archived memory");
+        expect(getMemoryById(db, own.id)?.status).toBe("archived");
     });
 
     describe("#given update action", () => {

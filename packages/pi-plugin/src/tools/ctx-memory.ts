@@ -64,6 +64,7 @@ import {
 	expandWorkspaceIdentitySetWithAliases,
 	resolveStoredPathWorkspaceIdentity,
 	resolveWorkspaceIdentitySet,
+	resolveWorkspaceShareCategories,
 	storedPathBelongsToWorkspace,
 } from "@magic-context/core/features/magic-context/workspaces";
 import { log } from "@magic-context/core/shared/logger";
@@ -272,15 +273,6 @@ export function createCtxMemoryTool(
 				workspaceIdentitySet.identities.length > 1
 					? expandedWorkspace.expandedIdentities
 					: workspaceIdentitySet.identities;
-			const memoryVisibleToTool = (memory: Memory) =>
-				workspaceIdentitySet.identities.length > 1
-					? storedPathBelongsToWorkspace(
-							memory.projectPath,
-							workspaceIdentitySet.identities,
-							workspaceVisibleIdentities,
-							expandedWorkspace.canonicalIdentityByStoredPath,
-						)
-					: storedPathBelongsToIdentity(memory.projectPath, projectIdentity);
 			const targetIdentityForStoredPath = (rawProjectPath: string) =>
 				workspaceIdentitySet.identities.length > 1
 					? (resolveStoredPathWorkspaceIdentity(
@@ -289,6 +281,40 @@ export function createCtxMemoryTool(
 							expandedWorkspace.canonicalIdentityByStoredPath,
 						) ?? normalizeStoredProjectPath(rawProjectPath))
 					: normalizeStoredProjectPath(rawProjectPath);
+			// The workspace's share-category policy, identical to the render path
+			// (resolveWorkspaceRenderContextPi): null = share all categories.
+			const toolShareCategories =
+				workspaceIdentitySet.identities.length > 1
+					? resolveWorkspaceShareCategories(deps.db, projectIdentity)
+					: null;
+			// Tool visibility MUST match render visibility, or the agent could
+			// mutate (update/archive) a foreign workspace memory it can't even
+			// see. Own-project memories: every category is mutable. Foreign member
+			// memories: only when shared — shareCategories===null shares all, an
+			// empty list shares none, otherwise only the listed categories.
+			// Mirrors buildWorkspaceMemorySqlFilter's own/foreign split.
+			const memoryVisibleToTool = (memory: Memory): boolean => {
+				if (workspaceIdentitySet.identities.length <= 1) {
+					return storedPathBelongsToIdentity(memory.projectPath, projectIdentity);
+				}
+				if (
+					!storedPathBelongsToWorkspace(
+						memory.projectPath,
+						workspaceIdentitySet.identities,
+						workspaceVisibleIdentities,
+						expandedWorkspace.canonicalIdentityByStoredPath,
+					)
+				) {
+					return false;
+				}
+				const isOwn =
+					targetIdentityForStoredPath(memory.projectPath) === projectIdentity;
+				if (isOwn) return true;
+				return (
+					toolShareCategories === null ||
+					toolShareCategories.includes(memory.category)
+				);
+			};
 			const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
 			if (
 				snapshot
