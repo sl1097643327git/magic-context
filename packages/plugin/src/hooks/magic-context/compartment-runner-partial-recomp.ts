@@ -1,6 +1,4 @@
-import {
-    embedAndStoreCompartmentChunks,
-} from "../../features/magic-context/compartment-embedding";
+import { embedAndStoreCompartmentChunks } from "../../features/magic-context/compartment-embedding";
 import type {
     Compartment,
     CompartmentInput,

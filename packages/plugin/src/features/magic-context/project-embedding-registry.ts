@@ -6,11 +6,14 @@ import { log } from "../../shared/logger";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import {
     buildCanonicalChunkTextFromFts,
+    type CompartmentChunkBackfillCandidate,
     chunkCanonicalText,
     chunkEmbeddingWindowsAreCurrent,
     clearChunkEmbeddingsForProject,
+    countUnembeddedSessionCompartments,
     getDistinctChunkEmbeddingModelIds,
     loadUnembeddedCompartmentChunkCandidates,
+    loadUnembeddedSessionChunkCandidates,
     normalizeCompartmentChunkMaxInputTokens,
     replaceCompartmentChunkEmbeddings,
     type SaveCompartmentChunkEmbeddingInput,
@@ -577,7 +580,19 @@ async function embedCompartmentChunkBatch(
         batchSize,
     );
     if (candidates.length === 0) return 0;
+    return embedCandidateChunkBatch(db, projectIdentity, snapshot.modelId, candidates);
+}
 
+/** Embed + persist chunk vectors for an already-selected candidate batch.
+ *  Shared by the project-wide passive drain and the session-scoped on-demand
+ *  backfill. Returns the number of compartments fully embedded this call. */
+async function embedCandidateChunkBatch(
+    db: Database,
+    projectIdentity: string,
+    modelId: string,
+    candidates: CompartmentChunkBackfillCandidate[],
+): Promise<number> {
+    if (candidates.length === 0) return 0;
     const maxInputTokens = getProjectEmbeddingMaxInputTokens(projectIdentity);
     const prepared: Array<{
         candidate: (typeof candidates)[number];
@@ -601,7 +616,7 @@ async function embedCompartmentChunkBatch(
             maxInputTokens,
         );
         if (windows.length === 0) continue;
-        if (chunkEmbeddingWindowsAreCurrent(db, candidate.id, snapshot.modelId, windows)) {
+        if (chunkEmbeddingWindowsAreCurrent(db, candidate.id, modelId, windows)) {
             continue;
         }
         prepared.push({ candidate, windows, textOffset: texts.length });
@@ -684,6 +699,95 @@ export async function embedUnembeddedCompartmentChunksForProject(
         projectIdentity,
         Date.now() + SWEEP_MAX_WALL_CLOCK_MS,
     );
+}
+
+export interface SessionChunkBackfillProgress {
+    /** Compartments fully embedded so far this run. */
+    embedded: number;
+    /** Total compartments that needed embedding when the run started. */
+    total: number;
+}
+
+export type SessionChunkBackfillOutcome =
+    | { status: "done"; embedded: number; total: number }
+    | { status: "nothing"; embedded: 0; total: 0 }
+    | { status: "disabled"; embedded: 0; total: 0 }
+    | { status: "busy"; embedded: 0; total: number }
+    | { status: "aborted"; embedded: number; total: number };
+
+/**
+ * Backfill ALL un-embedded compartment chunks for ONE session in a single run
+ * (the `/ctx-embed-history` command path), oldest-first so progress fills
+ * chronologically. Unlike the passive project drain this has no per-sweep cap —
+ * the user asked for the whole session — but it still runs under the per-project
+ * embedding coordinator lease (mutual exclusion with the passive sweep + sibling
+ * processes) and yields between batches so an 8-core MiniLM burst stays
+ * interruptible. Idempotent + resumable via chunk_hash; re-running embeds only
+ * what's still missing.
+ */
+export async function embedSessionCompartmentChunks(
+    db: Database,
+    projectIdentity: string,
+    sessionId: string,
+    options?: {
+        signal?: AbortSignal;
+        onProgress?: (p: SessionChunkBackfillProgress) => void;
+        batchSize?: number;
+    },
+): Promise<SessionChunkBackfillOutcome> {
+    const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
+    if (!snapshot?.enabled || snapshot.modelId === "off") {
+        return { status: "disabled", embedded: 0, total: 0 };
+    }
+    const total = countUnembeddedSessionCompartments(db, sessionId, snapshot.modelId);
+    if (total === 0) return { status: "nothing", embedded: 0, total: 0 };
+
+    const holderId = `session-embed-${randomUUID()}`;
+    const lease = acquireGitSweepLease(db, projectIdentity, holderId, { ignoreCooldown: true });
+    if (!lease.acquired) return { status: "busy", embedded: 0, total };
+
+    const batchSize = Math.max(1, options?.batchSize ?? CHUNK_DRAIN_BATCH_SIZE);
+    let embedded = 0;
+    try {
+        options?.onProgress?.({ embedded, total });
+        // Re-query each iteration (rather than pre-loading all candidates) so
+        // newly-published compartments mid-run are picked up and so chunk_hash
+        // dedup is re-checked against fresh state. Loop ends when a query
+        // returns no candidates (all embedded) — `total` is the start-of-run
+        // figure for the progress denominator, embedded may exceed it only if
+        // the historian published during the run (clamped in the callback).
+        for (;;) {
+            if (options?.signal?.aborted) {
+                return { status: "aborted", embedded, total };
+            }
+            const candidates = loadUnembeddedSessionChunkCandidates(
+                db,
+                sessionId,
+                snapshot.modelId,
+                batchSize,
+            );
+            if (candidates.length === 0) break;
+            const n = await embedCandidateChunkBatch(
+                db,
+                projectIdentity,
+                snapshot.modelId,
+                candidates,
+            );
+            // A batch that selected candidates but embedded 0 (all skipped:
+            // empty canonical text / windows-already-current) would loop
+            // forever since the candidate query still returns them. Guard by
+            // breaking when no forward progress is made on a non-empty batch.
+            if (n === 0) break;
+            embedded += n;
+            options?.onProgress?.({ embedded: Math.min(embedded, total), total });
+            // Yield to the event loop so the burst stays interruptible and the
+            // host process can serve other work between batches.
+            await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+    } finally {
+        releaseGitSweepLease(db, projectIdentity, holderId);
+    }
+    return { status: "done", embedded, total };
 }
 
 export async function sweepAllRegisteredProjects(

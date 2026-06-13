@@ -28,5 +28,10 @@ export function getMagicContextBuiltinCommands(): BuiltinCommandConfig {
             template: "ctx-dream",
             description: "Run the hidden dreamer maintenance pass for this project now",
         },
+        "ctx-embed-history": {
+            template: "ctx-embed-history",
+            description:
+                "Embed all of this session's history compartments for semantic search, in one pass",
+        },
     };
 }

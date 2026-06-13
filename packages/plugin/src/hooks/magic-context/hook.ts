@@ -18,6 +18,7 @@ import {
     registerDreamProjectDirectory,
 } from "../../features/magic-context/dreamer";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
+import { embedSessionCompartmentChunks } from "../../features/magic-context/project-embedding-registry";
 import type { Scheduler } from "../../features/magic-context/scheduler";
 import {
     getDatabasePersistenceError,
@@ -42,7 +43,12 @@ import { clearInjectionCache } from "./inject-compartments";
 
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import type { ManagedRecompContext } from "./recomp-orchestrator";
-import { runManagedRecomp, runManagedUpgrade } from "./recomp-orchestrator";
+import {
+    runManagedRecomp,
+    runManagedUpgrade,
+    setRecompStarting,
+    setRecompTerminal,
+} from "./recomp-orchestrator";
 import { createTextCompleteHandler } from "./text-complete";
 import { createTransform } from "./transform";
 
@@ -334,6 +340,70 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         getNotificationParams: (sid) =>
             getLiveNotificationParams(sid, liveModelBySession, variantBySession, agentBySession),
     });
+    // /ctx-embed-history: backfill ALL of this session's compartment chunk
+    // embeddings in one pass, reusing the recomp progress surface (sidebar +
+    // status bar) with kind="embed". Project registration first so the embedding
+    // provider snapshot is resolved (the drain no-ops on an unregistered project).
+    const executeEmbedHistory = async (sessionId: string): Promise<string> => {
+        if (deps.config.memory?.enabled === false) {
+            return "Memory is disabled for this project, so there is no semantic embedding to backfill.";
+        }
+        const directory = sessionDirectoryBySession.get(sessionId) ?? deps.directory;
+        await ensureProjectRegisteredFromOpenCodeDirectory(directory, db);
+        const sessionProjectIdentity = resolveProjectIdentity(directory);
+        setRecompStarting(
+            { recompProgressBySession } as LiveSessionState,
+            sessionId,
+            "Embedding history…",
+            "embed",
+        );
+        const outcome = await embedSessionCompartmentChunks(db, sessionProjectIdentity, sessionId, {
+            onProgress: ({ embedded, total }) => {
+                const cur = recompProgressBySession.get(sessionId);
+                if (!cur || cur.phase !== "recomp") return;
+                recompProgressBySession.set(sessionId, {
+                    ...cur,
+                    processedMessages: embedded,
+                    totalMessages: total,
+                    updatedAt: Date.now(),
+                });
+            },
+        });
+        const terminal = (phase: "done" | "skipped", message: string): string => {
+            setRecompTerminal(
+                { recompProgressBySession } as LiveSessionState,
+                sessionId,
+                phase,
+                message,
+            );
+            return message;
+        };
+        switch (outcome.status) {
+            case "nothing":
+                return terminal("done", "All of this session's history is already embedded.");
+            case "disabled":
+                return terminal(
+                    "skipped",
+                    "No embedding provider is configured, so there is nothing to embed.",
+                );
+            case "busy":
+                return terminal(
+                    "skipped",
+                    `Embedding is already running for this project — ${outcome.total} compartment${outcome.total === 1 ? "" : "s"} still pending. Try again shortly.`,
+                );
+            case "aborted":
+                return terminal(
+                    "done",
+                    `Embedded ${outcome.embedded} of ${outcome.total} compartments before stopping.`,
+                );
+            default:
+                return terminal(
+                    "done",
+                    `Embedded ${outcome.embedded} compartment${outcome.embedded === 1 ? "" : "s"} of history for semantic search.`,
+                );
+        }
+    };
+
     const sidekickRunnable = isSidekickRunnable(deps.config);
     const sidekickConfig = sidekickRunnable ? deps.config.sidekick : undefined;
 
@@ -556,6 +626,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             ? async (sessionId: string) =>
                   runManagedUpgrade(buildManagedRecompCtx(sessionId), sessionId)
             : undefined,
+        executeEmbedHistory,
         sendNotification: async (sessionId, text, params) => {
             await sendIgnoredMessage(deps.client, sessionId, text, {
                 ...getLiveNotificationParams(

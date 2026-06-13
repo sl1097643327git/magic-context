@@ -3,7 +3,7 @@ title: Commands
 description: Slash commands to inspect Magic Context, flush queues, rebuild history, augment prompts, and run dreamer.
 ---
 
-You run these slash commands in your harness chat or command box. They execute in the plugin, not in the model. Names are registered as `ctx-status`, `ctx-flush`, `ctx-recomp`, `ctx-aug`, `ctx-dream`, and `ctx-session-upgrade` (type them with a leading `/`).
+You run these slash commands in your harness chat or command box. They execute in the plugin, not in the model. Names are registered as `ctx-status`, `ctx-flush`, `ctx-recomp`, `ctx-aug`, `ctx-dream`, `ctx-embed-history`, and `ctx-session-upgrade` (type them with a leading `/`).
 
 ## Is something stuck?
 
@@ -72,6 +72,14 @@ Uses historian-model tokens; full recomp on long sessions can take a long time.
 **When to use it.** Manual dreamer run instead of waiting for the schedule.
 
 **What you'll see.** `Starting dream run...` then `## /ctx-dream` with per-task timings, or configuration/queue errors.
+
+## /ctx-embed-history
+
+**What it does.** Embeds **all of this session's history compartments** for semantic search in one pass, instead of waiting for the slow background backfill. Idempotent and resumable — re-running embeds only what's still missing. Runs under the project's embedding lock, so it won't collide with the passive sweep or a sibling process.
+
+**When to use it.** After a long session, or when you want `/ctx-search` semantic recall over older history immediately. Requires an embedding provider (or the built-in local model) and `memory.enabled`.
+
+**What you'll see.** On OpenCode, a live **Embed** progress bar in the sidebar/status (`N/M embedded`), then `Embedded N compartments of history for semantic search.` On Pi, a single `## /ctx-embed-history` completion message. If everything is already embedded: `All of this session's history is already embedded.`
 
 ## /ctx-session-upgrade
 

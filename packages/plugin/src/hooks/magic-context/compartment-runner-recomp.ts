@@ -1,6 +1,4 @@
-import {
-    embedAndStoreCompartmentChunks,
-} from "../../features/magic-context/compartment-embedding";
+import { embedAndStoreCompartmentChunks } from "../../features/magic-context/compartment-embedding";
 import { isCompartmentLeaseHeld } from "../../features/magic-context/compartment-lease";
 import {
     clearRecompStaging,

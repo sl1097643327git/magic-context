@@ -144,7 +144,7 @@ export function setRecompStarting(
     liveSessionState: LiveSessionState,
     sessionId: string,
     note: string,
-    kind: "recomp" | "upgrade" = "recomp",
+    kind: "recomp" | "upgrade" | "embed" = "recomp",
 ): void {
     liveSessionState.recompProgressBySession.set(sessionId, {
         sessionId,

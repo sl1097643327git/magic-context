@@ -38,9 +38,7 @@
  */
 
 import * as crypto from "node:crypto";
-import {
-	embedAndStoreCompartmentChunks,
-} from "@magic-context/core/features/magic-context/compartment-embedding";
+import { embedAndStoreCompartmentChunks } from "@magic-context/core/features/magic-context/compartment-embedding";
 import { insertCompartmentEvents } from "@magic-context/core/features/magic-context/compartment-events";
 import { isCompartmentLeaseHeld } from "@magic-context/core/features/magic-context/compartment-lease";
 import {

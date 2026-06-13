@@ -328,7 +328,7 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                 const p = s().recompProgress!
                 // Label follows the flow that started the run, so a plain
                 // /ctx-recomp never reads as an "Upgrade" (dogfood 2026-06-04).
-                const verb = p.kind === "upgrade" ? "Upgrade" : "Recomp"
+                const verb = p.kind === "upgrade" ? "Upgrade" : p.kind === "embed" ? "Embed" : "Recomp"
                 return (
                 <box marginTop={1} width="100%" flexDirection="column">
                     <text fg={t().text}><b>{verb}</b></text>
@@ -340,12 +340,14 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                             const bar = p.totalMessages > 0
                                 ? `[${"█".repeat(filled)}${"░".repeat(width - filled)}]`
                                 : "(starting…)"
-                            const activeLabel = p.kind === "upgrade" ? "upgrading" : "comparting"
+                            const activeLabel = p.kind === "upgrade" ? "upgrading" : p.kind === "embed" ? "embedding" : "comparting"
                             return (
                                 <>
                                     <R t={t()} l={activeLabel} v={p.totalMessages > 0 ? `${bar} ${Math.round(frac * 100)}%` : bar} fg={t().warning} />
                                     {p.note ? <R t={t()} l="Status" v={p.note} fg={t().textMuted} /> : null}
-                                    <R t={t()} l="Compartments" v={`${p.compartmentsCreated} (${p.passCount} pass${p.passCount === 1 ? "" : "es"})`} fg={t().textMuted} />
+                                    {p.kind === "embed"
+                                        ? <R t={t()} l="Compartments" v={`${p.processedMessages}/${p.totalMessages} embedded`} fg={t().textMuted} />
+                                        : <R t={t()} l="Compartments" v={`${p.compartmentsCreated} (${p.passCount} pass${p.passCount === 1 ? "" : "es"})`} fg={t().textMuted} />}
                                 </>
                             )
                         }

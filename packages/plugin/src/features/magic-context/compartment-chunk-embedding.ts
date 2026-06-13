@@ -602,6 +602,10 @@ export function loadUnembeddedCompartmentChunkCandidates(
         projectPath,
         Math.max(1, limit),
     ) as unknown[];
+    return mapBackfillCandidateRows(rows);
+}
+
+function mapBackfillCandidateRows(rows: unknown[]): CompartmentChunkBackfillCandidate[] {
     return rows
         .filter((row): row is BackfillCandidateRow => {
             if (row === null || typeof row !== "object") return false;
@@ -621,4 +625,69 @@ export function loadUnembeddedCompartmentChunkCandidates(
             endMessage: row.endMessage,
             title: row.title,
         }));
+}
+
+const sessionBackfillCandidateStatements = new WeakMap<Database, PreparedStatement>();
+
+/** Session-scoped variant of {@link loadUnembeddedCompartmentChunkCandidates}.
+ *  Used by the on-demand `/ctx-embed-history` command, which backfills ONE
+ *  session at a time (oldest-first so the user watches it fill chronologically),
+ *  unlike the project-wide passive drain. A compartment is a candidate when it
+ *  has no chunk-embedding row for `modelId` yet. */
+export function loadUnembeddedSessionChunkCandidates(
+    db: Database,
+    sessionId: string,
+    modelId: string,
+    limit: number,
+): CompartmentChunkBackfillCandidate[] {
+    let stmt = sessionBackfillCandidateStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare(
+            `SELECT c.id AS id,
+                    c.session_id AS sessionId,
+                    c.start_message AS startMessage,
+                    c.end_message AS endMessage,
+                    c.title AS title
+             FROM compartments c
+             WHERE c.session_id = ?
+               AND c.start_message IS NOT NULL
+               AND c.end_message IS NOT NULL
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM compartment_chunk_embeddings current
+                   WHERE current.compartment_id = c.id
+                     AND current.model_id = ?
+               )
+             ORDER BY c.start_message ASC, c.id ASC
+             LIMIT ?`,
+        );
+        sessionBackfillCandidateStatements.set(db, stmt);
+    }
+    const rows = stmt.all(sessionId, modelId, Math.max(1, limit)) as unknown[];
+    return mapBackfillCandidateRows(rows);
+}
+
+/** Count compartments in this session that still lack a chunk embedding for
+ *  `modelId` — drives the `/ctx-embed-history` progress total. */
+export function countUnembeddedSessionCompartments(
+    db: Database,
+    sessionId: string,
+    modelId: string,
+): number {
+    const row = db
+        .prepare(
+            `SELECT COUNT(*) AS n
+             FROM compartments c
+             WHERE c.session_id = ?
+               AND c.start_message IS NOT NULL
+               AND c.end_message IS NOT NULL
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM compartment_chunk_embeddings current
+                   WHERE current.compartment_id = c.id
+                     AND current.model_id = ?
+               )`,
+        )
+        .get(sessionId, modelId) as { n?: number } | undefined;
+    return typeof row?.n === "number" ? row.n : 0;
 }

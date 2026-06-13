@@ -78,6 +78,7 @@ import {
 	registerCtxAugCommand,
 } from "./commands/ctx-aug";
 import { registerCtxDreamCommand } from "./commands/ctx-dream";
+import { registerCtxEmbedHistoryCommand } from "./commands/ctx-embed-history";
 import { registerCtxFlushCommand } from "./commands/ctx-flush";
 import { registerCtxRecompCommand } from "./commands/ctx-recomp";
 import { registerCtxSessionUpgradeCommand } from "./commands/ctx-session-upgrade";
@@ -753,6 +754,15 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		onProjectSeen: (identity) => seenDreamerProjectIdentities.add(identity),
 	});
 	info("registered /ctx-dream");
+
+	registerCtxEmbedHistoryCommand(pi, {
+		db,
+		projectDir,
+		projectIdentity,
+		memoryEnabled: config.memory.enabled,
+		resolveProject: resolveCurrentProject,
+	});
+	info("registered /ctx-embed-history");
 
 	// Register Pi project with the singleton dreamer timer. When dreamer is
 	// disabled in config (default) this is a no-op. When enabled, the timer

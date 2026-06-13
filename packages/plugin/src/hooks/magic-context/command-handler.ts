@@ -361,6 +361,11 @@ export function createMagicContextCommandHandler(deps: {
      *  Optional: when unavailable, /ctx-session-upgrade still upgrades compartments
      *  via recomp and skips the memory re-evaluation. */
     runUpgrade?: (sessionId: string) => Promise<string>;
+    /** Runs /ctx-embed-history: backfill all of THIS session's compartment
+     *  chunk embeddings in one pass (live progress via the recomp surface).
+     *  Returns the user-facing summary. Optional: undefined when embedding is
+     *  not configured. */
+    executeEmbedHistory?: (sessionId: string) => Promise<string>;
     sendNotification: (
         sessionId: string,
         text: string,
@@ -394,6 +399,7 @@ export function createMagicContextCommandHandler(deps: {
     const isAugCommand = (command: string): boolean => command === "ctx-aug";
     const isDreamCommand = (command: string): boolean => command === "ctx-dream";
     const isSessionUpgradeCommand = (command: string): boolean => command === "ctx-session-upgrade";
+    const isEmbedHistoryCommand = (command: string): boolean => command === "ctx-embed-history";
 
     return {
         "command.execute.before": async (
@@ -407,8 +413,17 @@ export function createMagicContextCommandHandler(deps: {
             const isAug = isAugCommand(input.command);
             const isDream = isDreamCommand(input.command);
             const isSessionUpgrade = isSessionUpgradeCommand(input.command);
+            const isEmbedHistory = isEmbedHistoryCommand(input.command);
 
-            if (!isStatus && !isFlush && !isRecomp && !isAug && !isDream && !isSessionUpgrade) {
+            if (
+                !isStatus &&
+                !isFlush &&
+                !isRecomp &&
+                !isAug &&
+                !isDream &&
+                !isSessionUpgrade &&
+                !isEmbedHistory
+            ) {
                 return;
             }
 
@@ -423,6 +438,14 @@ export function createMagicContextCommandHandler(deps: {
             if (isDream) {
                 await executeDreaming(deps, sessionId);
                 return;
+            }
+
+            if (isEmbedHistory) {
+                const summary = deps.executeEmbedHistory
+                    ? await deps.executeEmbedHistory(sessionId)
+                    : "Semantic embedding is not configured for this project, so there is nothing to embed.";
+                await deps.sendNotification(sessionId, summary, {});
+                throwSentinel(input.command);
             }
 
             if (isFlush) {

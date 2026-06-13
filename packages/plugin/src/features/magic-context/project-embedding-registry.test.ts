@@ -14,6 +14,7 @@ import type { EmbeddingProvider } from "./memory/embedding-provider";
 import {
     _resetProjectEmbeddingRegistryForTests,
     _setTestProviderFactoryForProject,
+    embedSessionCompartmentChunks,
     embedTextForProject,
     getProjectEmbeddingSnapshot,
     registerProjectEmbeddingAndMaybeWipe,
@@ -78,6 +79,35 @@ function seedCompartmentWithFts(
         "INSERT INTO message_history_fts (session_id, message_ordinal, message_id, role, content) VALUES (?, ?, ?, ?, ?)",
     ).run(sessionId, 2, `${sessionId}-a2`, "assistant", "Use backpressure and bounded drains.");
     return getCompartments(db, sessionId)[0].id;
+}
+
+function seedManyCompartmentsWithFts(
+    db: NonNullable<ReturnType<typeof openDatabase>>,
+    sessionId: string,
+    count: number,
+): void {
+    for (let i = 0; i < count; i++) {
+        const start = i * 2 + 1;
+        const end = start + 1;
+        appendCompartments(db, sessionId, [
+            {
+                sequence: i,
+                startMessage: start,
+                endMessage: end,
+                startMessageId: `u${start}`,
+                endMessageId: `a${end}`,
+                title: `Compartment ${i}`,
+                content: `P1 content ${i}`,
+                p1: `P1 content ${i}`,
+            },
+        ]);
+        db.prepare(
+            "INSERT INTO message_history_fts (session_id, message_ordinal, message_id, role, content) VALUES (?, ?, ?, ?, ?)",
+        ).run(sessionId, start, `${sessionId}-u${start}`, "user", `Question ${i}?`);
+        db.prepare(
+            "INSERT INTO message_history_fts (session_id, message_ordinal, message_id, role, content) VALUES (?, ?, ?, ?, ?)",
+        ).run(sessionId, end, `${sessionId}-a${end}`, "assistant", `Answer ${i}.`);
+    }
 }
 
 describe("project embedding registry", () => {
@@ -275,5 +305,96 @@ describe("project embedding registry", () => {
         expect(
             loadCompartmentChunkEmbeddingsForSearch(db, "ses-memory-off", "git:off"),
         ).toHaveLength(0);
+    });
+
+    it("embedSessionCompartmentChunks drains a whole session and reports progress", async () => {
+        _setTestProviderFactoryForProject(
+            (config) =>
+                new FakeEmbeddingProvider(config.provider === "local" ? config.model : "off"),
+        );
+        const db = useTempDb();
+        // Three compartments in the session, plus one in a DIFFERENT session
+        // that must NOT be touched (session-scoped, not project-scoped).
+        seedManyCompartmentsWithFts(db, "ses-embed", 3);
+        seedCompartmentWithFts(db, "ses-other");
+        registerProjectEmbeddingAndMaybeWipe(
+            db,
+            "git:embed",
+            localConfig("model-a"),
+            { memoryEnabled: true, gitCommitEnabled: false },
+            "/tmp/embed",
+        );
+
+        const progress: Array<{ embedded: number; total: number }> = [];
+        const outcome = await embedSessionCompartmentChunks(db, "git:embed", "ses-embed", {
+            batchSize: 1,
+            onProgress: (p) => progress.push({ ...p }),
+        });
+
+        expect(outcome.status).toBe("done");
+        expect(outcome.embedded).toBe(3);
+        expect(outcome.total).toBe(3);
+        // Progress is monotonic and ends at total; the only session embedded is ses-embed.
+        expect(progress.at(-1)).toEqual({ embedded: 3, total: 3 });
+        expect(
+            loadCompartmentChunkEmbeddingsForSearch(db, "ses-embed", "git:embed").length,
+        ).toBeGreaterThanOrEqual(3);
+        expect(
+            loadCompartmentChunkEmbeddingsForSearch(db, "ses-other", "git:embed"),
+        ).toHaveLength(0);
+
+        // Idempotent: a second run finds nothing.
+        const again = await embedSessionCompartmentChunks(db, "git:embed", "ses-embed");
+        expect(again.status).toBe("nothing");
+        expect(again.total).toBe(0);
+    });
+
+    it("embedSessionCompartmentChunks returns disabled when memory is off", async () => {
+        _setTestProviderFactoryForProject(
+            (config) =>
+                new FakeEmbeddingProvider(config.provider === "local" ? config.model : "off"),
+        );
+        const db = useTempDb();
+        seedCompartmentWithFts(db, "ses-off");
+        registerProjectEmbeddingAndMaybeWipe(
+            db,
+            "git:embed-off",
+            localConfig("model-a"),
+            { memoryEnabled: false, gitCommitEnabled: false },
+            "/tmp/embed-off",
+        );
+
+        const outcome = await embedSessionCompartmentChunks(db, "git:embed-off", "ses-off");
+        expect(outcome.status).toBe("disabled");
+        expect(outcome.embedded).toBe(0);
+    });
+
+    it("embedSessionCompartmentChunks aborts cleanly on signal", async () => {
+        _setTestProviderFactoryForProject(
+            (config) =>
+                new FakeEmbeddingProvider(config.provider === "local" ? config.model : "off"),
+        );
+        const db = useTempDb();
+        seedManyCompartmentsWithFts(db, "ses-abort", 4);
+        registerProjectEmbeddingAndMaybeWipe(
+            db,
+            "git:abort",
+            localConfig("model-a"),
+            { memoryEnabled: true, gitCommitEnabled: false },
+            "/tmp/abort",
+        );
+
+        const controller = new AbortController();
+        const outcome = await embedSessionCompartmentChunks(db, "git:abort", "ses-abort", {
+            batchSize: 1,
+            signal: controller.signal,
+            onProgress: ({ embedded }) => {
+                if (embedded >= 2) controller.abort();
+            },
+        });
+
+        expect(outcome.status).toBe("aborted");
+        expect(outcome.embedded).toBeGreaterThanOrEqual(2);
+        expect(outcome.embedded).toBeLessThan(4);
     });
 });

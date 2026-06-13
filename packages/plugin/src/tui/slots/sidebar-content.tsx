@@ -299,14 +299,25 @@ const RecompProgressSection = (props: {
             : 0
     const pct = () => Math.round(fraction() * 100)
 
-    // "Recomp" vs "Upgrade" wording follows the flow that started this run, so a
-    // plain /ctx-recomp never renders as an "Upgrade" (dogfood 2026-06-04).
-    const verb = () => (props.progress.kind === "upgrade" ? "Upgrade" : "Recomp")
+    // "Recomp" vs "Upgrade" vs "Embed" wording follows the flow that started this
+    // run, so a plain /ctx-recomp never renders as an "Upgrade" (dogfood 2026-06-04).
+    const verb = () =>
+        props.progress.kind === "upgrade"
+            ? "Upgrade"
+            : props.progress.kind === "embed"
+              ? "Embed"
+              : "Recomp"
+    const activeText = () =>
+        props.progress.kind === "upgrade"
+            ? "upgrading ⟳"
+            : props.progress.kind === "embed"
+              ? "embedding ⟳"
+              : "comparting ⟳"
     const label = createMemo(() => {
         switch (props.progress.phase) {
             case "recomp":
                 return {
-                    text: props.progress.kind === "upgrade" ? "upgrading ⟳" : "comparting ⟳",
+                    text: activeText(),
                     color: props.theme.warning,
                 }
             case "migration":
@@ -342,11 +353,19 @@ const RecompProgressSection = (props: {
             {(phase() === "recomp" || phase() === "migration") && props.progress.note && (
                 <text fg={props.theme.textMuted}>{props.progress.note}</text>
             )}
-            {phase() === "recomp" && (
+            {phase() === "recomp" && props.progress.kind !== "embed" && (
                 <StatRow
                     theme={props.theme}
                     label="Compartments"
                     value={`${props.progress.compartmentsCreated} (${props.progress.passCount} pass${props.progress.passCount === 1 ? "" : "es"})`}
+                    dim
+                />
+            )}
+            {phase() === "recomp" && props.progress.kind === "embed" && (
+                <StatRow
+                    theme={props.theme}
+                    label="Compartments"
+                    value={`${props.progress.processedMessages}/${props.progress.totalMessages} embedded`}
                     dim
                 />
             )}

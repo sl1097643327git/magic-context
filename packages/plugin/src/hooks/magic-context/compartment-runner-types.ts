@@ -26,7 +26,7 @@ export interface RecompProgress {
      *  a 0-compartment session in a project whose other sessions had them).
      *  Optional + defaults to "recomp" so runner-emitted per-pass entries (which
      *  don't know the flow) inherit the kind set by setRecompStarting. */
-    kind?: "recomp" | "upgrade";
+    kind?: "recomp" | "upgrade" | "embed";
     /** "skipped" is a TRANSIENT non-failure outcome: the incremental historian
      *  briefly held the compartment-state lease (or another process is mutating
      *  it), so the run no-op'd. It renders neutrally with retry guidance and
