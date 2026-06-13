@@ -681,6 +681,25 @@ slice (25% of the memory budget) reconciled into m[0] on the next hard bust, so
 it intentionally uses `trimMemoriesToBudgetV2` — applying floors to a tiny delta
 adds determinism cost for no fairness benefit. Matches the v2.2 workspace spec.
 
+### A45. Dashboard workspace epoch fan-out does not consult the v22 identity-rekey map (self-heals)
+
+`workspace_member_identities_for_project` resolves a session's project to the
+union of its workspace siblings' identities, but does not expand pre-v22 path
+aliases via `v22_identity_rekey_map`. A memory stored under a legacy raw path
+(not yet rekeyed to its `git:`/`dir:` identity) could miss an epoch fan-out on a
+membership mutation. Self-heals: the v22 backfill rekeys those rows to their
+canonical identity, after which the fan-out matches. The window is narrow
+(pre-v22 rows on a workspaced project, before backfill drains) and the only
+symptom is a delayed m[0] refold, not data loss. Post-ship hardening.
+
+### A46. `computeWorkspaceEpochFingerprint` treats a missing project_state row as epoch 0 (out-of-band only)
+
+A member project with no `project_state` row hashes as epoch 0, colliding with a
+member genuinely at epoch 0. Only reachable if membership is added OUTSIDE the
+normal CRUD path (which seeds `project_state`); the dashboard/plugin mutation
+paths always create the row. Post-ship defense-in-depth: include the sorted
+member-identity list in the fingerprint hash so absent-vs-zero can't collide.
+
 ### A44. `ctx_search` cross-source rank uses linear-band remap, not raw IDF magnitude (parked — message embeddings supersede)
 
 A common-literal probe-only message can still reach the top of the message list

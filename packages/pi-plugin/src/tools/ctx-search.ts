@@ -81,8 +81,11 @@ function formatAge(committedAtMs: number): string {
 
 function formatResult(result: UnifiedSearchResult, index: number): string {
 	if (result.source === "memory") {
+		// `source=` attributes a foreign workspace member's memory to its origin
+		// project (parity with OpenCode ctx-search/tools.ts); empty for own-project.
+		const source = result.sourceName ? ` source=${result.sourceName}` : "";
 		return [
-			`[${index}] [memory] score=${result.score.toFixed(2)} id=${result.memoryId} category=${result.category} match=${result.matchType}`,
+			`[${index}] [memory] score=${result.score.toFixed(2)} id=${result.memoryId} category=${result.category}${source} match=${result.matchType}`,
 			result.content,
 		].join("\n");
 	}

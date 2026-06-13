@@ -1839,7 +1839,15 @@ function cachedPiRowMatchesSnapshot(args: {
 		// that re-materialized under a new system/tool/model identity must invalidate
 		// this process's cached row so the soft-refresh CAS adopts the sibling's m[0].
 		(rowMarkers.systemHash ?? "") === (args.markers.systemHash ?? "") &&
-		(rowMarkers.modelKey ?? "") === (args.markers.modelKey ?? "")
+		(rowMarkers.modelKey ?? "") === (args.markers.modelKey ?? "") &&
+		// Workspace fingerprint (parity with OpenCode cachedRowMatchesState):
+		// projectMemoryEpoch above only tracks THIS session's own project, but a
+		// FOREIGN member's epoch bump changes the workspace fingerprint without
+		// touching this session's epoch. Without this compare, a sibling row
+		// materialized under different workspace membership would pass the CAS and
+		// be adopted with the wrong union baseline.
+		(rowMarkers.workspaceFingerprint ?? null) ===
+			(args.markers.workspaceFingerprint ?? null)
 	);
 }
 
