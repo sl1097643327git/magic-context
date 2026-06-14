@@ -7,6 +7,7 @@ import {
     updateTagStatus,
 } from "../../features/magic-context/storage";
 import type { TagEntry } from "../../features/magic-context/types";
+import { stripSystemInjection } from "./system-injection-stripper";
 import type { TagTarget } from "./tag-messages";
 import { stripTagPrefix } from "./tag-part-guards";
 
@@ -59,13 +60,27 @@ const RECENT_TOOL_SKELETON_WINDOW = 20;
  * it (unlike `[dropped §N§]`, it does NOT match DROPPED_PLACEHOLDER_PATTERN
  * and therefore is never stripped from the message list).
  */
-function buildReplacementContent(tagId: number, target: TagTarget): string {
+export function buildReplacementContent(tagId: number, target: TagTarget): string {
     const role = target.message?.info.role;
     if (role !== "user") {
         return `[dropped \u00a7${tagId}\u00a7]`;
     }
 
     const currentContent = target.getContent?.() ?? "";
+
+    // A system-injected user message (todo continuation, skill reminder, etc.)
+    // that strips to empty is canonicalized to `[dropped §N§]` — the SAME bytes
+    // heuristic-cleanup writes when it drops such a message on an execute pass.
+    // Without this, the execute pass writes `[dropped]` while this replay (which
+    // runs on every pass, including defer) re-derives `[truncated …]` from the
+    // raw rebuilt content, flipping one block of message[0] on the next defer
+    // pass and busting the prompt-cache prefix. Both paths must agree byte-for-
+    // byte. (heuristic-cleanup.ts uses the identical strip+empty predicate.)
+    const strippedInjection = stripSystemInjection(currentContent);
+    if (strippedInjection !== null && stripTagPrefix(strippedInjection).trim().length === 0) {
+        return `[dropped \u00a7${tagId}\u00a7]`;
+    }
+
     // Strip the §N§ tag prefix the tagger prepends so we truncate the actual
     // user text, not the tag marker.
     const originalText = stripTagPrefix(currentContent);
