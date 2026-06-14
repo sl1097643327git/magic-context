@@ -435,10 +435,13 @@ function maybeInjectChannel1Nudge(
         executeThresholdPercentage: state.executeThresholdPercentage,
     });
 
+    const workingWindowTokens = Math.round(
+        (state.contextLimit * state.executeThresholdPercentage) / 100,
+    );
     const decision = decideChannel1({
         undroppedTokens,
         pressure,
-        historyBudgetTokens: state.historyBudgetTokens,
+        workingWindowTokens,
         lastNudgeUndropped: getLastNudgeUndropped(args.db, sessionId),
         lastNudgeLevel: getLastNudgeLevel(args.db, sessionId),
         hasRecentReduce: false, // handled by reducedSinceRefresh above

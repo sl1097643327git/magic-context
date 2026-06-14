@@ -248,10 +248,13 @@ export function maybeChannel1ReminderForToolResult(args: {
 		executeThresholdPercentage: state.executeThresholdPercentage,
 	});
 
+	const workingWindowTokens = Math.round(
+		(state.contextLimit * state.executeThresholdPercentage) / 100,
+	);
 	const decision = decideChannel1({
 		undroppedTokens,
 		pressure,
-		historyBudgetTokens: state.historyBudgetTokens,
+		workingWindowTokens,
 		lastNudgeUndropped: getLastNudgeUndropped(db, sessionId),
 		lastNudgeLevel: getLastNudgeLevel(db, sessionId),
 		hasRecentReduce: false, // handled by reducedSinceRefresh above

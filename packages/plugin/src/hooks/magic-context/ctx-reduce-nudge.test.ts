@@ -62,7 +62,7 @@ describe("computeTailTokenEstimate", () => {
 
 describe("decideChannel1 — trajectories", () => {
     const base = {
-        historyBudgetTokens: BUDGET,
+        workingWindowTokens: BUDGET,
         lastNudgeUndropped: 0,
         lastNudgeLevel: "" as const,
         hasRecentReduce: false,
@@ -116,7 +116,7 @@ describe("decideChannel1 — trajectories", () => {
     it("cadence: the initial fire waits for the budget-scaled interval", () => {
         const d = decideChannel1({
             ...base,
-            historyBudgetTokens: 1_000_000,
+            workingWindowTokens: 1_000_000,
             undroppedTokens: 40_000,
             pressure: 10,
         });
@@ -173,6 +173,40 @@ describe("decideChannel1 — trajectories", () => {
         expect(d.fire).toBe(true);
         expect(d.nextLastNudge).toBe(30_000);
         expect(d.nextLastNudgeLevel).toBe("gentle");
+    });
+
+    // Regression: the live bug. A 272k-context session (working window
+    // ≈ 272k × 0.65 ≈ 177k) sat at a 25k reclaimable pile near the threshold and
+    // got nagged URGENT every step because the denominator used to be the much
+    // smaller history budget (~26.5k → 25k/26.5k ≈ 0.94 → urgent). With the
+    // working window as denominator, the same pile is a non-event.
+    it("regression: 25k reclaimable on a 177k working window is quiet near threshold", () => {
+        const d = decideChannel1({
+            workingWindowTokens: 177_000,
+            undroppedTokens: 25_000,
+            pressure: 0.95, // ~near the execute threshold
+            lastNudgeUndropped: 0,
+            lastNudgeLevel: "",
+            hasRecentReduce: false,
+        });
+        // severity = (25000/177000) × 0.95 ≈ 0.134 < gentle (0.2)
+        expect(d.fire).toBe(false);
+    });
+
+    // The property the user asked to confirm: once the agent has dropped enough,
+    // climbing back toward the execute threshold does NOT re-nag, because the
+    // numerator (reclaimable) is small regardless of pressure.
+    it("dropped-enough pile stays quiet even at full pressure", () => {
+        const d = decideChannel1({
+            workingWindowTokens: 177_000,
+            undroppedTokens: 18_000,
+            pressure: 1.0, // exactly at the execute threshold
+            lastNudgeUndropped: 0,
+            lastNudgeLevel: "",
+            hasRecentReduce: false,
+        });
+        // severity = (18000/177000) × 1.0 ≈ 0.102 < gentle
+        expect(d.fire).toBe(false);
     });
 });
 

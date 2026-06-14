@@ -72,15 +72,19 @@ export const TOKENS_PER_BYTE = 0.25;
 export const CHANNEL1_FLOOR_TOKENS = 10_000;
 export const CHANNEL1_REFIRE_FLOOR_TOKENS = 10_000;
 
-export function channel1RefireTokens(historyBudgetTokens: number): number {
-    const scaled = Math.round(0.05 * Math.max(0, historyBudgetTokens));
+export function channel1RefireTokens(workingWindowTokens: number): number {
+    const scaled = Math.round(0.05 * Math.max(0, workingWindowTokens));
     return Math.max(CHANNEL1_REFIRE_FLOOR_TOKENS, scaled);
 }
-// severity = (undropped/budget) × pressure, both ∈ [0,1], so severity ∈ [0,1].
-// undropped and pressure are naturally correlated (a large tail dump raises
-// input → raises pressure), so the metric self-corrects: large pile at genuinely
-// low pressure is impossible. No absolute-undropped override is needed (it would
-// only mask the gentle band). The 10k token floor handles "tiny amounts never fire".
+// severity = (undropped / workingWindow) × pressure, where workingWindow is the
+// execute-threshold token budget — the span the agent actually operates in, NOT
+// the (much smaller) history-compaction budget. Using the history budget made a
+// ~25k tool pile saturate to "urgent" on a 272k-context session (denominator was
+// ~26.5k instead of ~177k), nagging every step. Both factors ∈ [0,1] (undropped
+// is capped at the window in practice), so severity ∈ ~[0,1]: a small reclaimable
+// pile stays quiet even at high pressure (the agent already dropped enough), and
+// a big pile with lots of headroom stays quiet (low pressure spares the early
+// explorer). The 10k floor handles "tiny amounts never fire".
 const S_GENTLE = 0.2;
 const S_FIRM = 0.4;
 const S_URGENT = 0.65;
@@ -226,12 +230,17 @@ export interface Channel1Decision {
 export function decideChannel1(input: {
     undroppedTokens: number;
     pressure: number;
-    historyBudgetTokens: number;
+    /**
+     * The agent's usable working window in tokens (executeThresholdTokens =
+     * contextLimit × executeThreshold%). The severity denominator — replaces the
+     * old `historyBudgetTokens`, which was ~7× too small and over-fired.
+     */
+    workingWindowTokens: number;
     lastNudgeUndropped: number;
     lastNudgeLevel: Channel1Level | "";
     hasRecentReduce: boolean;
 }): Channel1Decision {
-    const { undroppedTokens, pressure, historyBudgetTokens, hasRecentReduce } = input;
+    const { undroppedTokens, pressure, workingWindowTokens, hasRecentReduce } = input;
 
     // Re-arm: once the agent has reduced (or the measured tail fell below the
     // last-fire mark), clear BOTH cadence and band state so the next accumulation
@@ -254,7 +263,7 @@ export function decideChannel1(input: {
     // Floor: below this much reclaimable space, never fire (working room).
     if (undroppedTokens < CHANNEL1_FLOOR_TOKENS) return quiet();
 
-    const budget = historyBudgetTokens > 0 ? historyBudgetTokens : undroppedTokens || 1;
+    const budget = workingWindowTokens > 0 ? workingWindowTokens : undroppedTokens || 1;
     const severity = (undroppedTokens / budget) * pressure;
 
     if (severity < S_GENTLE) return quiet();
@@ -265,9 +274,9 @@ export function decideChannel1(input: {
     else level = "gentle";
 
     if (lastLevel === "") {
-        // Initial fire cadence scales with the history budget so wide-context
+        // Initial fire cadence scales with the working window so wide-context
         // sessions don't hear a reminder every tiny 10k-token increment.
-        if (undroppedTokens < lastNudge + channel1RefireTokens(historyBudgetTokens)) {
+        if (undroppedTokens < lastNudge + channel1RefireTokens(workingWindowTokens)) {
             return quiet();
         }
     } else if (LEVEL_RANK[level] <= LEVEL_RANK[lastLevel]) {
@@ -349,17 +358,17 @@ export function buildChannel1Reminder(level: Channel1Level, undroppedTokens: num
         case "gentle":
             body =
                 `You have ~${amount} tokens of tool output you have not reduced. ` +
-                `Once you are done with earlier outputs, drop them with ctx_reduce to keep context lean.`;
+                `When you are done with earlier outputs, dropping them with ctx_reduce keeps context lean.`;
             break;
         case "firm":
             body =
-                `~${amount} tokens of unreduced tool output is accumulating. ` +
-                `Drop what you have already processed with ctx_reduce before continuing.`;
+                `~${amount} tokens of unreduced tool output has built up. ` +
+                `At your next natural stopping point, consider dropping what you have already processed with ctx_reduce.`;
             break;
         case "urgent":
             body =
-                `~${amount} tokens of unreduced tool output remain. ` +
-                `A large span of this session will be comparted soon; drop spent outputs with ctx_reduce first so the archived span is the part that matters.`;
+                `~${amount} tokens of unreduced tool output remain, and a large span of this session will be comparted before long. ` +
+                `Consider dropping spent outputs with ctx_reduce so the archived span is the part that matters.`;
             break;
     }
     return `\n\n<system-reminder>\n${body}\n</system-reminder>`;
