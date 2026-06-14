@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -112,6 +112,24 @@ describe("runManagedUpgrade — already-upgraded guard", () => {
 
         expect(message).toContain("Already Up To Date");
         expect(message).toContain("no compartment history");
+    });
+});
+
+describe("runManagedRecomp clears stale emergency recovery", () => {
+    // A successful recomp resolves the overflow that may have armed
+    // needs_emergency_recovery; runManagedRecomp must clear it on the "done"
+    // terminal phase ONLY (not on skipped/failed), so the flag stops force-
+    // bumping pressure to 95% every later pass once the session is small again.
+    // The full behavioral path needs a live historian client; this guard pins
+    // the clear-on-done wiring against a silent revert.
+    const SRC = readFileSync(join(import.meta.dir, "recomp-orchestrator.ts"), "utf8");
+
+    it("clears the flag only in the done terminal phase", () => {
+        expect(SRC).toContain("clearEmergencyRecovery(ctx.db, sessionId)");
+        const doneGate = SRC.indexOf('terminalPhase === "done"');
+        const clearCall = SRC.indexOf("clearEmergencyRecovery(ctx.db, sessionId)");
+        expect(doneGate).toBeGreaterThan(-1);
+        expect(clearCall).toBeGreaterThan(doneGate);
     });
 });
 

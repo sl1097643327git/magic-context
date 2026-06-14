@@ -3012,26 +3012,35 @@ function maybeFireHistorian(args: {
 				sessionId,
 				`historian trigger eval: shouldFire=false (no trigger condition met)`,
 			);
-			// Disarm a stuck emergency-recovery flag here, where the AUTHORITATIVE
+			// Disarm a STALE emergency-recovery flag here, where the AUTHORITATIVE
 			// runnable-window snapshot is in hand. The early disarm in the main
 			// pass (the `isEmergency` block) uses the loose "any raw past boundary"
 			// check, which returns true for a tiny non-runnable tail (e.g. one
 			// in-progress message after /ctx-recomp) and so never disarms — the
-			// flag then bumps every pass to 95% forever. If recovery is armed but
-			// the historian both won't fire AND has no runnable compartment window,
-			// recovery can make no progress, so clear the flag. detectedContextLimit
-			// is left intact (authoritative model data).
+			// flag then bumps every pass to 95% forever even at low real pressure.
+			//
+			// Gate on REAL pressure (usage.percentage, NOT the 95% emergency bump):
+			//   - LOW pressure + armed + no runnable window  → the flag is STALE
+			//     (overflow already resolved, e.g. by /ctx-recomp); disarm so it
+			//     stops force-bumping. This is the user-rescued case (~20%).
+			//   - HIGH pressure + armed + no runnable window  → a GENUINE overflow
+			//     whose tail is one in-progress arc; the window will become runnable
+			//     once the arc closes. Keep armed so drop-all-tools keeps shrinking
+			//     the prompt every pass until then (OpenCode keeps it armed too,
+			//     stopping only the bump via a counter escape). detectedContextLimit
+			//     is left intact (authoritative model data).
 			try {
 				const overflowState = getOverflowState(db, sessionId);
 				if (
 					overflowState.needsEmergencyRecovery &&
+					usage.percentage < FORCE_MATERIALIZATION_PERCENTAGE &&
 					!inFlightHistorian.has(sessionId) &&
 					!hasRunnableCompartmentWindow(boundarySnapshot)
 				) {
 					clearEmergencyRecovery(db, sessionId);
 					sessionLog(
 						sessionId,
-						"historian: disarming emergency recovery — no runnable compartment window (would otherwise bump to 95% every pass)",
+						`historian: disarming stale emergency recovery — real pressure ${usage.percentage.toFixed(1)}% with no runnable compartment window (would otherwise bump to 95% every pass)`,
 					);
 				}
 			} catch (err) {

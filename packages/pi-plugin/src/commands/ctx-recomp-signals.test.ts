@@ -58,4 +58,17 @@ describe("/ctx-recomp post-completion signal contract", () => {
 		expect(codeOnly).toContain("stagePiRecompMarker(");
 		expect(codeOnly).not.toContain("queueAndApplyPiRecompMarker(");
 	});
+
+	test("clears needs_emergency_recovery on a published recomp (parity with OpenCode)", () => {
+		// A successful recomp resolves the overflow that may have armed
+		// needs_emergency_recovery; without clearing it the flag force-bumps
+		// pressure to 95% every later pass even though the session is now small.
+		expect(codeOnly).toContain("clearEmergencyRecovery(deps.db, sessionId)");
+		// Must be inside the published branch, before the deferred signals.
+		const publishedGate = codeOnly.indexOf("if (result.published)");
+		const clearCall = codeOnly.indexOf(
+			"clearEmergencyRecovery(deps.db, sessionId)",
+		);
+		expect(clearCall).toBeGreaterThan(publishedGate);
+	});
 });

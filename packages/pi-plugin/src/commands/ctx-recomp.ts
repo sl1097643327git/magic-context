@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
+import { clearEmergencyRecovery } from '@magic-context/core/features/magic-context/storage-meta-persisted';
 import { COMPARTMENT_AGENT_SYSTEM_PROMPT } from "@magic-context/core/hooks/magic-context/compartment-prompt";
 import { executeContextRecompWithResult } from "@magic-context/core/hooks/magic-context/compartment-runner";
 import {
@@ -175,6 +176,18 @@ export function registerCtxRecompCommand(
 						parsed.kind === "partial" ? { range: parsed.range } : {},
 					);
 					if (result.published) {
+						// A successful recomp resolves the overflow that may have armed
+						// needs_emergency_recovery — clear it so the flag stops force-
+						// bumping pressure to 95% every later pass (parity with
+						// OpenCode runManagedRecomp). detectedContextLimit is left intact.
+						try {
+							clearEmergencyRecovery(deps.db, sessionId);
+						} catch (recoveryError) {
+							sessionLog(
+								sessionId,
+								`/ctx-recomp: clearEmergencyRecovery failed (continuing): ${describeError(recoveryError).brief}`,
+							);
+						}
 						// DEFERRED staging (background-safe): stage the native marker
 						// as a pending blob + signal a DEFERRED history refresh so the
 						// next transform pass (at a turn boundary) drains and applies

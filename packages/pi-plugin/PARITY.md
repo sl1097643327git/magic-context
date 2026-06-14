@@ -404,6 +404,33 @@ false-positive folds. Pi and OpenCode now both operate without this trigger.
 
 ---
 
+## 16. Emergency-recovery disarm: Pi disarms inline; OpenCode uses a counter escape
+
+Both harnesses face the same hazard: `needs_emergency_recovery` armed by an
+overflow that the user then resolves (e.g. `/ctx-recomp`), leaving a session at
+low real pressure with a non-runnable tail. The flag must not keep force-bumping
+pressure to 95% forever, but it MUST stay armed for a *genuine* overflow whose
+tail is one in-progress arc (the window becomes runnable once the arc closes).
+
+- **OpenCode** keeps the flag armed and stops only the disruptive bump via a
+  counter escape: `recovery_no_eligible_head_count >= RECOVERY_NO_HEAD_LIMIT (2)`
+  (`transform.ts`, `protected-tail-boundary.ts`). It never auto-clears; the flag
+  is cleared by a successful historian publish, a model switch, or a successful
+  `/ctx-recomp` (runManagedRecomp "done").
+
+- **Pi** does NOT increment that counter, so it disarms inline instead: inside
+  `maybeFireHistorian`'s no-fire branch, when recovery is armed, no historian is
+  in flight, there is no runnable compartment window, AND **real** pressure
+  (`usage.percentage`, not the 95% bump) is `< FORCE_MATERIALIZATION_PERCENTAGE`
+  → clear the flag. The low-pressure gate is what makes this safe: a genuine
+  overflow arc sits near the limit, so it stays armed (matching OpenCode's
+  intent); only a stale flag (post-recomp ~20%) disarms.
+
+Both also clear the flag on a successful `/ctx-recomp` (OpenCode runManagedRecomp
+"done"; Pi `result.published`) — the recomp IS the overflow resolution.
+
+---
+
 ## Maintenance
 
 Update this file whenever a deliberate Pi↔OpenCode divergence is introduced or

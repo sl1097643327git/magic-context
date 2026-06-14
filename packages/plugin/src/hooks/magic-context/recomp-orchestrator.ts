@@ -7,6 +7,7 @@ import {
     runMemoryMigration,
 } from "../../features/magic-context/memory/memory-migration";
 import { resolveProjectIdentity } from "../../features/magic-context/project-identity";
+import { clearEmergencyRecovery } from "../../features/magic-context/storage-meta-persisted";
 import type { PluginContext } from "../../plugin/types";
 import type { Database } from "../../shared/sqlite";
 import {
@@ -307,6 +308,18 @@ export async function runManagedRecomp(
             : isRecompFailure(message)
               ? "failed"
               : "done";
+        // A successful recomp IS the user resolving an overflow: it rebuilds
+        // compartments from raw history and shrinks the live tail. So clear any
+        // stale needs_emergency_recovery — otherwise the flag (armed by the
+        // overflow that prompted the recomp) keeps force-bumping pressure to 95%
+        // on every later pass even though the session is now small.
+        if (terminalPhase === "done") {
+            try {
+                clearEmergencyRecovery(ctx.db, sessionId);
+            } catch {
+                // best-effort; the historian-trigger disarm path is the backstop.
+            }
+        }
         setRecompTerminal(
             ctx.liveSessionState,
             sessionId,
