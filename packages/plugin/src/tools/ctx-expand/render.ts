@@ -21,10 +21,7 @@
  * its `RawMessageProvider` for the call exactly like the range view does.
  */
 
-import {
-    readRawSessionMessageById,
-    readRawSessionMessages,
-} from "../../hooks/magic-context/read-session-chunk";
+import { readRawSessionMessages } from "../../hooks/magic-context/read-session-chunk";
 import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
 import type { RawMessage } from "../../hooks/magic-context/read-session-raw";
 
@@ -182,21 +179,23 @@ function renderPartFull(part: unknown, index: number): string {
 }
 
 /**
- * Full untruncated recovery of one message by its id. Returns a "deleted"
- * message when the id is not in stored history (pruned/reverted or wrong id).
+ * Full untruncated recovery of one message by its ORDINAL — the same `[N]`
+ * identifier the agent already uses everywhere (compartment start/end, ctx_search
+ * hits, the verbose range view). Returns a "deleted" message when no message sits
+ * at that ordinal (pruned/reverted or wrong ordinal).
  */
-export function renderMessageById(sessionId: string, messageId: string): string {
-    const msg = readRawSessionMessageById(sessionId, messageId);
+export function renderMessageByOrdinal(sessionId: string, ordinal: number): string {
+    const msg = readRawSessionMessages(sessionId).find((m: RawMessage) => m.ordinal === ordinal);
     if (!msg) {
         return (
-            `Message "${messageId}" is not in this session's stored history — it was deleted ` +
-            `(session prune/revert) or the id is wrong, so it can't be recovered. ` +
+            `No message at ordinal ${ordinal} in this session's stored history — it was deleted ` +
+            `(session prune/revert) or the ordinal is wrong, so it can't be recovered. ` +
             `Re-run the tool if you still need the data.`
         );
     }
     const lines: string[] = [];
     lines.push(
-        `[${msg.ordinal}] ${msg.id} ${roleLabel(msg.role)} — full recovery (${msg.parts.length} part${msg.parts.length === 1 ? "" : "s"}):`,
+        `[${msg.ordinal}] ${roleLabel(msg.role)} — full recovery (${msg.parts.length} part${msg.parts.length === 1 ? "" : "s"}):`,
     );
     lines.push("");
     msg.parts.forEach((part, i) => {
@@ -234,7 +233,7 @@ export function renderVerboseRange(
     let truncated = false;
 
     for (const msg of messages) {
-        const header = `[${msg.ordinal}] ${msg.id} ${roleLabel(msg.role)}`;
+        const header = `[${msg.ordinal}] ${roleLabel(msg.role)}`;
         const partLines = msg.parts.map(renderPartPreview).filter((l): l is string => l !== null);
         const block = partLines.length > 0 ? `${header}\n${partLines.join("\n")}` : header;
 

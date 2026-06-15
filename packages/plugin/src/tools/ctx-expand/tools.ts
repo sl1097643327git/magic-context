@@ -3,7 +3,7 @@ import { getLastCompartmentEndMessage } from "../../features/magic-context/compa
 import type { ContextDatabase } from "../../features/magic-context/storage";
 import { readSessionChunk } from "../../hooks/magic-context/read-session-chunk";
 import { CTX_EXPAND_DESCRIPTION, CTX_EXPAND_TOKEN_BUDGET } from "./constants";
-import { renderMessageById, renderVerboseRange } from "./render";
+import { renderMessageByOrdinal, renderVerboseRange } from "./render";
 import type { CtxExpandArgs } from "./types";
 
 export interface CtxExpandToolDeps {
@@ -30,25 +30,25 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
                 .boolean()
                 .optional()
                 .describe(
-                    "With start/end: list each message separately with its id and per-part preview (each tool call shown with its id), so you can pick one to recover in full by id.",
+                    "With start/end: list each message separately with its ordinal [N] and per-part preview (each tool call shown with its output size), so you can pick one to recover in full by ordinal.",
                 ),
-            id: tool.schema
-                .string()
+            message: tool.schema
+                .number()
                 .optional()
                 .describe(
-                    "Full untruncated recovery of ONE message by its message id (every text part + every tool call's complete input/output). Use the ids from a verbose range. Recovers a tool output you dropped with ctx_reduce.",
+                    "Full untruncated recovery of ONE message by its ordinal (every text part + every tool call's complete input/output). Use an ordinal from a compartment, ctx_search hit, or verbose range. Recovers a tool output you dropped with ctx_reduce.",
                 ),
         },
         async execute(args: CtxExpandArgs, toolContext) {
             const sessionId = toolContext.sessionID;
 
-            // By-id mode: full recovery of a single message from stored history.
-            if (typeof args.id === "string" && args.id.length > 0) {
-                return renderMessageById(sessionId, args.id);
+            // By-ordinal mode: full recovery of a single message from stored history.
+            if (typeof args.message === "number" && args.message >= 1) {
+                return renderMessageByOrdinal(sessionId, args.message);
             }
 
             if (!args.start || !args.end || args.start < 1 || args.end < args.start) {
-                return "Error: provide either id=<messageId>, or start and end (positive integers, start <= end).";
+                return "Error: provide either message=<ordinal>, or start and end (positive integers, start <= end).";
             }
 
             // Clamp the range to the last compartment boundary, mirroring
@@ -75,7 +75,7 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
                     return `No messages found in range ${args.start}-${effectiveEnd}. The range may be outside this session's history.`;
                 }
                 const out = [
-                    `Messages ${args.start}-${v.lastOrdinal} (verbose). Recover any one in full with ctx_expand(id="<message id>"):`,
+                    `Messages ${args.start}-${v.lastOrdinal} (verbose). Recover any one in full with ctx_expand(message=<ordinal>):`,
                     "",
                     v.text,
                 ];

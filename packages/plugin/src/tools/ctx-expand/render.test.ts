@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { setRawMessageProvider } from "../../hooks/magic-context/read-session-chunk";
 import type { RawMessage } from "../../hooks/magic-context/read-session-raw";
-import { renderMessageById, renderVerboseRange } from "./render";
+import { renderMessageByOrdinal, renderVerboseRange } from "./render";
 
 const SESSION = "ses-render-test";
 
@@ -39,9 +39,9 @@ describe("renderVerboseRange", () => {
         ]);
         try {
             const out = renderVerboseRange(SESSION, 10, 11, 15_000);
-            // Each message rendered separately, with its id in the header.
-            expect(out.text).toContain("[10] msg_a U (user)");
-            expect(out.text).toContain("[11] msg_b A (assistant)");
+            // Each message rendered separately, addressed by ordinal in the header.
+            expect(out.text).toContain("[10] U (user)");
+            expect(out.text).toContain("[11] A (assistant)");
             // Tool call shown with its name+arg and output size, not raw output.
             expect(out.text).toContain("tool read(config.ts)");
             expect(out.text).toMatch(/→ output ~\d+ tok/);
@@ -62,9 +62,9 @@ describe("renderVerboseRange", () => {
         ]);
         try {
             const out = renderVerboseRange(SESSION, 10, 20, 15_000);
-            expect(out.text).toContain("msg_in");
-            expect(out.text).not.toContain("msg_before");
-            expect(out.text).not.toContain("msg_after");
+            expect(out.text).toContain("[10] U (user)");
+            expect(out.text).not.toContain("[5] U (user)");
+            expect(out.text).not.toContain("[99] U (user)");
         } finally {
             cleanup();
         }
@@ -83,7 +83,7 @@ describe("renderVerboseRange", () => {
         try {
             const out = renderVerboseRange(SESSION, 1, 3, 30);
             // First block always emitted (never an empty result), then truncates.
-            expect(out.text).toContain("[1] m1");
+            expect(out.text).toContain("[1] U (user)");
             expect(out.truncated).toBe(true);
             expect(out.lastOrdinal).toBe(1);
         } finally {
@@ -92,7 +92,7 @@ describe("renderVerboseRange", () => {
     });
 });
 
-describe("renderMessageById", () => {
+describe("renderMessageByOrdinal", () => {
     test("recovers the FULL untruncated tool output (the ctx_reduce way-back)", () => {
         const fullOutput = "ERROR at line 42\n".repeat(50);
         const cleanup = provide([
@@ -104,8 +104,8 @@ describe("renderMessageById", () => {
             },
         ]);
         try {
-            const out = renderMessageById(SESSION, "msg_tool");
-            expect(out).toContain("[7] msg_tool A (assistant)");
+            const out = renderMessageByOrdinal(SESSION, 7);
+            expect(out).toContain("[7] A (assistant)");
             expect(out).toContain("[tool: bash #bash:9]");
             // FULL output present, not a preview/size.
             expect(out).toContain(fullOutput.trim().slice(0, 30));
@@ -121,8 +121,8 @@ describe("renderMessageById", () => {
             { ordinal: 3, id: "msg_paste", role: "user", parts: [{ type: "text", text: paste }] },
         ]);
         try {
-            const out = renderMessageById(SESSION, "msg_paste");
-            expect(out).toContain("[3] msg_paste U (user)");
+            const out = renderMessageByOrdinal(SESSION, 3);
+            expect(out).toContain("[3] U (user)");
             expect(out).toContain("[text]");
             expect(out).toContain(paste.trim().slice(0, 30));
         } finally {
@@ -130,13 +130,13 @@ describe("renderMessageById", () => {
         }
     });
 
-    test("missing id reports deleted, does not throw", () => {
+    test("missing ordinal reports deleted, does not throw", () => {
         const cleanup = provide([
             { ordinal: 1, id: "exists", role: "user", parts: [{ type: "text", text: "hi" }] },
         ]);
         try {
-            const out = renderMessageById(SESSION, "msg_gone");
-            expect(out).toContain("not in this session's stored history");
+            const out = renderMessageByOrdinal(SESSION, 999);
+            expect(out).toContain("No message at ordinal 999");
             expect(out).toContain("deleted");
         } finally {
             cleanup();

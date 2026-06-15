@@ -29,7 +29,7 @@ import {
 	CTX_EXPAND_TOKEN_BUDGET,
 } from "@magic-context/core/tools/ctx-expand/constants";
 import {
-	renderMessageById,
+	renderMessageByOrdinal,
 	renderVerboseRange,
 } from "@magic-context/core/tools/ctx-expand/render";
 import { type Static, Type } from "typebox";
@@ -49,13 +49,13 @@ const ParamsSchema = Type.Object({
 	verbose: Type.Optional(
 		Type.Boolean({
 			description:
-				"With start/end: list each message separately with its id and per-part preview, so you can recover one in full by id.",
+				"With start/end: list each message separately with its ordinal [N] and per-part preview, so you can recover one in full by ordinal.",
 		}),
 	),
-	id: Type.Optional(
-		Type.String({
+	message: Type.Optional(
+		Type.Number({
 			description:
-				"Full untruncated recovery of ONE message by its message id (text + every tool call's full input/output). Recovers a tool output you dropped with ctx_reduce.",
+				"Full untruncated recovery of ONE message by its ordinal (text + every tool call's full input/output). Recovers a tool output you dropped with ctx_reduce.",
 		}),
 	),
 });
@@ -99,19 +99,17 @@ export function createCtxExpandTool(
 			}
 
 			// All raw reads go through the shared provider-aware helpers, so
-			// register Pi's source (incl. readMessageById) for the duration of
-			// this single call. setRawMessageProvider returns an unregister fn so
-			// we don't leak the binding into concurrent transform passes.
+			// register Pi's source for the duration of this single call.
+			// setRawMessageProvider returns an unregister fn so we don't leak the
+			// binding into concurrent transform passes.
 			const unregister = setRawMessageProvider(sessionId, {
 				readMessages: () => readPiSessionMessages(ctx),
-				readMessageById: (messageId: string) =>
-					readPiSessionMessages(ctx).find((m) => m.id === messageId) ?? null,
 			});
 
 			try {
-				// By-id mode: full recovery of a single message from JSONL history.
-				if (typeof params.id === "string" && params.id.length > 0) {
-					return ok(renderMessageById(sessionId, params.id));
+				// By-ordinal mode: full recovery of a single message from JSONL.
+				if (typeof params.message === "number" && params.message >= 1) {
+					return ok(renderMessageByOrdinal(sessionId, params.message));
 				}
 
 				if (
@@ -121,7 +119,7 @@ export function createCtxExpandTool(
 					params.end < params.start
 				) {
 					return err(
-						"Error: provide either id=<messageId>, or start and end (positive integers, start <= end).",
+						"Error: provide either message=<ordinal>, or start and end (positive integers, start <= end).",
 					);
 				}
 
@@ -157,7 +155,7 @@ export function createCtxExpandTool(
 						);
 					}
 					const out = [
-						`Messages ${params.start}-${v.lastOrdinal} (verbose). Recover any one in full with ctx_expand(id="<message id>"):`,
+						`Messages ${params.start}-${v.lastOrdinal} (verbose). Recover any one in full with ctx_expand(message=<ordinal>):`,
 						"",
 						v.text,
 					];

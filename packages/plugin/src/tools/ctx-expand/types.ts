@@ -1,8 +1,8 @@
 export interface CtxExpandArgs {
     start?: number;
     end?: number;
-    /** Verbose range view: each message + tool call shown separately, with ids. */
+    /** Verbose range view: each message + tool call shown separately, with ordinals. */
     verbose?: boolean;
-    /** Full untruncated recovery of one message (any role) by its message id. */
-    id?: string;
+    /** Full untruncated recovery of one message (any role) by its ordinal. */
+    message?: number;
 }
