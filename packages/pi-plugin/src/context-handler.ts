@@ -2334,8 +2334,9 @@ export function registerPiContextHandler(
 					// Channel 2 (ceiling) trigger — fire when reclaimable tool output
 					// is at least a third of the usable working range (the gap
 					// between fixed overhead and the execute-threshold ceiling).
-					// Delivery happens on `agent_end` via pi.sendUserMessage. Only
-					// escalate from '' so an in-flight claim/delivery is never reset.
+					// Delivery happens on `agent_end`/`tool_result` via a hidden
+					// pi.sendMessage custom message. Only escalate from '' so an
+					// in-flight claim/delivery is never reset.
 					if (
 						usageContextLimit &&
 						usageContextLimit > 0 &&
@@ -4215,7 +4216,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
  * The rolling/iteration nudge and the tool-heavy sticky reminder were removed
  * in the ctx_reduce nudge redesign — replaced by Channel 1 (in-turn tool-result
  * append via `pi.on("tool_result")`, see `ctx-reduce-nudge-pi.ts`) and Channel 2
- * (the `sendUserMessage` ceiling). `appendReminderToUserMessageByIdPi` /
+ * (the hidden `sendMessage` ceiling). `appendReminderToUserMessageByIdPi` /
  * `appendReminderToPiUserMessage` below are retained — they back the note-nudge
  * and auto-search hint paths, which still inject into user messages.
  */

@@ -185,15 +185,23 @@ the harness I/O differs:
   `computeTailToolTokensPi` extracts it, then defers to the shared
   `tailToolTokensFromStrings`.
 
-- **Channel 2 (synthetic-user ceiling nudge).** OpenCode MUST use a live-server
+- **Channel 2 (hidden ceiling nudge).** OpenCode MUST use a live-server
   `createOpencodeClient(serverUrl)` + `/session` probe to dodge the plugin
   runner-split bug (anomalyco/opencode#28202); Pi just calls the native
-  `pi.sendUserMessage(reminder, { deliverAs: ... })`. **Pi has no #28202
-  workaround, no live-server client, and no probe** — it is single-process, so
-  `sendUserMessage` coalesces natively and the message lands at the tail after the
-  current turn. The shared `channel2_nudge_state` lease (pending→claimed→delivered,
-  TTL-scoped stale-claim heal, revert only on send failure) is used identically
-  for the one-ceiling-per-lifetime cap; only the delivery call differs. Both
+  `pi.sendMessage({ customType, content, display:false, details }, { deliverAs })`.
+  **Pi has no #28202 workaround, no live-server client, and no probe** — it is
+  single-process, so the message coalesces natively and lands at the tail after
+  the current turn. **Hidden-render divergence (same intent, different mechanism):**
+  OpenCode marks its promptAsync part `synthetic: true` (skips OC core's
+  queued-message wrapper + the #129 flip-bust, drops from the user-message render,
+  still model-visible); Pi has no such wrapper, so it achieves the same
+  "model-visible but not a literal user turn" via a `sendMessage` custom message
+  with `display:false` (Pi converts `role:"custom"`→user message for the model
+  via convertToLlm, renders only when `display:true`). Neither presents the nudge
+  as a user turn. The shared `channel2_nudge_state` lease
+  (pending→claimed→delivered, TTL-scoped stale-claim heal, revert only on send
+  failure) is used identically for the one-ceiling-per-lifetime cap; only the
+  delivery call differs. Both
   deliver MID-TURN at step boundaries (the point
   of the channel: warn while the pile grows): OpenCode from `message.updated`
   (finish=tool-calls OR stop, queued message drains at the next run-loop step);

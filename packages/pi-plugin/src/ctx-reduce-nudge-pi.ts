@@ -12,10 +12,10 @@
 //   Channel 2 (ceiling nudge): OpenCode must use a live-server `promptAsync`
 //   with a `/session` probe to dodge the plugin runner-split bug
 //   (anomalyco/opencode#28202). Pi is single-process, so it just calls the
-//   native `pi.sendUserMessage(..., { deliverAs: "followUp" })` — no probe, no
-//   live-server client, no #28202 workaround. The `channel2_nudge_state` lease
-//   is kept for the one-ceiling-per-lifetime cap + the record-in-pipeline /
-//   deliver-on-`tool_result` or `agent_end` split.
+//   native `pi.sendMessage(..., { deliverAs })` as a hidden custom message
+//   (`display:false`) — no probe, no live-server client, no #28202 workaround.
+//   The `channel2_nudge_state` lease is kept for the one-ceiling-per-lifetime
+//   cap + the record-in-pipeline / deliver-on-`tool_result` or `agent_end` split.
 
 import {
 	casChannel2NudgeState,
@@ -274,19 +274,37 @@ export function maybeChannel1ReminderForToolResult(args: {
 	};
 }
 
-/** Minimal shape of the Pi API needed to deliver a Channel 2 ceiling nudge. */
-interface PiSendUserMessage {
-	sendUserMessage: (
-		content: string,
-		options?: { deliverAs?: "steer" | "followUp" },
+/**
+ * Minimal shape of the Pi API needed to deliver a Channel 2 ceiling nudge.
+ * Uses `sendMessage` (custom message) rather than `sendUserMessage` so the nudge
+ * can render `display: false` — hidden from the Pi TUI while still reaching the
+ * model (Pi converts a `role:"custom"` entry to a model-visible user message via
+ * `convertToLlm`). This is the Pi parity for OpenCode marking the same nudge
+ * `synthetic: true`: an agent-directed steer should drive the run + reach the
+ * model but NOT show up as a literal user turn the user didn't type. Available
+ * since published pi-coding-agent 0.74.0 (our floor); MC already uses
+ * `sendMessage` for /ctx-status.
+ */
+interface PiSendMessage {
+	sendMessage: (
+		message: {
+			customType: string;
+			content: string;
+			display: boolean;
+			details?: unknown;
+		},
+		options?: { deliverAs?: "steer" | "followUp"; triggerTurn?: boolean },
 	) => void;
 }
+
+const CHANNEL2_NUDGE_CUSTOM_TYPE = "magic-context:ceiling-nudge";
 
 /**
  * Deliver a pending Channel 2 ceiling nudge for `sessionId`, if any. Safe to
  * call from BOTH delivery sites; no-ops unless a `pending` intent exists. Pi
- * is single-process so `sendUserMessage` coalesces natively — no #28202
- * workaround.
+ * is single-process so delivery coalesces natively — no #28202 workaround.
+ * Delivered as a hidden custom message (`sendMessage` + `display:false`) so it
+ * reaches the model but isn't presented as a literal user turn.
  *
  * Delivery sites + mode:
  * - `tool_result` (mid-turn, the primary site): deliverAs "steer" — Pi queues
@@ -294,13 +312,13 @@ interface PiSendUserMessage {
  *   agent is warned while the pile is still growing and can act THIS turn.
  *   Waiting for idle would deliver the warning after all the growth happened.
  * - `agent_end` (idle fallback): catches the intent when the turn ended before
- *   a tool boundary could deliver it; sendUserMessage starts a fresh turn.
+ *   a tool boundary could deliver it; deliverAs "followUp" starts a fresh turn.
  *
  * Lease: pending → claimed → delivered (revert to pending on failure so a
  * transient error doesn't burn the one-shot cap). Returns true on delivery.
  */
 export function maybeDeliverChannel2Pi(
-	pi: PiSendUserMessage,
+	pi: PiSendMessage,
 	db: Database,
 	sessionId: string,
 	deliverAs: "steer" | "followUp" = "followUp",
@@ -348,11 +366,20 @@ export function maybeDeliverChannel2Pi(
 	if (!casChannel2NudgeState(db, sessionId, "pending", "claimed")) return false;
 
 	try {
-		pi.sendUserMessage(
-			buildChannel2Reminder(undropped, baseline.oldestReclaimableToolTags),
+		// display: false → hidden from the Pi TUI (agent steer, not a user turn),
+		// but still model-visible via convertToLlm. deliverAs preserves the
+		// existing scheduling (steer mid-turn / followUp at agent_end).
+		pi.sendMessage(
 			{
-				deliverAs,
+				customType: CHANNEL2_NUDGE_CUSTOM_TYPE,
+				content: buildChannel2Reminder(
+					undropped,
+					baseline.oldestReclaimableToolTags,
+				),
+				display: false,
+				details: { kind: "channel-2-ceiling-nudge" },
 			},
+			{ deliverAs },
 		);
 	} catch (error) {
 		try {

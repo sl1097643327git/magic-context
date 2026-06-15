@@ -173,7 +173,7 @@ describe("maybeDeliverChannel2Pi", () => {
 		let sent = 0;
 		const delivered = maybeDeliverChannel2Pi(
 			{
-				sendUserMessage: () => {
+				sendMessage: () => {
 					sent += 1;
 				},
 			},
@@ -199,16 +199,20 @@ describe("maybeDeliverChannel2Pi", () => {
 		});
 	}
 
-	it("delivers via sendUserMessage(followUp) and consumes the one-shot cap", () => {
+	it("delivers via sendMessage(display:false, followUp) and consumes the one-shot cap", () => {
 		const db = createTestDb();
 		setChannel2NudgeState(db, SESSION, "pending");
 		armStrongBaseline(SESSION);
 		let capturedContent = "";
 		let capturedDeliverAs = "";
+		let capturedDisplay: boolean | undefined;
+		let capturedCustomType = "";
 		const delivered = maybeDeliverChannel2Pi(
 			{
-				sendUserMessage: (content, options) => {
-					capturedContent = content;
+				sendMessage: (message, options) => {
+					capturedContent = message.content;
+					capturedDisplay = message.display;
+					capturedCustomType = message.customType;
 					capturedDeliverAs = options?.deliverAs ?? "";
 				},
 			},
@@ -217,6 +221,9 @@ describe("maybeDeliverChannel2Pi", () => {
 		);
 		expect(delivered).toBe(true);
 		expect(capturedDeliverAs).toBe("followUp");
+		// Hidden from the Pi TUI (agent steer, not a user turn) but still model-visible.
+		expect(capturedDisplay).toBe(false);
+		expect(capturedCustomType).toBe("magic-context:ceiling-nudge");
 		expect(capturedContent).toContain("<system-reminder>");
 		expect(capturedContent).toContain("ctx_reduce");
 		expect(capturedContent).toContain("oldest reclaimable");
@@ -231,7 +238,7 @@ describe("maybeDeliverChannel2Pi", () => {
 		let sent = 0;
 		const delivered = maybeDeliverChannel2Pi(
 			{
-				sendUserMessage: () => {
+				sendMessage: () => {
 					sent += 1;
 				},
 			},
@@ -265,7 +272,7 @@ describe("maybeDeliverChannel2Pi", () => {
 		let sent = 0;
 		const delivered = maybeDeliverChannel2Pi(
 			{
-				sendUserMessage: () => {
+				sendMessage: () => {
 					sent += 1;
 				},
 			},
@@ -284,7 +291,7 @@ describe("maybeDeliverChannel2Pi", () => {
 		armStrongBaseline(SESSION);
 		const delivered = maybeDeliverChannel2Pi(
 			{
-				sendUserMessage: () => {
+				sendMessage: () => {
 					throw new Error("transient");
 				},
 			},
@@ -332,7 +339,7 @@ describe("maybeDeliverChannel2Pi", () => {
 
 		const delivered = maybeDeliverChannel2Pi(
 			{
-				sendUserMessage: () => {
+				sendMessage: () => {
 					throw new Error("transient");
 				},
 			},
@@ -357,7 +364,7 @@ describe("maybeDeliverChannel2Pi", () => {
 
 		const delivered = maybeDeliverChannel2Pi(
 			{
-				sendUserMessage: () => {
+				sendMessage: () => {
 					db.prepare(
 						"UPDATE session_meta SET channel2_nudge_state = 'delivered', channel2_nudge_claimed_at = 0 WHERE session_id = ?",
 					).run(session);
@@ -385,7 +392,7 @@ describe("maybeDeliverChannel2Pi", () => {
 		let sent = 0;
 		const delivered = maybeDeliverChannel2Pi(
 			{
-				sendUserMessage: () => {
+				sendMessage: () => {
 					sent += 1;
 				},
 			},
