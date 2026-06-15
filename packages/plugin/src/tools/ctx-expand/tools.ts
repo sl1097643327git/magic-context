@@ -3,6 +3,7 @@ import { getLastCompartmentEndMessage } from "../../features/magic-context/compa
 import type { ContextDatabase } from "../../features/magic-context/storage";
 import { readSessionChunk } from "../../hooks/magic-context/read-session-chunk";
 import { CTX_EXPAND_DESCRIPTION, CTX_EXPAND_TOKEN_BUDGET } from "./constants";
+import { renderMessageById, renderVerboseRange } from "./render";
 import type { CtxExpandArgs } from "./types";
 
 export interface CtxExpandToolDeps {
@@ -15,20 +16,39 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
         args: {
             start: tool.schema
                 .number()
+                .optional()
                 .describe(
                     'First message ordinal to expand — a compartment\'s start="N" attribute, or an ordinal from a ctx_search message hit',
                 ),
             end: tool.schema
                 .number()
+                .optional()
                 .describe(
                     'Last message ordinal to expand (inclusive) — a compartment\'s end="M" attribute',
+                ),
+            verbose: tool.schema
+                .boolean()
+                .optional()
+                .describe(
+                    "With start/end: list each message separately with its id and per-part preview (each tool call shown with its id), so you can pick one to recover in full by id.",
+                ),
+            id: tool.schema
+                .string()
+                .optional()
+                .describe(
+                    "Full untruncated recovery of ONE message by its message id (every text part + every tool call's complete input/output). Use the ids from a verbose range. Recovers a tool output you dropped with ctx_reduce.",
                 ),
         },
         async execute(args: CtxExpandArgs, toolContext) {
             const sessionId = toolContext.sessionID;
 
+            // By-id mode: full recovery of a single message from stored history.
+            if (typeof args.id === "string" && args.id.length > 0) {
+                return renderMessageById(sessionId, args.id);
+            }
+
             if (!args.start || !args.end || args.start < 1 || args.end < args.start) {
-                return "Error: start and end must be positive integers with start <= end.";
+                return "Error: provide either id=<messageId>, or start and end (positive integers, start <= end).";
             }
 
             // Clamp the range to the last compartment boundary, mirroring
@@ -42,6 +62,31 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
             }
             const effectiveEnd =
                 lastCompartmentEnd >= 0 ? Math.min(args.end, lastCompartmentEnd) : args.end;
+
+            // Verbose mode: each message separate, with ids + per-part previews.
+            if (args.verbose === true) {
+                const v = renderVerboseRange(
+                    sessionId,
+                    args.start,
+                    effectiveEnd,
+                    CTX_EXPAND_TOKEN_BUDGET,
+                );
+                if (!v.text) {
+                    return `No messages found in range ${args.start}-${effectiveEnd}. The range may be outside this session's history.`;
+                }
+                const out = [
+                    `Messages ${args.start}-${v.lastOrdinal} (verbose). Recover any one in full with ctx_expand(id="<message id>"):`,
+                    "",
+                    v.text,
+                ];
+                if (v.truncated) {
+                    out.push(
+                        "",
+                        `Truncated at message ${v.lastOrdinal} (budget: ~${CTX_EXPAND_TOKEN_BUDGET} tokens). Call again with start=${v.lastOrdinal + 1} end=${effectiveEnd} verbose=true for more.`,
+                    );
+                }
+                return out.join("\n");
+            }
 
             const chunk = readSessionChunk(
                 sessionId,

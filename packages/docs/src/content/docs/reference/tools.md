@@ -36,6 +36,8 @@ Tool: Dropped tags: 4, 5, 6. Changes take effect on next message.
 | --- | --- |
 | `start` | First message ordinal (inclusive). |
 | `end` | Last message ordinal (inclusive). |
+| `verbose` | With `start`/`end`: list each message separately with its message id and a per-part preview (each tool call shown with its id and output size). |
+| `id` | Full untruncated recovery of one message by its message id — every text part and every tool call's complete input/output. |
 
 Output is capped near 15K tokens. Ordinals after the last compartment are the live tail (already visible, not expandable).
 
@@ -44,6 +46,11 @@ Agent: ctx_expand({ "start": 120, "end": 245 })
 Tool: [120] U: Can we rename the handler?
 [121] A: Updating command-handler.ts...
 ```
+
+**Two recovery modes for finer detail.** The default range view returns a condensed digest. To drill in:
+
+- `ctx_expand({ "start": 120, "end": 245, "verbose": true })` — each message listed separately with its id, so you can find the exact message or tool call you want.
+- `ctx_expand({ "id": "msg_abc123" })` — the full, untruncated content of that one message. This is the cheap way to get back a tool output you dropped with `ctx_reduce`: the original is still in stored history even though the wire shows `[dropped §N§]`. If the message was deleted (session prune/revert), it says so.
 
 ## ctx_note
 

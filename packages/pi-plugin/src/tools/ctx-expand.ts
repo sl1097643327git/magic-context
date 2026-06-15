@@ -28,16 +28,36 @@ import {
 	CTX_EXPAND_DESCRIPTION,
 	CTX_EXPAND_TOKEN_BUDGET,
 } from "@magic-context/core/tools/ctx-expand/constants";
+import {
+	renderMessageById,
+	renderVerboseRange,
+} from "@magic-context/core/tools/ctx-expand/render";
 import { type Static, Type } from "typebox";
 import { readPiSessionMessages } from "../read-session-pi";
 
 const ParamsSchema = Type.Object({
-	start: Type.Number({
-		description: "Start message ordinal (from compartment start attribute)",
-	}),
-	end: Type.Number({
-		description: "End message ordinal (from compartment end attribute)",
-	}),
+	start: Type.Optional(
+		Type.Number({
+			description: "Start message ordinal (from compartment start attribute)",
+		}),
+	),
+	end: Type.Optional(
+		Type.Number({
+			description: "End message ordinal (from compartment end attribute)",
+		}),
+	),
+	verbose: Type.Optional(
+		Type.Boolean({
+			description:
+				"With start/end: list each message separately with its id and per-part preview, so you can recover one in full by id.",
+		}),
+	),
+	id: Type.Optional(
+		Type.String({
+			description:
+				"Full untruncated recovery of ONE message by its message id (text + every tool call's full input/output). Recovers a tool output you dropped with ctx_reduce.",
+		}),
+	),
 });
 
 type CtxExpandParams = Static<typeof ParamsSchema>;
@@ -73,50 +93,83 @@ export function createCtxExpandTool(
 			_onUpdate,
 			ctx,
 		) {
-			if (
-				typeof params.start !== "number" ||
-				typeof params.end !== "number" ||
-				params.start < 1 ||
-				params.end < params.start
-			) {
-				return err(
-					"Error: start and end must be positive integers with start <= end.",
-				);
-			}
-
 			const sessionId = ctx.sessionManager.getSessionId();
 			if (!sessionId) {
 				return err("Error: no active Pi session.");
 			}
 
-			// Clamp to the last compartment boundary (parity with OpenCode +
-			// ctx_search): messages after it are the live tail already visible
-			// to the agent, so re-expanding them wastes output tokens. -1 = no
-			// compartments yet → nothing compacted, so don't clamp.
-			const lastCompartmentEnd = getLastCompartmentEndMessage(
-				deps.db,
-				sessionId,
-			);
-			if (lastCompartmentEnd >= 0 && params.start > lastCompartmentEnd) {
-				return ok(
-					`Range ${params.start}-${params.end} is entirely within the live tail (after the last compacted message ${lastCompartmentEnd}); those messages are already visible in context.`,
-				);
-			}
-			const effectiveEnd =
-				lastCompartmentEnd >= 0
-					? Math.min(params.end, lastCompartmentEnd)
-					: params.end;
-
-			// Register the Pi raw-message provider for THIS sessionId
-			// for the duration of the single readSessionChunk call.
-			// `setRawMessageProvider` returns an unregister function so
-			// we don't leak the binding into the transform pipeline's
-			// concurrent passes.
+			// All raw reads go through the shared provider-aware helpers, so
+			// register Pi's source (incl. readMessageById) for the duration of
+			// this single call. setRawMessageProvider returns an unregister fn so
+			// we don't leak the binding into concurrent transform passes.
 			const unregister = setRawMessageProvider(sessionId, {
 				readMessages: () => readPiSessionMessages(ctx),
+				readMessageById: (messageId: string) =>
+					readPiSessionMessages(ctx).find((m) => m.id === messageId) ?? null,
 			});
 
 			try {
+				// By-id mode: full recovery of a single message from JSONL history.
+				if (typeof params.id === "string" && params.id.length > 0) {
+					return ok(renderMessageById(sessionId, params.id));
+				}
+
+				if (
+					typeof params.start !== "number" ||
+					typeof params.end !== "number" ||
+					params.start < 1 ||
+					params.end < params.start
+				) {
+					return err(
+						"Error: provide either id=<messageId>, or start and end (positive integers, start <= end).",
+					);
+				}
+
+				// Clamp to the last compartment boundary (parity with OpenCode +
+				// ctx_search): messages after it are the live tail already visible
+				// to the agent, so re-expanding them wastes output tokens. -1 = no
+				// compartments yet → nothing compacted, so don't clamp.
+				const lastCompartmentEnd = getLastCompartmentEndMessage(
+					deps.db,
+					sessionId,
+				);
+				if (lastCompartmentEnd >= 0 && params.start > lastCompartmentEnd) {
+					return ok(
+						`Range ${params.start}-${params.end} is entirely within the live tail (after the last compacted message ${lastCompartmentEnd}); those messages are already visible in context.`,
+					);
+				}
+				const effectiveEnd =
+					lastCompartmentEnd >= 0
+						? Math.min(params.end, lastCompartmentEnd)
+						: params.end;
+
+				// Verbose mode: each message separate, with ids + per-part previews.
+				if (params.verbose === true) {
+					const v = renderVerboseRange(
+						sessionId,
+						params.start,
+						effectiveEnd,
+						CTX_EXPAND_TOKEN_BUDGET,
+					);
+					if (!v.text) {
+						return ok(
+							`No messages found in range ${params.start}-${effectiveEnd}. The range may be outside this session's history.`,
+						);
+					}
+					const out = [
+						`Messages ${params.start}-${v.lastOrdinal} (verbose). Recover any one in full with ctx_expand(id="<message id>"):`,
+						"",
+						v.text,
+					];
+					if (v.truncated) {
+						out.push(
+							"",
+							`Truncated at message ${v.lastOrdinal} (budget: ~${CTX_EXPAND_TOKEN_BUDGET} tokens). Call again with start=${v.lastOrdinal + 1} end=${effectiveEnd} verbose=true for more.`,
+						);
+					}
+					return ok(out.join("\n"));
+				}
+
 				const chunk = readSessionChunk(
 					sessionId,
 					CTX_EXPAND_TOKEN_BUDGET,
