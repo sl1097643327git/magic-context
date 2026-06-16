@@ -353,7 +353,7 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                         }
                         if (p.phase === "migration") return <R t={t()} l="Status" v={p.note ?? "Migrating memories ⟳"} fg={t().warning} />
                         if (p.phase === "done") return <R t={t()} l="Status" v={`✓ ${verb} complete`} fg={t().accent} />
-                        if (p.phase === "skipped") return <R t={t()} l="Status" v={`${verb} skipped — retry shortly${p.message ? `: ${p.message}` : ""}`} fg={t().textMuted} />
+                        if (p.phase === "skipped") return <R t={t()} l="Status" v={p.message ?? `${verb} stopped early`} fg={t().textMuted} />
                         return <R t={t()} l="Status" v={`✗ ${verb} failed${p.message ? `: ${p.message}` : ""}`} fg={t().error} />
                     })()}
                 </box>

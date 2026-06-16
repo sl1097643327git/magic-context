@@ -60,12 +60,17 @@ const COMMIT_DRAIN_BATCH_SIZE = 16;
 const COMMIT_DRAIN_MAX_PER_SWEEP = 500;
 const CHUNK_DRAIN_BATCH_SIZE = 8;
 const CHUNK_DRAIN_MAX_PER_SWEEP = 200;
-// Hard cap on embedding-window texts sent in ONE provider call. Bounds the
-// payload regardless of compartment size / batch size — a single 200-window
-// compartment would otherwise build one enormous padded tensor (local) or JSON
-// body (HTTP). Compartments are never split across calls; a compartment with
-// more windows than this still embeds as its own (single) over-cap call.
-const MAX_WINDOWS_PER_EMBED_CALL = 16;
+// Hard cap on embedding-window texts sent in ONE provider call. Deliberately
+// SMALL: a local embedding endpoint (LMStudio/Ollama) runs one forward pass per
+// input, so batching many max_input_tokens-sized windows into a single request
+// makes that request too slow to finish inside the HTTP timeout (the dominant
+// failure was 16 windows/call timing out at 30s on a local 4B model) — or large
+// enough to 400. With each window already ≤ max_input_tokens, capping windows
+// per call also caps tokens per call, so a small value keeps every request fast.
+// More round-trips, but each completes; far better than oversized calls that
+// time out and stall the drain. Compartments are never split across calls; a
+// compartment with more windows than this still embeds as its own over-cap call.
+const MAX_WINDOWS_PER_EMBED_CALL = 2;
 // Session backfill (/ctx-embed) holds the coordinator lease for an unbounded
 // run, so it must renew before the TTL lapses (mirrors the git sweep).
 const SESSION_EMBED_LEASE_RENEWAL_MS = 60 * 1000;
@@ -83,6 +88,11 @@ const SESSION_EMBED_LEASE_RENEWAL_MS = 60 * 1000;
 //     compartments against a dead endpoint helps no one.
 const EMBED_SLICE_RETRY_ATTEMPTS = 3;
 const EMBED_SLICE_RETRY_BASE_MS = 250;
+// If a single failed provider call took at least this long, treat it as a
+// timeout (not a transient blip) and do NOT retry it — re-sending the same
+// payload would just burn another full timeout. A healthy small call (≤2
+// windows) returns in a few seconds, well under this.
+const EMBED_SLOW_FAILURE_NO_RETRY_MS = 10_000;
 const MAX_CONSECUTIVE_FAILED_BATCHES = 3;
 
 export interface EmbeddingFeatures {
@@ -774,13 +784,19 @@ async function embedCandidateChunkBatch(
         for (const item of slice) texts.push(...item.windows.map((w) => w.text));
 
         // Retry the provider call a few times with backoff. The provider returns
-        // null / all-null on failure (never throws) — a transient blip can clear
-        // on a retry before its own HTTP breaker trips. `persistFromResult`
-        // returns how many compartments of the slice it actually persisted.
+        // null / all-null on failure (never throws), so we can't read the failure
+        // reason — but we CAN time it: a fast failure (refused connection, 400,
+        // brief blip) is worth a quick retry; a SLOW failure means the request hit
+        // the provider's HTTP timeout, and re-sending the identical (too-big/too-
+        // slow) payload would just burn another full timeout. So retry only when
+        // the prior attempt failed FAST. With MAX_WINDOWS_PER_EMBED_CALL=2 a
+        // healthy call returns in ~seconds, so this threshold cleanly separates a
+        // transient blip from a genuine timeout.
         let slicePersisted = 0;
         for (let attempt = 0; attempt < EMBED_SLICE_RETRY_ATTEMPTS; attempt++) {
             if (signal?.aborted) break;
             let result: Awaited<ReturnType<typeof embedBatchForProject>> = null;
+            const attemptStart = Date.now();
             try {
                 result = await embedBatchForProject(projectIdentity, texts, signal);
             } catch (error) {
@@ -810,6 +826,9 @@ async function embedCandidateChunkBatch(
                 }
             }
             if (slicePersisted > 0) break; // slice made progress — done retrying
+            // Don't retry a SLOW failure: it timed out, so the same payload will
+            // just time out again. Mark failed and move on (retried next run).
+            if (Date.now() - attemptStart >= EMBED_SLOW_FAILURE_NO_RETRY_MS) break;
             if (attempt < EMBED_SLICE_RETRY_ATTEMPTS - 1) {
                 await new Promise((resolve) =>
                     setTimeout(resolve, EMBED_SLICE_RETRY_BASE_MS * 2 ** attempt),

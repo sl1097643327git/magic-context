@@ -394,8 +394,13 @@ const RecompProgressSection = (props: {
             case "done":
                 return { text: `✓ ${verb()} complete`, color: props.theme.success ?? props.theme.accent }
             case "skipped":
-                // Transient (lease busy) — neutral, not an error.
-                return { text: `${verb()} skipped — retry shortly`, color: props.theme.textMuted }
+                // Neutral terse status next to the bold verb header; the full,
+                // self-contained reason (lease-busy "try again shortly" vs a
+                // partial-stall "run /ctx-embed start again") renders on its own
+                // line below. Don't re-prepend verb here (it's already the bold
+                // header — doing so read as "EmbedEmbed"), and don't hardcode
+                // "retry shortly" (wrong for a partial stall).
+                return { text: "stopped", color: props.theme.textMuted }
             case "failed":
                 return { text: `✗ ${verb()} failed`, color: props.theme.error }
         }
