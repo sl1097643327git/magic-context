@@ -575,6 +575,22 @@ export async function sendStartupAnnouncement(
         return;
     }
 
+    // TUI owns its own announcement surface: the TUI plugin shows a DialogAlert
+    // via the get-announcement / mark-announced RPC. This server-side path is the
+    // Desktop/Web fallback ONLY. Without this gate both fire for a TUI session —
+    // the ignored message lands in the scrollback AND stamps last_announced_version,
+    // which then suppresses (or races) the dialog. Every other notification routes
+    // through sendIgnoredMessage (which checks isTuiConnected); this one bypassed
+    // that helper, so gate it explicitly here.
+    //
+    // Check the target session first (precise), then fall back to "any TUI
+    // connected": the announcement is a global once-per-version event with a
+    // shared dismissal stamp, so if ANY TUI is polling it will show the dialog —
+    // and the getDesktopState sessionId can differ from the TUI's polled session,
+    // which a per-session-only check would miss (the reported bug).
+    const { isTuiConnected } = await import("../shared/rpc-notifications");
+    if (isTuiConnected(sessionId) || isTuiConnected()) return;
+
     // Title-safety guard (issue #129): markSeen only runs after successful
     // delivery below, so skipping here re-attempts on the next startup.
     if ((await waitForSafeNotificationTarget(client, sessionId)) === "skip") return;

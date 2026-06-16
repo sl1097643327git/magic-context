@@ -32,7 +32,7 @@ export const ANNOUNCEMENT_VERSION = "0.25.0";
 export const ANNOUNCEMENT_FEATURES: ReadonlyArray<string> = [
     "Old tool output is now reclaimed automatically: once a file read / search / command output has gone a full execute cycle unused, it's dropped on the next one — no need to call ctx_reduce for stale results.",
     "Recover anything that was dropped: ctx_expand({ message: N }) returns a dropped message's full content (every tool call's input + output) from storage. ctx_expand({ start, end, verbose: true }) lists a range message-by-message to find it.",
-    "ctx_reduce guidance fixed: dropping is now described as deferred + recoverable (not 'gone forever'), so models trim spent output earlier instead of hoarding it to end-of-turn.",
+    "Searchable history made reliable: /ctx-embed shows embedding coverage and runs a resilient backfill (retries transient failures, no longer bails on the first hiccup); the active session now auto-embeds in the background. ctx_reduce guidance also reframed as deferred + recoverable so models trim spent output earlier.",
     "Pi: fixed /ctx-dream (was failing with 'Unknown named parameter') and local-embedding load failures on Windows/Desktop (#151, #128).",
     "Runaway background agents on weak/local models are now capped and force-stopped (#154, #152). Plus several prompt-cache busts removed.",
 ];
