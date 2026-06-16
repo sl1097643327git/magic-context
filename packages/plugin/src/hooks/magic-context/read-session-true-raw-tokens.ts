@@ -471,6 +471,7 @@ export function fenceBoundaryForToolArcs(
     candidate: number,
     arcs: readonly ToolArc[],
     lastCompartmentEndOrdinal: number,
+    recentOpenArcCutoff: number,
 ): number {
     let boundary = candidate;
     for (const arc of arcs) {
@@ -480,6 +481,18 @@ export function fenceBoundaryForToolArcs(
             }
             continue;
         }
+        // Open arc (a tool invocation with no matching result in the window).
+        // Only an open arc inside the live protected-tail window
+        // (invOrdinal >= recentOpenArcCutoff, the size-walk start) is treated as
+        // the current in-flight call and protected. An open arc OLDER than the
+        // window is an interrupted/abandoned invocation whose result will never
+        // arrive — protecting it would let one dead call at the eligible-head
+        // edge fence off the entire eligible region and freeze the historian
+        // indefinitely. Compacting it is safe: OpenCode mutates the tool part in
+        // place on completion (no later standalone tool_result to orphan), and
+        // the historian replaces the whole raw range with narration, so no
+        // dangling tool_use survives on the wire.
+        if (arc.invOrdinal < recentOpenArcCutoff) continue;
         if (arc.invOrdinal >= lastCompartmentEndOrdinal + 1 && arc.invOrdinal < boundary) {
             return arc.invOrdinal;
         }

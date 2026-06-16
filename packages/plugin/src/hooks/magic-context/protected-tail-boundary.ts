@@ -276,8 +276,9 @@ function applyHeadCap(args: {
     arcs: ReturnType<typeof buildToolArcs>;
     lastCompartmentEndOrdinal: number;
     capTokens: number;
+    recentOpenArcCutoff: number;
 }): { eligibleEndOrdinal: number; oversizeAtomicUnit: boolean } {
-    const { index, protectedTailStart, offset, arcs, capTokens } = args;
+    const { index, protectedTailStart, offset, arcs, capTokens, recentOpenArcCutoff } = args;
     if (offset >= protectedTailStart)
         return { eligibleEndOrdinal: offset, oversizeAtomicUnit: false };
     let end = index.findHeadEndForCap(offset, protectedTailStart, capTokens);
@@ -285,7 +286,16 @@ function applyHeadCap(args: {
     for (const arc of arcs) {
         const resOrdinal = arc.resOrdinal;
         if (resOrdinal === null) {
-            if (arc.invOrdinal >= offset && arc.invOrdinal < end) {
+            // Mirror the boundary fence: only a RECENT open arc (the in-flight
+            // call) caps the head. A stale open arc in the eligible head is an
+            // interrupted invocation and must not shrink the head to its
+            // ordinal (which, for a dead arc at the head edge, would collapse
+            // the eligible region and starve the historian).
+            if (
+                arc.invOrdinal >= recentOpenArcCutoff &&
+                arc.invOrdinal >= offset &&
+                arc.invOrdinal < end
+            ) {
                 end = Math.min(end, arc.invOrdinal);
             }
             continue;
@@ -414,6 +424,13 @@ export function resolveProtectedTailBoundary(
         : target.N;
     const arcs = buildToolArcs(messages);
     let boundary = index.findSuffixStartForTokens(scaledN);
+    // The size-walk start (last scaledN tokens) is the live protected-tail
+    // window. Open tool arcs at/after it may be the current in-flight call and
+    // are protected; open arcs before it are stale (interrupted) and must not
+    // fence the boundary. This auto-scales with context (scaledN scales with the
+    // window), so a single dead invocation at the eligible-head edge can no
+    // longer collapse the boundary to offset and freeze the historian.
+    const recentOpenArcCutoff = boundary;
     let boundaryReason = boundary === 1 ? "whole-session-smaller-than-tail" : "size-walk";
     const tokenAtBoundary = index.tokenForOrdinal(boundary);
     if (
@@ -424,7 +441,12 @@ export function resolveProtectedTailBoundary(
         boundary += 1;
         boundaryReason = "huge-message-exception";
     }
-    boundary = fenceBoundaryForToolArcs(boundary, arcs, ctx.lastCompartmentEndOrdinal);
+    boundary = fenceBoundaryForToolArcs(
+        boundary,
+        arcs,
+        ctx.lastCompartmentEndOrdinal,
+        recentOpenArcCutoff,
+    );
     const snapped = semanticSnapBoundary({
         messages,
         index,
@@ -433,7 +455,12 @@ export function resolveProtectedTailBoundary(
         lastCompartmentEndOrdinal: ctx.lastCompartmentEndOrdinal,
     });
     if (snapped !== boundary) boundaryReason = "semantic-snap";
-    boundary = fenceBoundaryForToolArcs(snapped, arcs, ctx.lastCompartmentEndOrdinal);
+    boundary = fenceBoundaryForToolArcs(
+        snapped,
+        arcs,
+        ctx.lastCompartmentEndOrdinal,
+        recentOpenArcCutoff,
+    );
     let runtimeFloor = offset;
     if (ctx.migrationFloorActive) runtimeFloor = Math.max(runtimeFloor, ctx.priorBoundaryOrdinal);
     let protectedTailStart = Math.max(boundary, runtimeFloor);
@@ -486,6 +513,7 @@ export function resolveProtectedTailBoundary(
         arcs,
         lastCompartmentEndOrdinal: ctx.lastCompartmentEndOrdinal,
         capTokens: perRunCap,
+        recentOpenArcCutoff,
     });
     const rawRangeFingerprint = computeRawRangeFingerprint(
         messages,

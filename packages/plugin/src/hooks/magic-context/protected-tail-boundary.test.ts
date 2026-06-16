@@ -294,6 +294,59 @@ describe("protected-tail boundary integration", () => {
         }
     });
 
+    it("does not let an interrupted (dead) open tool arc at the eligible-head edge freeze the historian", () => {
+        // Production regression: an interrupted bash call (state.status="running",
+        // no output, ever) landing right after the last compartment boundary
+        // dragged the protected-tail boundary back to offset on every pass,
+        // leaving a zero-token eligible head -> "unsummarized tail too small" ->
+        // historian dormant ~24h despite a huge compactable conversation tail.
+        useBoundaryTempDataHome("protected-tail-dead-arc-");
+        const sessionId = "ses-dead-open-arc";
+        const messages: Array<{ id: string; role: string; parts: unknown[] }> = [];
+        // The dead/interrupted tool call at the very head of the tail (offset).
+        messages.push({
+            id: "m-dead-bash",
+            role: "assistant",
+            parts: [
+                {
+                    type: "tool",
+                    callID: "toolu_dead",
+                    tool: "bash",
+                    // open arc: input present, NO output — never completes.
+                    state: { status: "running", input: { command: "sleep 999" } },
+                },
+            ],
+        });
+        // A large compactable conversation tail AFTER the dead arc.
+        for (let i = 1; i <= 8; i++) {
+            messages.push({
+                id: `m-conv-${i}`,
+                role: i % 2 === 1 ? "user" : "assistant",
+                parts: [{ type: "text", text: `conversation turn ${i} `.repeat(800) }],
+            });
+        }
+        const opencodeDb = createBoundaryOpenCodeDb(sessionId, messages);
+        const db = createContextDb();
+        try {
+            const snapshot = resolveOpenCodeProtectedTailBoundary({
+                db,
+                sessionId,
+                mode: "trigger",
+                contextLimit: 64_000,
+                executeThresholdPercentage: 65,
+                usage: { percentage: 60, inputTokens: 38_000 },
+                usageSource: "live",
+            });
+            // The eligible head must be NON-empty: the dead arc is ignored, so the
+            // conversation tail is compactable.
+            expect(snapshot.eligibleEndOrdinal).toBeGreaterThan(snapshot.offset);
+            expect(snapshot.trueRawEligibleTokens).toBeGreaterThan(0);
+        } finally {
+            closeQuietly(db);
+            closeQuietly(opencodeDb);
+        }
+    });
+
     it("bails out when a boundary snapshot's eligible raw range changes", () => {
         useBoundaryTempDataHome("protected-tail-stale-");
         const sessionId = "ses-stale-boundary";
@@ -413,8 +466,24 @@ it("fingerprints and true-raw tokens change when nested tool output grows with t
 
 it("moves a candidate boundary forward to the first later open tool invocation", () => {
     expect(
-        fenceBoundaryForToolArcs(10, [{ callId: "open", invOrdinal: 20, resOrdinal: null }], 9),
+        fenceBoundaryForToolArcs(10, [{ callId: "open", invOrdinal: 20, resOrdinal: null }], 9, 10),
     ).toBe(20);
+});
+
+it("ignores a stale open arc older than the recent-open-arc cutoff (does not fence the boundary)", () => {
+    // Regression: an interrupted/abandoned tool invocation at the eligible-head
+    // edge (here ordinal 5, well before the cutoff of 50) must NOT drag the
+    // boundary back to itself — that collapse froze the historian for ~24h.
+    expect(
+        fenceBoundaryForToolArcs(50, [{ callId: "dead", invOrdinal: 5, resOrdinal: null }], 1, 50),
+    ).toBe(50);
+});
+
+it("still protects a recent open arc at/after the recent-open-arc cutoff", () => {
+    // The current in-flight call (ordinal 60 >= cutoff 50) is still protected.
+    expect(
+        fenceBoundaryForToolArcs(50, [{ callId: "live", invOrdinal: 60, resOrdinal: null }], 1, 50),
+    ).toBe(60);
 });
 
 it("classifies property-presence tool states for open and null-output arcs", () => {
