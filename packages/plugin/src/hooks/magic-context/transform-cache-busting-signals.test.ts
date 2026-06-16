@@ -657,8 +657,8 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             ],
             [],
         );
-        const historyRefreshSessions = new Set<string>([sessionId]);
-        const pendingMaterializationSessions = new Set<string>([sessionId]);
+        const historyRefreshSessions = new Set<string>();
+        const pendingMaterializationSessions = new Set<string>();
         const transform = createTransform({
             tagger: createTagger(),
             scheduler: { shouldExecute: mock(() => "defer" as const) },
@@ -680,6 +680,13 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
         const lift = blockCompartmentRun(sessionId);
         let passAText = "";
         try {
+            // Warm-up: materialize m[0] first so pass A is a SOFT pass (not a
+            // first_render HARD fold). A hard fold would correctly drain through
+            // the compartment veto via fold-exec — this test specifically covers
+            // the blocked-defer path on a NON-busting pass.
+            await transform({}, { messages: buildSimpleMessages(sessionId) });
+            historyRefreshSessions.add(sessionId);
+            pendingMaterializationSessions.add(sessionId);
             const passA = buildSimpleMessages(sessionId);
             await transform({}, { messages: passA });
             passAText = JSON.stringify(passA[0]);
@@ -793,8 +800,8 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
     it("Test 21: blocked explicit refresh retries materialization without rebuild", async () => {
         useTempDataHome("ctx-busting-test21-");
         const sessionId = "ses-test21";
-        const historyRefreshSessions = new Set<string>([sessionId]);
-        const pendingMaterializationSessions = new Set<string>([sessionId]);
+        const historyRefreshSessions = new Set<string>();
+        const pendingMaterializationSessions = new Set<string>();
         const db = openDatabase();
         replaceAllCompartmentState(
             db,
@@ -832,6 +839,13 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
         });
 
         const lift = blockCompartmentRun(sessionId);
+        // Warm-up: materialize m[0] first so pass A is a SOFT pass (not a
+        // first_render HARD fold, which would correctly drain through the
+        // compartment veto via fold-exec). This test covers the blocked-defer
+        // retry path on a NON-busting pass.
+        await transform({}, { messages: buildSimpleMessages(sessionId) });
+        historyRefreshSessions.add(sessionId);
+        pendingMaterializationSessions.add(sessionId);
         const passA = buildSimpleMessages(sessionId);
         try {
             await transform({}, { messages: passA });

@@ -14,6 +14,7 @@ import {
 } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { Database } from "../../shared/sqlite";
+import { registerActiveCompartmentRun } from "./compartment-runner";
 import { injectM0M1, type M0HardSignals } from "./inject-compartments";
 import type { MessageLike, TagTarget } from "./tag-messages";
 import {
@@ -441,6 +442,89 @@ describe("known m[0] hard-fold folds the execute pass in", () => {
         // The queued drop materialized on the (otherwise-defer) hard-fold pass.
         expect(getTagsBySession(db, sessionId).find((t) => t.tagNumber === 1)?.status).toBe(
             "dropped",
+        );
+    });
+
+    it("drains queued pending ops on an m[0] HARD-fold pass EVEN WHILE the historian runs", async () => {
+        // The double-bust fix: a HARD fold (e.g. system-prompt change) re-caches
+        // m[0] this pass, so the prefix is busting regardless. If the historian is
+        // mid-run, the compartmentRunning veto USED to block the drain → it spilled
+        // into a second bust ~a turn later. The fold-fold bypass must drain into
+        // the one unavoidable bust instead. canRunCompartments=true + a registered
+        // active run makes compartmentRunning=true.
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-hardfold-drain-while-historian";
+        materializeBaseline(sessionId);
+
+        const message = makeToolMessage("tool-1");
+        insertTag(db, sessionId, "tool-1", "tool", 4000, 1, 0, "bash");
+        queuePendingOp(db, sessionId, 1, "drop", 1);
+        const targets = new Map<number, TagTarget>([[1, makeDropTarget(message)]]);
+
+        // Historian in progress for this session (never resolves during the test).
+        registerActiveCompartmentRun(sessionId, new Promise<void>(() => {}));
+
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, [message], {
+                schedulerDecision: "defer",
+                contextUsage: { percentage: 40, inputTokens: 4000 },
+                targets,
+                currentTurnId: "turn-hardfold-historian",
+                canRunCompartments: true,
+                m0M1: {
+                    projectPath: FOLD_PROJECT,
+                    projectDirectory: FOLD_PROJECT,
+                    historyBudgetTokens: 98_000,
+                    hardSignals: {
+                        ...BASE_HARD,
+                        modelKey: "anthropic/sonnet", // ← the HARD trigger
+                    },
+                },
+            }),
+        );
+
+        // Despite the historian running, the hard fold drained the queued drop
+        // into this pass (no second bust later).
+        expect(getTagsBySession(db, sessionId).find((t) => t.tagNumber === 1)?.status).toBe(
+            "dropped",
+        );
+    });
+
+    it("does NOT drain while the historian runs on a NON-busting defer pass", async () => {
+        // Counterpart: same historian-running condition, but NO hard fold and NOT
+        // an execute pass → the compartmentRunning veto still holds (don't mutate
+        // the bytes the historian is reading on a pass that isn't busting anyway).
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-nofold-historian-novdrain";
+        materializeBaseline(sessionId);
+
+        const message = makeToolMessage("tool-1");
+        insertTag(db, sessionId, "tool-1", "tool", 4000, 1, 0, "bash");
+        queuePendingOp(db, sessionId, 1, "drop", 1);
+        const targets = new Map<number, TagTarget>([[1, makeDropTarget(message)]]);
+
+        registerActiveCompartmentRun(sessionId, new Promise<void>(() => {}));
+
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, [message], {
+                schedulerDecision: "defer",
+                contextUsage: { percentage: 40, inputTokens: 4000 },
+                targets,
+                currentTurnId: "turn-nofold-historian",
+                canRunCompartments: true,
+                m0M1: {
+                    projectPath: FOLD_PROJECT,
+                    projectDirectory: FOLD_PROJECT,
+                    historyBudgetTokens: 98_000,
+                    hardSignals: BASE_HARD,
+                },
+            }),
+        );
+
+        expect(getTagsBySession(db, sessionId).find((t) => t.tagNumber === 1)?.status).toBe(
+            "active",
         );
     });
 

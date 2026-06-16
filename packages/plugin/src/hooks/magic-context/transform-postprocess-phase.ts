@@ -205,24 +205,6 @@ export async function runPostTransformPhase(
         args.canRunCompartments &&
         !args.awaitedCompartmentRun &&
         activeCompartmentRun !== undefined;
-    // Emergency bypass: at forceMaterialization threshold (>=85%), allow both
-    // pending-op materialization and heuristic cleanup to run even while a
-    // historian run is in progress. This is safe because:
-    //   - Historian reads raw OpenCode messages from opencode.db (read-only).
-    //     It does not touch the plugin's context.db where tags/pending_ops live.
-    //     The two databases are fully disjoint on the read/write side.
-    //   - Drops mutate tags + pending_ops in context.db only.
-    //   - The only shared mutation point is historian's call to
-    //     `queueDropsForCompartmentalizedMessages` after it publishes, which
-    //     writes to context.db's tags/pending_ops in a separate transaction.
-    //     That function is idempotent against already-dropped tags (filters by
-    //     `tag.status !== "active"`), so any ordering with the emergency bypass
-    //     is benign.
-    // Without this bypass, fast autonomous loops with sustained pressure can
-    // keep compartmentRunning=true across every turn, so drops queued for
-    // already-published compartments accumulate forever and context overflows.
-    // At emergency levels we prioritize overflow prevention over cache stability.
-    const emergencyBypassCompartmentGate = forceMaterialization;
     const deferredMaterialize = args.canConsumeDeferredLate && deferredMaterializationWasPending;
     const materializationRequested = isExplicitFlush || deferredMaterialize;
     // Known-bust fold: if m[0] is going to HARD-fold this pass (epoch / model /
@@ -253,6 +235,25 @@ export async function runPostTransformPhase(
                   hardSignals: args.m0M1.hardSignals,
               }).value
             : false;
+    // Bypass the compartment-running veto when this pass is busting the Anthropic
+    // prefix REGARDLESS — so the pending-op drain + heuristics ride that one bust
+    // instead of being deferred into a SECOND bust ~a turn later. Two cases:
+    //   - forceMaterialization (>=85%): overflow prevention trumps cache stability.
+    //   - m0HardFoldThisPass: a HARD m[0] fold (model/system-hash/epoch/etc.) is
+    //     re-caching m[0] this pass; the prefix is already gone, so draining into
+    //     it is free. Without this, a hard fold landing while the historian runs
+    //     leaves the drop vetoed -> it spills to a later soft bust (observed: a
+    //     system-prompt change folded m[0], then the 1807-op backlog drained ~30s
+    //     later as a second bust). Pi already gates this way (context-handler.ts).
+    // Safe in both cases because the historian and the drain touch DISJOINT DBs:
+    //   - Historian reads RAW OpenCode messages from opencode.db (read-only); its
+    //     in-flight snapshot is validated by computeRawRangeFingerprint, which
+    //     hashes raw content only (ids/part-types/lengths), NOT tag/drop state.
+    //   - Drops mutate context.db (tags + pending_ops) + the in-memory wire only.
+    //   - The historian's post-publish queueDropsForCompartmentalizedMessages is
+    //     idempotent against already-dropped tags (status !== "active"), so any
+    //     drain/publish ordering is benign.
+    const bypassCompartmentGate = forceMaterialization || m0HardFoldThisPass;
     const shouldReadPendingOps =
         materializationRequested ||
         args.schedulerDecision === "execute" ||
@@ -271,7 +272,7 @@ export async function runPostTransformPhase(
             materializationRequested ||
             forceMaterialization ||
             m0HardFoldThisPass) &&
-        (!compartmentRunning || emergencyBypassCompartmentGate);
+        (!compartmentRunning || bypassCompartmentGate);
     // Heuristic cleanup runs for ALL sessions — primary and subagent. Subagents
     // previously skipped heuristics entirely (via fullFeatureMode gate), which
     // meant their context grew unchecked until overflow. With this change,
@@ -297,7 +298,7 @@ export async function runPostTransformPhase(
     // prevents per-defer-pass thrash; only passes the scheduler explicitly
     // approves for execution can fire heuristics.
     const shouldRunHeuristics =
-        (!compartmentRunning || emergencyBypassCompartmentGate) &&
+        (!compartmentRunning || bypassCompartmentGate) &&
         (materializationRequested ||
             forceMaterialization ||
             // Known m[0] hard-fold this pass: the prefix busts regardless, so
@@ -325,7 +326,7 @@ export async function runPostTransformPhase(
     // anchor retirement) to fire on a pass that produced no real mutations.
     //
     // Both `shouldApplyPendingOps` and `shouldRunHeuristics` already gate on
-    // `(!compartmentRunning || emergencyBypassCompartmentGate)` so they're
+    // `(!compartmentRunning || bypassCompartmentGate)` so they're
     // genuine "will-actually-mutate" booleans. ORing them is the precise
     // "did we mutate this pass" signal.
     //
@@ -371,10 +372,11 @@ export async function runPostTransformPhase(
         );
     }
     if (compartmentRunning && hasPendingUserOps) {
-        if (emergencyBypassCompartmentGate) {
+        if (bypassCompartmentGate) {
+            const bypassReason = forceMaterialization ? "emergency >=85%" : "m0 hard fold";
             sessionLog(
                 args.sessionId,
-                `transform: emergency bypass — applying ${pendingOps.length} pending ops while compartment agent runs (${args.contextUsage.percentage.toFixed(1)}%)`,
+                `transform: compartment-gate bypass (${bypassReason}) — applying ${pendingOps.length} pending ops while compartment agent runs (${args.contextUsage.percentage.toFixed(1)}%)`,
             );
         } else {
             sessionLog(
