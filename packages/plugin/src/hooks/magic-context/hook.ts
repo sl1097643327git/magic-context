@@ -360,6 +360,13 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             return "Memory is disabled for this project, so there is no semantic embedding to backfill.";
         }
         const directory = sessionDirectoryBySession.get(sessionId) ?? deps.directory;
+        // Idempotent start: if a drain is already running for this session, don't
+        // abort it and re-acquire — that races the just-released lease and returns
+        // "busy", killing the active run for nothing. Just report it's running.
+        const active = embedRunStateBySession.get(sessionId);
+        if (active && !active.signal.aborted && !options?.signal) {
+            return "Embedding is already running for this session.";
+        }
         await ensureProjectRegisteredFromOpenCodeDirectory(directory, db);
         const sessionProjectIdentity = resolveProjectIdentity(directory);
         embedPauseBySession.delete(sessionId);
@@ -377,21 +384,28 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             );
         }
         let runFailed = 0;
-        const outcome = await embedSessionCompartmentChunks(db, sessionProjectIdentity, sessionId, {
-            signal,
-            onProgress: ({ embedded, total }) => {
-                const cur = recompProgressBySession.get(sessionId);
-                if (!cur || cur.phase !== "recomp") return;
-                recompProgressBySession.set(sessionId, {
-                    ...cur,
-                    processedMessages: embedded,
-                    totalMessages: total,
-                    updatedAt: Date.now(),
-                });
-            },
-        });
-        if (embedRunStateBySession.get(sessionId) === controller) {
-            embedRunStateBySession.delete(sessionId);
+        let outcome: Awaited<ReturnType<typeof embedSessionCompartmentChunks>>;
+        try {
+            outcome = await embedSessionCompartmentChunks(db, sessionProjectIdentity, sessionId, {
+                signal,
+                onProgress: ({ embedded, total }) => {
+                    const cur = recompProgressBySession.get(sessionId);
+                    if (!cur || cur.phase !== "recomp") return;
+                    recompProgressBySession.set(sessionId, {
+                        ...cur,
+                        processedMessages: embedded,
+                        totalMessages: total,
+                        updatedAt: Date.now(),
+                    });
+                },
+            });
+        } finally {
+            // Always release the per-session controller, even if the drain threw
+            // (a release-time SQLite error, etc.) — otherwise a stale controller
+            // would make every later start return "already running".
+            if (embedRunStateBySession.get(sessionId) === controller) {
+                embedRunStateBySession.delete(sessionId);
+            }
         }
         if ("failed" in outcome) runFailed = outcome.failed;
         const terminal = (phase: "done" | "skipped", message: string): string => {
@@ -467,6 +481,13 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         const directory = sessionDirectoryBySession.get(sessionId) ?? deps.directory;
         void (async () => {
             try {
+                // Defer off the transform thread BEFORE any DB/config work.
+                // ensureProjectRegisteredFromOpenCodeDirectory is `async` but does
+                // its config load + stale-embedding wipe SYNCHRONOUSLY (no internal
+                // await), so awaiting it as the first statement would run that work
+                // on the transform's return path. A macrotask yield lets the
+                // transform return first, keeping the hot path clean.
+                await new Promise((resolve) => setTimeout(resolve, 0));
                 await ensureProjectRegisteredFromOpenCodeDirectory(directory, db);
                 const sessionProjectIdentity = resolveProjectIdentity(directory);
                 const coverage = getEmbeddingCoverageStatus(db, sessionProjectIdentity, sessionId);

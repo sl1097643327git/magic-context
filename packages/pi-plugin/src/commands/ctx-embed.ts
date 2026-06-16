@@ -28,19 +28,36 @@ async function runEmbedDrain(
 	projectIdentity: string,
 	sessionId: string,
 ): Promise<{ text: string; level: "success" | "info" }> {
+	// Idempotent start: a drain already running for this session means a second
+	// start would abort it then race the just-released lease to "busy" — killing
+	// the active run for nothing. Just report it's running.
+	const activeCtrl = embedRunStateBySession.get(sessionId);
+	if (activeCtrl && !activeCtrl.signal.aborted) {
+		return {
+			text: "## /ctx-embed\n\nEmbedding is already running for this session.",
+			level: "info",
+		};
+	}
 	embedPauseBySession.delete(sessionId);
 	const prior = embedRunStateBySession.get(sessionId);
 	if (prior) prior.abort();
 	const controller = new AbortController();
 	embedRunStateBySession.set(sessionId, controller);
-	const outcome = await embedSessionCompartmentChunks(
-		db,
-		projectIdentity,
-		sessionId,
-		{ signal: controller.signal },
-	);
-	if (embedRunStateBySession.get(sessionId) === controller) {
-		embedRunStateBySession.delete(sessionId);
+	let outcome: Awaited<ReturnType<typeof embedSessionCompartmentChunks>>;
+	try {
+		outcome = await embedSessionCompartmentChunks(
+			db,
+			projectIdentity,
+			sessionId,
+			{
+				signal: controller.signal,
+			},
+		);
+	} finally {
+		// Always release the controller, even on throw, so a later start works.
+		if (embedRunStateBySession.get(sessionId) === controller) {
+			embedRunStateBySession.delete(sessionId);
+		}
 	}
 	switch (outcome.status) {
 		case "nothing":
@@ -191,6 +208,10 @@ export function maybeAutoEmbedPiSession(
 	autoEmbedAttemptedBySession.add(sessionId);
 	void (async () => {
 		try {
+			// Defer off the context-handler thread before any DB/config work:
+			// ensureProjectRegisteredFromPiDirectory does its config load + stale
+			// wipe synchronously, so awaiting it first would run on the hot path.
+			await new Promise((resolve) => setTimeout(resolve, 0));
 			await ensureProjectRegisteredFromPiDirectory(projectDir, deps.db);
 			const coverage = getEmbeddingCoverageStatus(
 				deps.db,

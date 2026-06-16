@@ -792,7 +792,15 @@ async function embedCandidateChunkBatch(
         // the prior attempt failed FAST. With MAX_WINDOWS_PER_EMBED_CALL=2 a
         // healthy call returns in ~seconds, so this threshold cleanly separates a
         // transient blip from a genuine timeout.
-        let slicePersisted = 0;
+        // Track WHICH compartments of the slice actually persisted (not just a
+        // count). A provider can return vectors for some inputs in a call but not
+        // others; with a count-only check, a partial-success slice would break the
+        // retry loop AND skip the failed-marking, leaving the non-persisted
+        // compartment neither saved nor excluded — so it gets re-queried (and
+        // re-sent) every iteration until it's the last candidate. Tracking ids
+        // lets us mark every NON-persisted item as failed regardless of partial
+        // success, so the cursor advances past it (retried next run).
+        const persistedIds = new Set<number>();
         for (let attempt = 0; attempt < EMBED_SLICE_RETRY_ATTEMPTS; attempt++) {
             if (signal?.aborted) break;
             let result: Awaited<ReturnType<typeof embedBatchForProject>> = null;
@@ -808,6 +816,7 @@ async function embedCandidateChunkBatch(
                 for (const item of slice) {
                     const vectors = result.vectors.slice(offset, offset + item.windows.length);
                     offset += item.windows.length;
+                    if (persistedIds.has(item.candidate.id)) continue; // done on a prior attempt
                     if (vectors.length !== item.windows.length || vectors.some((v) => !v)) {
                         continue;
                     }
@@ -822,10 +831,13 @@ async function embedCandidateChunkBatch(
                         }),
                     );
                     replaceCompartmentChunkEmbeddings(db, rows);
-                    slicePersisted += 1;
+                    persistedIds.add(item.candidate.id);
                 }
             }
-            if (slicePersisted > 0) break; // slice made progress — done retrying
+            if (persistedIds.size === slice.length) break; // whole slice done
+            // Partial success: don't retry (would re-send the persisted items); the
+            // non-persisted ones are marked failed below and retried next run.
+            if (persistedIds.size > 0) break;
             // Don't retry a SLOW failure: it timed out, so the same payload will
             // just time out again. Mark failed and move on (retried next run).
             if (Date.now() - attemptStart >= EMBED_SLOW_FAILURE_NO_RETRY_MS) break;
@@ -836,12 +848,15 @@ async function embedCandidateChunkBatch(
             }
         }
 
-        embedded += slicePersisted;
-        // A slice that persisted nothing after all retries: record its
-        // compartments as failed (not no-work) so the drain advances past them
-        // this run and retries them next run, rather than spinning or stalling.
-        if (slicePersisted === 0 && !signal?.aborted) {
-            for (const item of slice) failed.push(item.candidate.id);
+        embedded += persistedIds.size;
+        // Every slice compartment that did NOT persist (full OR partial failure):
+        // record as failed (not no-work) so the drain advances past it this run
+        // and retries it next run, rather than re-selecting it every iteration.
+        // Skip on abort — those simply didn't get their turn and re-queue naturally.
+        if (!signal?.aborted) {
+            for (const item of slice) {
+                if (!persistedIds.has(item.candidate.id)) failed.push(item.candidate.id);
+            }
         }
     }
     return { embedded, noWork, failed };
@@ -1034,7 +1049,13 @@ export async function embedSessionCompartmentChunks(
         }
     } finally {
         clearInterval(renewal);
-        releaseGitSweepLease(db, projectIdentity, holderId);
+        try {
+            releaseGitSweepLease(db, projectIdentity, holderId);
+        } catch (error) {
+            // A release-time SQLite error (e.g. lock contention) must not mask the
+            // drain's own result/throw. The lease TTL-expires on its own.
+            log("[magic-context] embed drain: lease release failed (will TTL-expire):", error);
+        }
     }
     if (aborted) return { status: "aborted", embedded, total, failed: failedIds.length };
     // Either the provider went down (circuit broke) or some compartments failed
