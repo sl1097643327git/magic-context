@@ -774,3 +774,41 @@ export function countUnembeddedSessionCompartments(
         .get(projectPath, sessionId, projectPath, modelId) as { n?: number } | undefined;
     return typeof row?.n === "number" ? row.n : 0;
 }
+
+/** Total embeddable compartments in this session (have a message range), and how
+ *  many are currently embedded under `modelId`. Drives the `/ctx-embed` status
+ *  line: `embedded / total`. Counts the project's OWN compartments for the
+ *  session (same `session_projects` scoping as the unembedded counter). */
+export function countSessionCompartmentEmbedCoverage(
+    db: Database,
+    projectPath: string,
+    sessionId: string,
+    modelId: string,
+): { embedded: number; total: number } {
+    const row = db
+        .prepare(
+            `SELECT
+               COUNT(*) AS total,
+               SUM(CASE WHEN EXISTS (
+                   SELECT 1 FROM compartment_chunk_embeddings e
+                   WHERE e.compartment_id = c.id
+                     AND e.project_path = ?
+                     AND e.model_id = ?
+               ) THEN 1 ELSE 0 END) AS embedded
+             FROM compartments c
+             JOIN session_projects sp
+               ON sp.session_id = c.session_id
+              AND sp.harness = c.harness
+              AND sp.project_path = ?
+             WHERE c.session_id = ?
+               AND c.start_message IS NOT NULL
+               AND c.end_message IS NOT NULL`,
+        )
+        .get(projectPath, modelId, projectPath, sessionId) as
+        | { total?: number; embedded?: number }
+        | undefined;
+    return {
+        total: typeof row?.total === "number" ? row.total : 0,
+        embedded: typeof row?.embedded === "number" ? row.embedded : 0,
+    };
+}

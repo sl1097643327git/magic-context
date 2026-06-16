@@ -23,18 +23,18 @@ import { getMagicContextStorageDir } from "./data-path";
  * Bump only when there are user-visible changes worth a startup dialog.
  * Does NOT need to match the published package version.
  */
-export const ANNOUNCEMENT_VERSION = "0.24.0";
+export const ANNOUNCEMENT_VERSION = "0.25.0";
 
 /**
  * Short, user-facing bullet strings. Keep each line ~80 chars or shorter so the
  * TUI dialog renders cleanly without horizontal scroll on a typical terminal.
  */
 export const ANNOUNCEMENT_FEATURES: ReadonlyArray<string> = [
-    "Searchable session history: ctx_search can now find older discussion by meaning, not just keywords. New history is embedded automatically — to backfill an EXISTING session's older history, run /ctx-embed-history once (it works in the background).",
-    "Cross-project workspaces: group related repos and share project memories across them, with per-category control over what's shared. Set them up in the dashboard's Workspaces panel.",
-    "Pi: fixed sessions overflowing the model context while still showing moderate usage — Pi now sheds context before a tool-heavy turn overflows.",
-    "Fewer prompt-cache busts: doc edits, processed screenshots, and a rebuild-then-bust-again case no longer re-bill large prompt prefixes.",
-    "Setup wizard now lists your actual models with type-ahead instead of fixed recommendations, and explains the historian/dreamer roles (issue #144). Plus a GitHub Copilot tool-pairing fix (#135).",
+    "Old tool output is now reclaimed automatically: once a file read / search / command output has gone a full execute cycle unused, it's dropped on the next one — no need to call ctx_reduce for stale results.",
+    "Recover anything that was dropped: ctx_expand({ message: N }) returns a dropped message's full content (every tool call's input + output) from storage. ctx_expand({ start, end, verbose: true }) lists a range message-by-message to find it.",
+    "ctx_reduce guidance fixed: dropping is now described as deferred + recoverable (not 'gone forever'), so models trim spent output earlier instead of hoarding it to end-of-turn.",
+    "Pi: fixed /ctx-dream (was failing with 'Unknown named parameter') and local-embedding load failures on Windows/Desktop (#151, #128).",
+    "Runaway background agents on weak/local models are now capped and force-stopped (#154, #152). Plus several prompt-cache busts removed.",
 ];
 
 /**

@@ -153,3 +153,28 @@ export function getDistinctStoredModelIds(db: Database, projectPath: string): Se
     const rows = getDistinctStoredModelIdsStatement(db).all(projectPath) as StoredModelIdRow[];
     return new Set(rows.map((row) => (typeof row.modelId === "string" ? row.modelId : null)));
 }
+
+/** Active memories for a project, and how many are embedded under `modelId`.
+ *  Drives the `/ctx-embed` status `embedded / total` memory line. */
+export function getMemoryEmbedCoverage(
+    db: Database,
+    projectPath: string,
+    modelId: string,
+): { embedded: number; total: number } {
+    const row = db
+        .prepare(
+            `SELECT
+               COUNT(*) AS total,
+               SUM(CASE WHEN EXISTS (
+                   SELECT 1 FROM memory_embeddings e
+                   WHERE e.memory_id = m.id AND e.model_id = ?
+               ) THEN 1 ELSE 0 END) AS embedded
+             FROM memories m
+             WHERE m.project_path = ? AND m.status = 'active'`,
+        )
+        .get(modelId, projectPath) as { total?: number; embedded?: number } | undefined;
+    return {
+        total: typeof row?.total === "number" ? row.total : 0,
+        embedded: typeof row?.embedded === "number" ? row.embedded : 0,
+    };
+}

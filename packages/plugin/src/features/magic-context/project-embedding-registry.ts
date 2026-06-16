@@ -10,6 +10,7 @@ import {
     chunkCanonicalText,
     chunkEmbeddingWindowsAreCurrent,
     clearChunkEmbeddingsForProject,
+    countSessionCompartmentEmbedCoverage,
     countUnembeddedSessionCompartments,
     getDistinctChunkEmbeddingModelIds,
     loadUnembeddedCompartmentChunkCandidates,
@@ -20,10 +21,12 @@ import {
 } from "./compartment-chunk-embedding";
 import {
     clearProjectCommitEmbeddings,
+    countEmbeddedCommits,
     getDistinctCommitEmbeddingModelIds,
     loadUnembeddedCommits,
     saveCommitEmbedding,
 } from "./git-commits/storage-git-commit-embeddings";
+import { getCommitCount } from "./git-commits/storage-git-commits";
 import {
     acquireGitSweepLease,
     releaseGitSweepLease,
@@ -37,6 +40,7 @@ import type { EmbeddingProvider } from "./memory/embedding-provider";
 import {
     clearEmbeddingsForProject,
     getDistinctStoredModelIds,
+    getMemoryEmbedCoverage,
     saveEmbedding,
 } from "./memory/storage-memory-embeddings";
 import {
@@ -62,9 +66,24 @@ const CHUNK_DRAIN_MAX_PER_SWEEP = 200;
 // body (HTTP). Compartments are never split across calls; a compartment with
 // more windows than this still embeds as its own (single) over-cap call.
 const MAX_WINDOWS_PER_EMBED_CALL = 16;
-// Session backfill (/ctx-embed-history) holds the coordinator lease for an
-// unbounded run, so it must renew before the TTL lapses (mirrors the git sweep).
+// Session backfill (/ctx-embed) holds the coordinator lease for an unbounded
+// run, so it must renew before the TTL lapses (mirrors the git sweep).
 const SESSION_EMBED_LEASE_RENEWAL_MS = 60 * 1000;
+// Resilience for the session drain. The provider NEVER throws (it returns null /
+// all-null vectors and owns its own HTTP circuit breaker), so "retry" here is the
+// drain's stop policy, not HTTP retry:
+//   - EMBED_SLICE_RETRY_*: re-attempt a single provider call a few times with
+//     backoff when it comes back with no usable vectors (a transient blip before
+//     the provider's own breaker trips). Cheap insurance for same-run completion.
+//   - MAX_CONSECUTIVE_FAILED_BATCHES: a compartment that still won't embed after
+//     retries is recorded as failed, EXCLUDED so the oldest-first cursor advances
+//     past it (retried on a future run, not persisted as permanent skip), and the
+//     drain CONTINUES. Only after this many consecutive all-failed batches do we
+//     stop — that's a provider that's actually down, and hammering 800
+//     compartments against a dead endpoint helps no one.
+const EMBED_SLICE_RETRY_ATTEMPTS = 3;
+const EMBED_SLICE_RETRY_BASE_MS = 250;
+const MAX_CONSECUTIVE_FAILED_BATCHES = 3;
 
 export interface EmbeddingFeatures {
     memoryEnabled: boolean;
@@ -82,6 +101,11 @@ export interface ProjectEmbeddingRegistrationSnapshot {
     gitCommitEnabled: boolean;
     modelId: string;
     chunkModelId: string;
+    /** Friendly configured model name (e.g. "text-embedding-qwen3-embedding-4b"),
+     *  for user-facing status. "off" when no provider / observation mode. */
+    model: string;
+    /** Configured provider kind (e.g. "openai-compatible", "local", "ollama"). */
+    provider: string;
 }
 
 interface ProjectEmbeddingRegistration {
@@ -244,6 +268,16 @@ function snapshotFor(
         modelId: registration.observationMode || !providerIsOn ? "off" : registration.modelId,
         chunkModelId:
             registration.observationMode || !providerIsOn ? "off" : registration.chunkModelId,
+        model:
+            registration.observationMode || !providerIsOn
+                ? "off"
+                : "model" in registration.config && registration.config.model.trim()
+                  ? registration.config.model.trim()
+                  : registration.modelId,
+        provider:
+            registration.observationMode || !providerIsOn
+                ? "off"
+                : (registration.config.provider ?? "local"),
     };
 }
 
@@ -639,6 +673,8 @@ async function embedCompartmentChunkBatch(
         batchSize,
     );
     if (candidates.length === 0) return 0;
+    // Passive sweep ignores `failed`/`noWork` — it's bounded per tick and re-runs
+    // on the next sweep; the session drain is the path that tracks them.
     const { embedded } = await embedCandidateChunkBatch(
         db,
         projectIdentity,
@@ -655,6 +691,10 @@ interface CandidateChunkBatchResult {
      *  windows already current) — they are not failures and the session drain
      *  must skip past them rather than re-select them forever. */
     noWork: number[];
+    /** Candidates the provider could not embed this call even after retries
+     *  (returned no/partial vectors). NOT permanent: excluded for the rest of
+     *  THIS run so the cursor advances, but re-attempted on a future run. */
+    failed: number[];
 }
 
 /** Embed + persist chunk vectors for an already-selected candidate batch.
@@ -671,7 +711,8 @@ async function embedCandidateChunkBatch(
     signal?: AbortSignal,
 ): Promise<CandidateChunkBatchResult> {
     const noWork: number[] = [];
-    if (candidates.length === 0) return { embedded: 0, noWork };
+    const failed: number[] = [];
+    if (candidates.length === 0) return { embedded: 0, noWork, failed };
     const maxInputTokens = getProjectEmbeddingMaxInputTokens(projectIdentity);
 
     type Prepared = {
@@ -706,7 +747,7 @@ async function embedCandidateChunkBatch(
         prepared.push({ candidate, windows });
     }
 
-    if (prepared.length === 0) return { embedded: 0, noWork };
+    if (prepared.length === 0) return { embedded: 0, noWork, failed };
 
     // Embed the prepared compartments in sub-batches bounded by window count so
     // the per-call payload (and the provider's padded tensor / JSON body) stays
@@ -731,35 +772,60 @@ async function embedCandidateChunkBatch(
 
         const texts: string[] = [];
         for (const item of slice) texts.push(...item.windows.map((w) => w.text));
-        try {
-            const result = await embedBatchForProject(projectIdentity, texts, signal);
-            if (!result) continue;
+
+        // Retry the provider call a few times with backoff. The provider returns
+        // null / all-null on failure (never throws) — a transient blip can clear
+        // on a retry before its own HTTP breaker trips. `persistFromResult`
+        // returns how many compartments of the slice it actually persisted.
+        let slicePersisted = 0;
+        for (let attempt = 0; attempt < EMBED_SLICE_RETRY_ATTEMPTS; attempt++) {
             if (signal?.aborted) break;
-            let offset = 0;
-            for (const item of slice) {
-                const vectors = result.vectors.slice(offset, offset + item.windows.length);
-                offset += item.windows.length;
-                if (vectors.length !== item.windows.length || vectors.some((v) => !v)) {
-                    continue;
-                }
-                const rows: SaveCompartmentChunkEmbeddingInput[] = item.windows.map(
-                    (window, index) => ({
-                        compartmentId: item.candidate.id,
-                        sessionId: item.candidate.sessionId,
-                        projectPath: projectIdentity,
-                        window,
-                        modelId,
-                        vector: vectors[index] as Float32Array,
-                    }),
-                );
-                replaceCompartmentChunkEmbeddings(db, rows);
-                embedded += 1;
+            let result: Awaited<ReturnType<typeof embedBatchForProject>> = null;
+            try {
+                result = await embedBatchForProject(projectIdentity, texts, signal);
+            } catch (error) {
+                log("[magic-context] failed to proactively embed compartment chunks:", error);
             }
-        } catch (error) {
-            log("[magic-context] failed to proactively embed compartment chunks:", error);
+            if (signal?.aborted) break;
+            if (result) {
+                let offset = 0;
+                for (const item of slice) {
+                    const vectors = result.vectors.slice(offset, offset + item.windows.length);
+                    offset += item.windows.length;
+                    if (vectors.length !== item.windows.length || vectors.some((v) => !v)) {
+                        continue;
+                    }
+                    const rows: SaveCompartmentChunkEmbeddingInput[] = item.windows.map(
+                        (window, index) => ({
+                            compartmentId: item.candidate.id,
+                            sessionId: item.candidate.sessionId,
+                            projectPath: projectIdentity,
+                            window,
+                            modelId,
+                            vector: vectors[index] as Float32Array,
+                        }),
+                    );
+                    replaceCompartmentChunkEmbeddings(db, rows);
+                    slicePersisted += 1;
+                }
+            }
+            if (slicePersisted > 0) break; // slice made progress — done retrying
+            if (attempt < EMBED_SLICE_RETRY_ATTEMPTS - 1) {
+                await new Promise((resolve) =>
+                    setTimeout(resolve, EMBED_SLICE_RETRY_BASE_MS * 2 ** attempt),
+                );
+            }
+        }
+
+        embedded += slicePersisted;
+        // A slice that persisted nothing after all retries: record its
+        // compartments as failed (not no-work) so the drain advances past them
+        // this run and retries them next run, rather than spinning or stalling.
+        if (slicePersisted === 0 && !signal?.aborted) {
+            for (const item of slice) failed.push(item.candidate.id);
         }
     }
-    return { embedded, noWork };
+    return { embedded, noWork, failed };
 }
 
 async function drainCompartmentChunkBacklogForProject(
@@ -813,15 +879,16 @@ export interface SessionChunkBackfillProgress {
 }
 
 export type SessionChunkBackfillOutcome =
-    | { status: "done"; embedded: number; total: number }
+    | { status: "done"; embedded: number; total: number; failed: number }
     | { status: "nothing"; embedded: 0; total: 0 }
     | { status: "disabled"; embedded: 0; total: 0 }
     | { status: "busy"; embedded: 0; total: number }
-    | { status: "aborted"; embedded: number; total: number }
+    | { status: "aborted"; embedded: number; total: number; failed: number }
     // Some candidates could not be embedded this run (provider returned no
-    // vectors for them) and were not skippable no-work rows — surfaced so the
-    // command can tell the user it stopped early instead of falsely "done".
-    | { status: "stalled"; embedded: number; total: number; remaining: number };
+    // vectors for them after retries) and were not skippable no-work rows —
+    // surfaced so the command can tell the user it stopped early (with how many
+    // failed) instead of falsely "done". `remaining` is still-embeddable count.
+    | { status: "stalled"; embedded: number; total: number; remaining: number; failed: number };
 
 /**
  * Backfill ALL un-embedded compartment chunks for ONE session in a single run
@@ -881,9 +948,14 @@ export async function embedSessionCompartmentChunks(
     // candidate queries, so one un-embeddable old compartment can't block the
     // oldest-first cursor from reaching newer ones (no infinite re-select).
     const skipIds: number[] = [];
+    // Compartments the provider couldn't embed THIS run (after retries). Excluded
+    // so the cursor advances past them and the drain finishes the rest, but NOT
+    // persisted as skip — a future run re-attempts them.
+    const failedIds: number[] = [];
     let embedded = 0;
     let aborted = false;
-    let providerStalled = false;
+    let providerDown = false;
+    let consecutiveFailedBatches = 0;
     try {
         options?.onProgress?.({ embedded, total });
         // Re-query each iteration (rather than pre-loading all candidates) so
@@ -902,10 +974,14 @@ export async function embedSessionCompartmentChunks(
                 sessionId,
                 snapshot.chunkModelId,
                 batchSize,
-                skipIds,
+                [...skipIds, ...failedIds],
             );
             if (candidates.length === 0) break;
-            const { embedded: n, noWork } = await embedCandidateChunkBatch(
+            const {
+                embedded: n,
+                noWork,
+                failed,
+            } = await embedCandidateChunkBatch(
                 db,
                 projectIdentity,
                 snapshot.chunkModelId,
@@ -914,13 +990,23 @@ export async function embedSessionCompartmentChunks(
             );
             // Record no-work candidates so the next query advances past them.
             for (const id of noWork) skipIds.push(id);
-            // If the batch made zero forward progress AND nothing was skippable,
-            // the provider failed on these rows — don't spin; stop and report
-            // remaining so the user knows it's incomplete (not falsely "done").
+            // Record this-run failures so the cursor advances; retried next run.
+            for (const id of failed) failedIds.push(id);
+
+            // Circuit breaker: a batch that made zero forward progress and had no
+            // skippable no-work rows is an all-failed batch. A few in a row means
+            // the provider is down — stop instead of grinding every remaining
+            // compartment through retries against a dead endpoint.
             if (n === 0 && noWork.length === 0) {
-                providerStalled = true;
-                break;
+                consecutiveFailedBatches += 1;
+                if (consecutiveFailedBatches >= MAX_CONSECUTIVE_FAILED_BATCHES) {
+                    providerDown = true;
+                    break;
+                }
+            } else {
+                consecutiveFailedBatches = 0;
             }
+
             embedded += n;
             options?.onProgress?.({ embedded: Math.min(embedded, total), total });
             // Yield to the event loop so the burst stays interruptible and the
@@ -931,11 +1017,12 @@ export async function embedSessionCompartmentChunks(
         clearInterval(renewal);
         releaseGitSweepLease(db, projectIdentity, holderId);
     }
-    if (aborted) return { status: "aborted", embedded, total };
-    if (providerStalled) {
-        // Count what's genuinely still embeddable (the candidate query excludes
-        // already-embedded rows; no-work skips are subtracted as permanently
-        // unembeddable empty-text compartments, not a stall).
+    if (aborted) return { status: "aborted", embedded, total, failed: failedIds.length };
+    // Either the provider went down (circuit broke) or some compartments failed
+    // their retries but the rest drained. Count what's genuinely still embeddable
+    // (excludes already-embedded rows; no-work skips are permanently empty-text
+    // compartments, not a stall).
+    if (providerDown || failedIds.length > 0) {
         const remaining = Math.max(
             0,
             countUnembeddedSessionCompartments(
@@ -945,9 +1032,72 @@ export async function embedSessionCompartmentChunks(
                 snapshot.chunkModelId,
             ) - skipIds.length,
         );
-        if (remaining > 0) return { status: "stalled", embedded, total, remaining };
+        if (remaining > 0) {
+            return { status: "stalled", embedded, total, remaining, failed: failedIds.length };
+        }
     }
-    return { status: "done", embedded, total };
+    return { status: "done", embedded, total, failed: failedIds.length };
+}
+
+export interface EmbeddingCoverageStatus {
+    /** Whether embedding is active at all for this project. */
+    enabled: boolean;
+    /** Friendly configured model name, or "off"/"disabled". */
+    model: string;
+    /** Configured provider kind ("local" / "openai-compatible" / "ollama" / "off"). */
+    provider: string;
+    /** This session's compartment-chunk coverage. */
+    session: { embedded: number; total: number };
+    /** Project-wide active-memory coverage. */
+    memories: { embedded: number; total: number };
+    /** Project-wide git-commit coverage (only meaningful when gitEnabled). */
+    commits: { embedded: number; total: number; gitEnabled: boolean };
+}
+
+/**
+ * Gather the embedding-coverage status for `/ctx-embed` (no-arg): which model is
+ * active, and how much of this session's history / the project's memories /
+ * git commits are embedded under it. Pure reads — no provider calls.
+ */
+export function getEmbeddingCoverageStatus(
+    db: Database,
+    projectIdentity: string,
+    sessionId: string,
+): EmbeddingCoverageStatus {
+    const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
+    if (!snapshot?.enabled || snapshot.chunkModelId === "off") {
+        return {
+            enabled: false,
+            model: snapshot?.model ?? "off",
+            provider: snapshot?.provider ?? "off",
+            session: { embedded: 0, total: 0 },
+            memories: { embedded: 0, total: 0 },
+            commits: { embedded: 0, total: 0, gitEnabled: false },
+        };
+    }
+    const session = countSessionCompartmentEmbedCoverage(
+        db,
+        projectIdentity,
+        sessionId,
+        snapshot.chunkModelId,
+    );
+    const memories = getMemoryEmbedCoverage(db, projectIdentity, snapshot.modelId);
+    const gitEnabled = snapshot.gitCommitEnabled;
+    const commits = gitEnabled
+        ? {
+              embedded: countEmbeddedCommits(db, projectIdentity),
+              total: getCommitCount(db, projectIdentity),
+              gitEnabled: true,
+          }
+        : { embedded: 0, total: 0, gitEnabled: false };
+    return {
+        enabled: true,
+        model: snapshot.model,
+        provider: snapshot.provider,
+        session,
+        memories,
+        commits,
+    };
 }
 
 export async function sweepAllRegisteredProjects(
