@@ -52,6 +52,8 @@ export interface SessionMetaRow {
     recovery_no_eligible_head_count: number | null;
     force_emergency_bypass_window_start: number | null;
     force_emergency_bypass_used: number | null;
+    emergency_drain_active: number | null;
+    historian_drain_failure_at: number | null;
     upgrade_reminded_at: number | null;
     pi_stable_id_scheme: number | null;
 }
@@ -103,6 +105,8 @@ export const SESSION_META_SELECT_COLUMNS = [
     "recovery_no_eligible_head_count",
     "force_emergency_bypass_window_start",
     "force_emergency_bypass_used",
+    "emergency_drain_active",
+    "historian_drain_failure_at",
     "upgrade_reminded_at",
     "pi_stable_id_scheme",
 ] as const;
@@ -153,6 +157,8 @@ export const META_COLUMNS: Record<string, string> = {
     recoveryNoEligibleHeadCount: "recovery_no_eligible_head_count",
     forceEmergencyBypassWindowStart: "force_emergency_bypass_window_start",
     forceEmergencyBypassUsed: "force_emergency_bypass_used",
+    emergencyDrainActive: "emergency_drain_active",
+    historianDrainFailureAt: "historian_drain_failure_at",
     upgradeRemindedAt: "upgrade_reminded_at",
     piStableIdScheme: "pi_stable_id_scheme",
 };

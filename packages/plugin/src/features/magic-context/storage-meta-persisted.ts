@@ -103,6 +103,14 @@ export interface ProtectedTailMeta {
     recoveryNoEligibleHeadCount: number;
     forceEmergencyBypassWindowStart: number;
     forceEmergencyBypassUsed: number;
+    // ms-timestamp latch: 0 = inactive, else the time the session entered the
+    // emergency drain catch-up (>=95%). While active the historian drains a chunk
+    // every pass, bypassing the per-window drain budget, until usage falls below
+    // the safe zone (executeThreshold - 10) or the latch self-expires.
+    emergencyDrainActive: number;
+    // ms of the last genuine historian FAILURE; suppresses the latch bypass for a
+    // short backoff so a broken historian can't retry-thrash under the latch.
+    historianDrainFailureAt: number;
 }
 
 export interface ProtectedTailSeedResult extends ProtectedTailMeta {
@@ -273,6 +281,8 @@ const DEFAULT_PROTECTED_TAIL_META: ProtectedTailMeta = {
     recoveryNoEligibleHeadCount: 0,
     forceEmergencyBypassWindowStart: 0,
     forceEmergencyBypassUsed: 0,
+    emergencyDrainActive: 0,
+    historianDrainFailureAt: 0,
 };
 
 function toProtectedTailMeta(row: unknown): ProtectedTailMeta {
@@ -288,6 +298,8 @@ function toProtectedTailMeta(row: unknown): ProtectedTailMeta {
         recoveryNoEligibleHeadCount: numberOr(r.recovery_no_eligible_head_count, 0),
         forceEmergencyBypassWindowStart: numberOr(r.force_emergency_bypass_window_start, 0),
         forceEmergencyBypassUsed: numberOr(r.force_emergency_bypass_used, 0),
+        emergencyDrainActive: numberOr(r.emergency_drain_active, 0),
+        historianDrainFailureAt: numberOr(r.historian_drain_failure_at, 0),
     };
 }
 
@@ -298,7 +310,7 @@ export function loadProtectedTailMeta(db: Database, sessionId: string): Protecte
             `SELECT prior_boundary_ordinal, protected_tail_policy_version,
                     protected_tail_drain_window_started_at, protected_tail_drain_tokens,
                     recovery_no_eligible_head_count, force_emergency_bypass_window_start,
-                    force_emergency_bypass_used
+                    force_emergency_bypass_used, emergency_drain_active, historian_drain_failure_at
              FROM session_meta WHERE session_id = ?`,
         )
         .get(sessionId);
@@ -377,6 +389,39 @@ export function protectedTailWindowBudget(
     return Math.min(500_000, Math.max(perRunCap, Math.round(0.2 * usable)));
 }
 
+/** Usage % at/above which a session enters the emergency drain catch-up latch. */
+export const EMERGENCY_DRAIN_ENTER_PERCENTAGE = 95;
+/**
+ * The latch exits when usage falls this far BELOW the execute threshold, leaving
+ * headroom for a normal execute cycle to resume after the drops (exiting exactly
+ * at the threshold would immediately re-enter the force-fire band).
+ */
+export const EMERGENCY_DRAIN_EXIT_MARGIN = 10;
+/**
+ * Fallback exit threshold when the execute threshold is unknown/0 (schema default
+ * execute threshold is 65 → 65 − 10 = 55).
+ */
+export const EMERGENCY_DRAIN_FALLBACK_EXIT_PERCENTAGE = 55;
+/**
+ * After a genuine historian FAILURE, suppress the latch bypass for this long so a
+ * broken historian backs off instead of retry-thrashing every pass under the latch.
+ */
+export const EMERGENCY_DRAIN_FAILURE_BACKOFF_MS = 60_000;
+/**
+ * Self-expiry backstop: clear the latch once it has been active this long, in case
+ * a high irreducible floor (system + tools + m[0]/m[1] + protected tail) keeps usage
+ * above the exit threshold forever and a usage-driven exit never fires.
+ */
+export const EMERGENCY_DRAIN_MAX_LATCH_MS = 30 * 60 * 1000;
+
+/** Resolve the usage % below which the emergency drain latch clears. */
+export function emergencyDrainExitThreshold(executeThresholdPercentage: number): number {
+    if (!Number.isFinite(executeThresholdPercentage) || executeThresholdPercentage <= 0) {
+        return EMERGENCY_DRAIN_FALLBACK_EXIT_PERCENTAGE;
+    }
+    return Math.max(0, executeThresholdPercentage - EMERGENCY_DRAIN_EXIT_MARGIN);
+}
+
 export function reserveProtectedTailDrainTokens(args: {
     db: Database;
     sessionId: string;
@@ -385,6 +430,7 @@ export function reserveProtectedTailDrainTokens(args: {
     usagePercentage: number;
     usable: number;
     perRunCap: number;
+    executeThresholdPercentage: number;
     now?: number;
 }): ProtectedTailDrainReserveResult {
     const now = args.now ?? Date.now();
@@ -403,23 +449,49 @@ export function reserveProtectedTailDrainTokens(args: {
         ensureSessionMetaRow(args.db, args.sessionId);
         let meta = loadProtectedTailMeta(args.db, args.sessionId);
         if (now - meta.protectedTailDrainWindowStartedAt > DRAIN_WINDOW_MS) {
+            // Reset the per-window budget. The emergency latch is usage-driven and
+            // deliberately NOT cleared here — it must persist across window
+            // boundaries until usage returns to the safe zone.
             args.db
                 .prepare(
                     `UPDATE session_meta
-                     SET protected_tail_drain_window_started_at = ?, protected_tail_drain_tokens = 0,
-                         force_emergency_bypass_window_start = ?, force_emergency_bypass_used = 0
+                     SET protected_tail_drain_window_started_at = ?, protected_tail_drain_tokens = 0
                      WHERE session_id = ?`,
                 )
-                .run(now, now, args.sessionId);
+                .run(now, args.sessionId);
             meta = loadProtectedTailMeta(args.db, args.sessionId);
         }
+
+        // Emergency drain catch-up latch lifecycle (usage-driven). Enter when the
+        // session spikes into the emergency band; exit once usage falls back below
+        // the safe zone, or after a self-expiry backstop. Persisted unconditionally
+        // so the next pass sees the resolved state even when we skip below.
+        const exitThreshold = emergencyDrainExitThreshold(args.executeThresholdPercentage);
+        let latchActiveSince = meta.emergencyDrainActive;
+        if (args.usagePercentage >= EMERGENCY_DRAIN_ENTER_PERCENTAGE) {
+            if (latchActiveSince <= 0) latchActiveSince = now;
+        } else if (latchActiveSince > 0) {
+            const expired = now - latchActiveSince > EMERGENCY_DRAIN_MAX_LATCH_MS;
+            if (args.usagePercentage < exitThreshold || expired) latchActiveSince = 0;
+        }
+        if (latchActiveSince !== meta.emergencyDrainActive) {
+            args.db
+                .prepare("UPDATE session_meta SET emergency_drain_active = ? WHERE session_id = ?")
+                .run(latchActiveSince, args.sessionId);
+        }
+        const latchActive = latchActiveSince > 0;
+
         const budget = protectedTailWindowBudget(args.usagePercentage, args.usable, args.perRunCap);
         const remaining = Math.max(0, budget - meta.protectedTailDrainTokens);
         let reserved = Math.min(requested, args.perRunCap, remaining);
         let bypass = false;
-        const bypassWindowExpired = now - meta.forceEmergencyBypassWindowStart > DRAIN_WINDOW_MS;
-        const bypassUsed = bypassWindowExpired ? 0 : meta.forceEmergencyBypassUsed;
-        if (reserved <= 0 && args.usagePercentage >= 95 && bypassUsed === 0) {
+        // While the latch is active, drain a chunk EVERY pass past the window budget
+        // — UNLESS a recent historian failure is still in its backoff window (so a
+        // broken historian can't retry-thrash under the latch).
+        const inFailureBackoff =
+            meta.historianDrainFailureAt > 0 &&
+            now - meta.historianDrainFailureAt < EMERGENCY_DRAIN_FAILURE_BACKOFF_MS;
+        if (reserved <= 0 && latchActive && !inFailureBackoff) {
             reserved = Math.min(requested, args.perRunCap);
             bypass = true;
         }
@@ -428,12 +500,10 @@ export function reserveProtectedTailDrainTokens(args: {
             .prepare(
                 `UPDATE session_meta
                  SET protected_tail_drain_window_started_at = CASE WHEN protected_tail_drain_window_started_at = 0 THEN ? ELSE protected_tail_drain_window_started_at END,
-                     protected_tail_drain_tokens = COALESCE(protected_tail_drain_tokens, 0) + ?,
-                     force_emergency_bypass_window_start = CASE WHEN ? THEN ? ELSE force_emergency_bypass_window_start END,
-                     force_emergency_bypass_used = CASE WHEN ? THEN 1 ELSE force_emergency_bypass_used END
+                     protected_tail_drain_tokens = COALESCE(protected_tail_drain_tokens, 0) + ?
                  WHERE session_id = ?`,
             )
-            .run(now, reserved, bypass ? 1 : 0, now, bypass ? 1 : 0, args.sessionId);
+            .run(now, reserved, args.sessionId);
         result = {
             ok: true,
             reservedTokens: reserved,
@@ -442,6 +512,39 @@ export function reserveProtectedTailDrainTokens(args: {
         };
     })();
     return result;
+}
+
+/** Clear the emergency drain catch-up latch (called when the historian no-ops on
+ *  an exhausted tail — nothing left to drain, so the latch has done its job). */
+export function clearEmergencyDrainLatch(db: Database, sessionId: string): void {
+    db.transaction(() => {
+        ensureSessionMetaRow(db, sessionId);
+        db.prepare("UPDATE session_meta SET emergency_drain_active = 0 WHERE session_id = ?").run(
+            sessionId,
+        );
+    })();
+}
+
+/** Record a genuine historian drain FAILURE (model error / no output). Suppresses
+ *  the latch bypass for EMERGENCY_DRAIN_FAILURE_BACKOFF_MS. */
+export function recordHistorianDrainFailure(db: Database, sessionId: string, now?: number): void {
+    const ts = now ?? Date.now();
+    db.transaction(() => {
+        ensureSessionMetaRow(db, sessionId);
+        db.prepare(
+            "UPDATE session_meta SET historian_drain_failure_at = ? WHERE session_id = ?",
+        ).run(ts, sessionId);
+    })();
+}
+
+/** Clear the historian drain-failure backoff (called on a successful publish). */
+export function clearHistorianDrainFailure(db: Database, sessionId: string): void {
+    db.transaction(() => {
+        ensureSessionMetaRow(db, sessionId);
+        db.prepare(
+            "UPDATE session_meta SET historian_drain_failure_at = 0 WHERE session_id = ?",
+        ).run(sessionId);
+    })();
 }
 
 export function rollbackProtectedTailDrainReservation(

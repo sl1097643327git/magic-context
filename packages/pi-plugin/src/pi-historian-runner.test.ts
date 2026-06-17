@@ -256,6 +256,7 @@ describe("runPiHistorian", () => {
 						usagePercentage: boundary.usagePercentage,
 						usable,
 						perRunCap: 3000,
+						executeThresholdPercentage: boundary.executeThresholdPercentage,
 					});
 					expect(reservation.ok).toBe(true);
 				}

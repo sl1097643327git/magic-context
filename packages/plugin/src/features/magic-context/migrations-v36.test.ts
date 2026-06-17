@@ -29,13 +29,15 @@ describe("migration v36 — session project ownership", () => {
                 expect.arrayContaining(["session_id", "harness", "project_path", "updated_at"]),
             );
             expect(indexNames(db)).toContain("idx_session_projects_project");
-            expect(LATEST_SUPPORTED_VERSION).toBe(36);
-            expect(LATEST_MIGRATION_VERSION).toBe(36);
+            // v36 introduced session_projects; assert the migration ran, not that
+            // it's the latest (the schema-version-fence test owns the latest pin).
+            expect(LATEST_SUPPORTED_VERSION).toBe(LATEST_MIGRATION_VERSION);
+            expect(LATEST_MIGRATION_VERSION).toBeGreaterThanOrEqual(36);
             expect(
                 db
                     .prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1")
                     .get(),
-            ).toEqual({ version: 36 });
+            ).toEqual({ version: LATEST_MIGRATION_VERSION });
         } finally {
             closeQuietly(db);
         }
@@ -58,7 +60,7 @@ describe("migration v36 — session project ownership", () => {
                 db
                     .prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1")
                     .get(),
-            ).toEqual({ version: 36 });
+            ).toEqual({ version: LATEST_MIGRATION_VERSION });
         } finally {
             closeQuietly(db);
         }

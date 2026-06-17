@@ -1435,6 +1435,39 @@ const MIGRATIONS: Migration[] = [
             }
         },
     },
+    {
+        version: 37,
+        description: "emergency drain catch-up latch + historian drain failure backoff",
+        up: (db: Database) => {
+            // emergency_drain_active: ms-timestamp latch (0 = inactive). Set when a
+            // session spikes into the emergency band (>=95%) so the historian keeps
+            // draining a chunk every pass (bypassing the per-window drain budget)
+            // until usage falls back below the safe zone — instead of stalling once
+            // the window budget is spent. historian_drain_failure_at: ms of the last
+            // genuine historian FAILURE, used to suppress the latch bypass briefly so
+            // a broken historian still backs off instead of retry-thrashing.
+            // Guarded on session_meta existing: a real upgrade always has it
+            // (initializeDatabase creates it before migrations run), but partial
+            // test fixtures may not — and initializeDatabase's own ensureColumn pass
+            // adds these columns to fresh installs regardless.
+            const hasSessionMeta = db
+                .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_meta'")
+                .get();
+            if (!hasSessionMeta) return;
+            ensureColumn(
+                db,
+                "session_meta",
+                "emergency_drain_active",
+                "INTEGER NOT NULL DEFAULT 0",
+            );
+            ensureColumn(
+                db,
+                "session_meta",
+                "historian_drain_failure_at",
+                "INTEGER NOT NULL DEFAULT 0",
+            );
+        },
+    },
 ];
 
 /**

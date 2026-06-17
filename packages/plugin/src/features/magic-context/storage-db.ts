@@ -36,7 +36,7 @@ export function getSchemaFenceRejection(): {
     return lastSchemaFenceRejection;
 }
 
-export const LATEST_SUPPORTED_VERSION = 36;
+export const LATEST_SUPPORTED_VERSION = 37;
 
 export interface OpenDatabaseOptions {
     dbPath?: string;
@@ -673,6 +673,8 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       recovery_no_eligible_head_count INTEGER NOT NULL DEFAULT 0,
       force_emergency_bypass_window_start INTEGER NOT NULL DEFAULT 0,
       force_emergency_bypass_used INTEGER NOT NULL DEFAULT 0,
+      emergency_drain_active INTEGER NOT NULL DEFAULT 0,
+      historian_drain_failure_at INTEGER NOT NULL DEFAULT 0,
       cached_m0_materialized_at INTEGER,
       cached_m0_session_facts_version INTEGER,
       cached_m0_upgrade_state TEXT,
@@ -975,6 +977,8 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
         "INTEGER NOT NULL DEFAULT 0",
     );
     ensureColumn(db, "session_meta", "force_emergency_bypass_used", "INTEGER NOT NULL DEFAULT 0");
+    ensureColumn(db, "session_meta", "emergency_drain_active", "INTEGER NOT NULL DEFAULT 0");
+    ensureColumn(db, "session_meta", "historian_drain_failure_at", "INTEGER NOT NULL DEFAULT 0");
     ensureColumn(db, "session_meta", "cached_m0_materialized_at", "INTEGER");
     ensureColumn(db, "session_meta", "cached_m0_session_facts_version", "INTEGER");
     ensureColumn(db, "session_meta", "cached_m0_upgrade_state", "TEXT");
@@ -1243,6 +1247,8 @@ function healNullIntegerColumns(db: Database): void {
         ["recovery_no_eligible_head_count", 0],
         ["force_emergency_bypass_window_start", 0],
         ["force_emergency_bypass_used", 0],
+        ["emergency_drain_active", 0],
+        ["historian_drain_failure_at", 0],
     ];
     for (const [column, fallback] of columns) {
         try {

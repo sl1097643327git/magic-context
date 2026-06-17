@@ -49,10 +49,13 @@ import { promoteSessionFactsToMemory } from "@magic-context/core/features/magic-
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import { getMemoriesByProject } from "@magic-context/core/features/magic-context/memory/storage-memory";
 import {
+	clearEmergencyDrainLatch,
 	clearEmergencyRecovery,
+	clearHistorianDrainFailure,
 	clearHistorianFailureState,
 	getOverflowState,
 	incrementHistorianFailure,
+	recordHistorianDrainFailure,
 	recordProtectedTailPublicationFloor,
 	reserveProtectedTailDrainTokens,
 	rollbackProtectedTailDrainReservation,
@@ -377,6 +380,8 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				} else {
 					recordHighPressureNoEligibleHead(db, boundarySnapshot);
 				}
+				// Tail exhausted — clear the emergency catch-up latch (see OpenCode).
+				clearEmergencyDrainLatch(db, sessionId);
 				return;
 			}
 
@@ -397,6 +402,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				usagePercentage: boundarySnapshot.usagePercentage,
 				usable,
 				perRunCap,
+				executeThresholdPercentage: boundarySnapshot.executeThresholdPercentage,
 			});
 			if (!reserve.ok) {
 				sessionLog(
@@ -425,6 +431,8 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				} else {
 					recordHighPressureNoEligibleHead(db, boundarySnapshot);
 				}
+				// Eligible head produced no compactable chunk — clear the latch.
+				clearEmergencyDrainLatch(db, sessionId);
 				telemetry.status = "noop";
 				telemetry.failureReason = "chunk empty after filtering";
 				rollbackDrainReservation();
@@ -876,6 +884,9 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				// (gated, below). No replaceSessionFacts — promoted facts reach
 				// the agent through the renderer's m[1] new-memories watermark.
 				clearHistorianFailureState(db, sessionId);
+				// Healthy historian progress — clear the drain-failure backoff so the
+				// emergency catch-up latch can bypass the budget freely again.
+				clearHistorianDrainFailure(db, sessionId);
 				recordProtectedTailPublicationFloor(db, sessionId, lastNewEnd + 1);
 				clearEmergencyRecovery(db, sessionId);
 				// userObservations are inserted POST-COMMIT
@@ -1094,8 +1105,16 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			await notify(buildHistorianFailureNotice(failCount, desc.brief));
 		}
 	} finally {
-		if (!completedSuccessfully && !retainDrainReservationForRetryThrottle) {
-			rollbackDrainReservation();
+		if (!completedSuccessfully) {
+			if (!retainDrainReservationForRetryThrottle) {
+				rollbackDrainReservation();
+			} else {
+				// Genuine historian failure (the retained-reservation retry-throttle
+				// condition) — suppress the emergency catch-up latch bypass for a
+				// short backoff so a broken historian can't retry-thrash. Mirrors
+				// OpenCode.
+				recordHistorianDrainFailure(db, sessionId);
+			}
 		}
 		updateSessionMeta(db, sessionId, { compartmentInProgress: false });
 		// Record one historian_runs row for this attempt (every exit path).

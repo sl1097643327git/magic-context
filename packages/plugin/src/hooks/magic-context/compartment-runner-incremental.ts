@@ -21,10 +21,13 @@ import { promoteSessionFactsToMemory } from "../../features/magic-context/memory
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import { getMemoriesByProject } from "../../features/magic-context/memory/storage-memory";
 import {
+    clearEmergencyDrainLatch,
     clearEmergencyRecovery,
+    clearHistorianDrainFailure,
     clearHistorianFailureState,
     getOverflowState,
     incrementHistorianFailure,
+    recordHistorianDrainFailure,
     recordProtectedTailPublicationFloor,
     reserveProtectedTailDrainTokens,
     rollbackProtectedTailDrainReservation,
@@ -297,6 +300,10 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
                     `historian high-pressure no-op: recovery remains armed (noEligibleHeadCount=${count})`,
                 );
             }
+            // Tail is exhausted — nothing left to drain, so the emergency catch-up
+            // latch has done its job. Clear it so a high irreducible floor can't keep
+            // it armed and later bypass the steady-state throttle for fresh tail.
+            clearEmergencyDrainLatch(db, sessionId);
             telemetry.status = "noop";
             telemetry.failureReason = "nothing to compact before protected tail";
             rollbackDrainReservation();
@@ -318,6 +325,7 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             usagePercentage: boundarySnapshot.usagePercentage,
             usable,
             perRunCap,
+            executeThresholdPercentage: boundarySnapshot.executeThresholdPercentage,
         });
         if (!reserve.ok) {
             sessionLog(
@@ -343,6 +351,9 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             } else {
                 recordHighPressureNoEligibleHead(db, boundarySnapshot);
             }
+            // Eligible head produced no compactable chunk — treat as tail-exhausted
+            // and clear the catch-up latch (see the protected-tail no-op above).
+            clearEmergencyDrainLatch(db, sessionId);
             telemetry.status = "noop";
             telemetry.failureReason = "chunk empty after filtering";
             rollbackDrainReservation();
@@ -562,6 +573,9 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             // renderer's m[1] new-memories watermark. (No replaceSessionFacts /
             // bumpSessionFactsVersion.)
             clearHistorianFailureState(db, sessionId);
+            // Healthy historian progress — clear the drain-failure backoff so the
+            // emergency catch-up latch can bypass the budget freely again.
+            clearHistorianDrainFailure(db, sessionId);
             // Successful historian publication means the overflow recovery is
             // complete for this session. Clear the flag so we don't keep
             // force-bumping percentage on future turns. detectedContextLimit
@@ -786,7 +800,16 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
         }
     } finally {
         if (!completedSuccessfully) {
-            if (!retainDrainReservationForRetryThrottle) rollbackDrainReservation();
+            if (!retainDrainReservationForRetryThrottle) {
+                rollbackDrainReservation();
+            } else {
+                // A genuine historian failure (model error / no output / invalid
+                // output) — the same condition that retains the drain reservation as
+                // a retry throttle. Record it so the emergency catch-up latch's
+                // bypass is suppressed for a short backoff and a broken historian
+                // can't retry-thrash every pass under the latch.
+                recordHistorianDrainFailure(db, sessionId);
+            }
             updateSessionMeta(db, sessionId, { compartmentInProgress: false });
         }
         // Record one historian_runs row for this attempt (every exit path).
