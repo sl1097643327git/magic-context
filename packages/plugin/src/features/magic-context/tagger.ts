@@ -143,42 +143,27 @@ const GET_ASSIGNMENTS_SQL =
     "SELECT message_id, tag_number, type, tool_owner_message_id FROM tags WHERE session_id = ? ORDER BY tag_number ASC";
 
 /**
- * Two SQLite primitives form the change-detection signal for the
- * `initFromDb` cache:
+ * SQLite change-detection signal for the `initFromDb` cache.
  *
- *   - `PRAGMA main.data_version` — bumps when ANOTHER connection commits
- *     to this DB. Does NOT bump for writes on the current connection.
- *   - `SELECT total_changes()` — bumps when THIS connection commits any
- *     INSERT/UPDATE/DELETE (including inside transactions). Does NOT
- *     reflect writes made by other connections.
+ * `PRAGMA main.data_version` bumps when ANOTHER connection commits to this
+ * DB. It intentionally does NOT bump for writes on the current connection:
+ * the tagger is the sole same-connection writer of the assignment mapping,
+ * and those write paths update `sessionAssignments`/`counters` in memory in
+ * the same call. Non-mapping writes on this connection therefore no longer
+ * force a full assignments scan every transform pass.
  *
- * Together they cover every write path that could invalidate our in-memory
- * tagger state. Read-only queries bump neither, so a defer pass that only
- * reads sees a clean cache hit.
- *
- * Both probes are <0.005ms vs ~15ms for the full assignments scan on a
+ * The probe is <0.005ms vs ~15ms for the full assignments scan on a
  * 49k-tag session, so cache hits are effectively free.
  */
 const PROBE_DATA_VERSION_SQL = "PRAGMA main.data_version";
-const PROBE_TOTAL_CHANGES_SQL = "SELECT total_changes() AS tc";
 
 const probeDataVersionStatements = new WeakMap<Database, PreparedStatement>();
-const probeTotalChangesStatements = new WeakMap<Database, PreparedStatement>();
 
 function getProbeDataVersionStatement(db: Database): PreparedStatement {
     let stmt = probeDataVersionStatements.get(db);
     if (!stmt) {
         stmt = db.prepare(PROBE_DATA_VERSION_SQL);
         probeDataVersionStatements.set(db, stmt);
-    }
-    return stmt;
-}
-
-function getProbeTotalChangesStatement(db: Database): PreparedStatement {
-    let stmt = probeTotalChangesStatements.get(db);
-    if (!stmt) {
-        stmt = db.prepare(PROBE_TOTAL_CHANGES_SQL);
-        probeTotalChangesStatements.set(db, stmt);
     }
     return stmt;
 }
@@ -199,7 +184,6 @@ interface AssignmentRow {
 interface LoadSignature {
     db: Database;
     dataVersion: number;
-    totalChanges: number;
 }
 
 function isAssignmentRow(row: unknown): row is AssignmentRow {
@@ -288,10 +272,10 @@ export function createTagger(): Tagger {
     // successful initFromDb() reload. A subsequent initFromDb() call can
     // skip the full DB scan when (a) the signature exists for this session,
     // (b) the recorded `db` object is identical to the current one, and
-    // (c) both `data_version` and `total_changes` still match. Any
-    // mismatch — including a different Database object, an external
-    // commit (data_version bump), or any commit on this connection
-    // (total_changes bump) — falls through to the full reload.
+    // (c) `data_version` still matches. A different Database object or an
+    // external commit (data_version bump) falls through to the full reload.
+    // Same-connection tagger writes update this map directly and do not
+    // invalidate the signature.
     //
     // Absence of a signature entry means "first load" (or post-cleanup /
     // post-resetCounter) so the next initFromDb is always a full reload.
@@ -647,72 +631,51 @@ export function createTagger(): Tagger {
     }
 
     /**
-     * Read the current SQLite change-detection signature for `db`. The two
-     * cheap probes together detect any commit that could have invalidated
-     * our in-memory tagger state.
+     * Read the current cross-connection change-detection signature for `db`.
      */
-    function probeSignature(db: Database): { dataVersion: number; totalChanges: number } {
+    function probeSignature(db: Database): { dataVersion: number } {
         const dvRow = getProbeDataVersionStatement(db).get() as
             | { data_version: number }
             | null
             | undefined;
-        const tcRow = getProbeTotalChangesStatement(db).get() as { tc: number } | null | undefined;
         return {
             dataVersion: dvRow?.data_version ?? 0,
-            totalChanges: tcRow?.tc ?? 0,
         };
     }
 
     /**
      * Load (or refresh) per-session tagger state from the DB.
      *
-     * Cache-hit fast path: if the recorded load signature for this session
-     * still matches the current `data_version` and `total_changes` on this
-     * connection, the in-memory map is consistent with disk and we skip the
-     * full reload (~0.005 ms vs ~15 ms on a 49k-tag session).
+     * Cache-hit fast path: if this session's last successful full reload used
+     * the same `Database` object and the current `data_version` still matches,
+     * trust the in-memory map/counter and skip the full assignments scan
+     * (~0.005 ms vs ~15 ms on a 49k-tag session).
      *
      * Cache-miss slow path: re-read assignments + counter from disk to pick
-     * up writes made by either this connection or a sibling writer. The
-     * previous `if (counters.has(sessionId)) return` short-circuit had a
+     * up writes made by sibling connections/processes. Same-connection tagger
+     * writes deliberately do NOT invalidate this cache: `assignTag`,
+     * `assignToolTag`, fallback adoption, and unbind/bind paths mutate
+     * `sessionAssignments`/`counters` in memory as they persist the mapping.
+     * Non-mapping same-connection writes (`status`, `drop_mode`, byte/token
+     * counts, source content, pending ops, etc.) do not affect what this loader
+     * reads, so forcing a reload for them only burns hot-path latency.
+     *
+     * The previous `if (counters.has(sessionId)) return` short-circuit had a
      * subtle bug: once the in-memory counter drifted behind the DB max
-     * (stale process, prior outer-transaction rollback, concurrent writer),
-     * it could never self-heal — every `assignTag` would keep proposing
-     * already-claimed tag numbers and either bounce through the collision-
-     * recovery path or fail outright. The signature-based cache restores
-     * refresh-on-change correctness without paying the cost on every pass.
+     * (stale process or concurrent writer), it could never self-heal — every
+     * `assignTag` would keep proposing already-claimed tag numbers and either
+     * bounce through the collision-recovery path or fail outright. The
+     * data_version signature keeps cross-connection refresh correctness
+     * without the per-pass same-connection rescan.
      *
-     * Realistic hit-rate caveat: `total_changes()` is connection-cumulative,
-     * so a write to ANY table on this connection (`session_meta`,
-     * `compartments`, `source_contents`, `pending_ops`, …) bumps the
-     * counter and invalidates the cache. In practice the postprocess phase
-     * persists nudge state, watermarks, sticky reminders, etc., so most
-     * defer passes are NOT pure-read — they still pay the full reload cost
-     * (still cheap; full reload is ~15 ms on the largest sessions). The
-     * cache-hit fast path fires only on truly read-only defer passes, which
-     * are infrequent. Don't read the 110× speedup figure as a per-pass
-     * average — it's the ceiling for the rarest case.
-     *
-     * Per-table change detection would lift the hit rate but adds complexity
-     * (manual versioning of every write site, brittle to refactors). The
-     * current behavior is the simplest correct design that still avoids the
-     * pathological "reload every pass even when nothing changed."
-     *
-     * Important: do NOT update the cached signature from anywhere except
-     * a successful full reload. In particular, do not bump it inside
-     * `assignTag` — its writes happen inside SAVEPOINTs that a caller-
-     * managed outer transaction can later roll back, and marking the cache
-     * clean from `assignTag` would freeze in-memory state that is no longer
-     * consistent with the rolled-back DB.
+     * Record the cached signature only after a successful full reload so a
+     * thrown query never leaves fresh signature metadata pointing at stale
+     * in-memory state.
      */
     function initFromDb(sessionId: string, db: Database): void {
         const probe = probeSignature(db);
         const cached = loadSignatures.get(sessionId);
-        if (
-            cached !== undefined &&
-            cached.db === db &&
-            cached.dataVersion === probe.dataVersion &&
-            cached.totalChanges === probe.totalChanges
-        ) {
+        if (cached !== undefined && cached.db === db && cached.dataVersion === probe.dataVersion) {
             return;
         }
 
@@ -771,7 +734,6 @@ export function createTagger(): Tagger {
         loadSignatures.set(sessionId, {
             db,
             dataVersion: probe.dataVersion,
-            totalChanges: probe.totalChanges,
         });
     }
 

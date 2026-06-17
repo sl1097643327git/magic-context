@@ -55,6 +55,24 @@ function getCounter(db: Database, sessionId: string): number {
     return row?.counter ?? 0;
 }
 
+function trackAssignmentReloads(db: DatabaseType): { count: () => number; restore: () => void } {
+    let reloads = 0;
+    const originalPrepare = db.prepare.bind(db) as DatabaseType["prepare"];
+    db.prepare = ((sql: string) => {
+        if (sql.includes("SELECT message_id, tag_number, type, tool_owner_message_id FROM tags")) {
+            reloads += 1;
+        }
+        return originalPrepare(sql);
+    }) as DatabaseType["prepare"];
+
+    return {
+        count: () => reloads,
+        restore: () => {
+            db.prepare = originalPrepare;
+        },
+    };
+}
+
 describe("tagger collision recovery", () => {
     let db: Database;
 
@@ -306,72 +324,64 @@ describe("initFromDb signature cache", () => {
     });
 
     /**
-     * Cache hit on a pure-read pass: nothing has changed since the last
-     * full reload, so initFromDb must NOT touch the assignments table.
-     * We prove that by replacing the assignments-loading SQL prepare with
-     * a spy that throws — if the cache is hit, the spy is never reached.
+     * Cache hit after same-connection tagger writes: own writes update the
+     * in-memory map/counter directly, so data_version-only initFromDb must not
+     * rescan assignments on the next pass.
      */
-    it("cache hit: skips full reload when data_version + total_changes are unchanged", () => {
-        const sessionId = "s-cache-hit";
+    it("cache hit: skips full reload after same-connection tagger writes", () => {
+        const sessionId = "s-cache-hit-own-writes";
         const tagger = createTagger();
+        const reloads = trackAssignmentReloads(db);
+        try {
+            // Pass start: establish the data_version signature.
+            tagger.initFromDb(sessionId, db);
+            expect(reloads.count()).toBe(1);
 
-        // Allocate two tags to populate DB and signature.
-        tagger.assignTag(sessionId, "msg-1", "message", 100, db);
-        tagger.assignTag(sessionId, "msg-2", "message", 100, db);
-        // Force a full-reload signature record by calling initFromDb after
-        // writes. assignTag's own writes bumped total_changes, so the next
-        // initFromDb must run a full reload and record the post-write
-        // signature.
-        tagger.initFromDb(sessionId, db);
-        // Capture the in-memory assignment count after the load.
-        const beforeSize = tagger.getAssignments(sessionId).size;
-        expect(beforeSize).toBe(2);
+            // Same pass: tagger writes two assignments and updates memory in place.
+            expect(tagger.assignTag(sessionId, "msg-1", "message", 100, db)).toBe(1);
+            expect(tagger.assignTag(sessionId, "msg-2", "message", 100, db)).toBe(2);
+            expect(tagger.getAssignments(sessionId).size).toBe(2);
 
-        //#when — second call with no DB writes between them. Must NOT
-        // re-load. We prove this by verifying that explicitly clearing
-        // the in-memory map mid-test (simulating a stale read) is NOT
-        // restored by a subsequent cache-hit initFromDb.
-        // (The cache hit returns early without rebuilding the map.)
-        // First call already cached. Now: tamper with the in-memory map
-        // to prove the cache IS being trusted.
-        const sessionAssignmentsRef = tagger.getAssignments(sessionId) as Map<string, number>;
-        sessionAssignmentsRef.delete("msg-1");
-        expect(tagger.getAssignments(sessionId).size).toBe(1);
+            // Next pass: data_version is unchanged for own-connection writes, so
+            // initFromDb cache-hits and does NOT rebuild the tampered map.
+            const sessionAssignmentsRef = tagger.getAssignments(sessionId) as Map<string, number>;
+            sessionAssignmentsRef.delete("msg-1");
+            tagger.initFromDb(sessionId, db);
 
-        // Second initFromDb — should be a cache hit and NOT rebuild.
-        tagger.initFromDb(sessionId, db);
-
-        //#then — the tampered map is unchanged because the reload was
-        // skipped. (After ANY DB write, the cache would be invalidated
-        // and a real reload would restore msg-1.)
-        expect(tagger.getAssignments(sessionId).size).toBe(1);
-        expect(tagger.getTag(sessionId, "msg-1", "message")).toBeUndefined();
+            expect(reloads.count()).toBe(1);
+            expect(tagger.getAssignments(sessionId).size).toBe(1);
+            expect(tagger.getTag(sessionId, "msg-1", "message")).toBeUndefined();
+            expect(tagger.getTag(sessionId, "msg-2", "message")).toBe(2);
+        } finally {
+            reloads.restore();
+        }
     });
 
-    it("cache miss: same-connection direct INSERT bumps total_changes and forces reload", () => {
-        // This is the v0.15.7 critical case: a write committed via the
-        // same Database object (e.g. by another subsystem on the same
-        // connection, or by direct test code) must NOT be missed by the
-        // cache. PRAGMA data_version does NOT bump for same-connection
-        // commits, so we rely entirely on total_changes() here.
-        const sessionId = "s-direct-insert";
+    it("steady state: adding one new tag cache-hits initFromDb and preserves prior assignments", () => {
+        const sessionId = "s-steady-add-one";
         const tagger = createTagger();
-        tagger.assignTag(sessionId, "msg-1", "message", 100, db);
-        tagger.initFromDb(sessionId, db);
-        expect(tagger.getCounter(sessionId)).toBe(1);
+        const reloads = trackAssignmentReloads(db);
+        try {
+            tagger.initFromDb(sessionId, db);
+            expect(reloads.count()).toBe(1);
 
-        //#when — same-connection direct INSERT (the existing
-        // "initFromDb refreshes from DB even when session is already
-        // known in memory" test pattern).
-        db.prepare(
-            "INSERT INTO tags (session_id, message_id, type, byte_size, tag_number) VALUES (?, ?, 'message', 0, ?)",
-        ).run(sessionId, "msg-direct-2", 2);
+            const first = tagger.assignTag(sessionId, "msg-1", "message", 100, db);
+            const second = tagger.assignTag(sessionId, "msg-2", "message", 100, db);
+            expect([first, second]).toEqual([1, 2]);
 
-        tagger.initFromDb(sessionId, db);
+            // Next pass with only one appended message: cache hit, no full rescan.
+            tagger.initFromDb(sessionId, db);
+            const third = tagger.assignTag(sessionId, "msg-3", "message", 100, db);
+            tagger.initFromDb(sessionId, db);
 
-        //#then — full reload picked up the new row.
-        expect(tagger.getCounter(sessionId)).toBe(2);
-        expect(tagger.getTag(sessionId, "msg-direct-2", "message")).toBe(2);
+            expect(reloads.count()).toBe(1);
+            expect(third).toBe(3);
+            expect(tagger.getTag(sessionId, "msg-1", "message")).toBe(1);
+            expect(tagger.getTag(sessionId, "msg-2", "message")).toBe(2);
+            expect(tagger.getTag(sessionId, "msg-3", "message")).toBe(3);
+        } finally {
+            reloads.restore();
+        }
     });
 
     it("cache miss: a second Database connection bumps data_version and forces reload", () => {
@@ -422,115 +432,57 @@ describe("initFromDb signature cache", () => {
         }
     });
 
-    it("per-session signature: session A reload does not falsely satisfy session B's cache check", () => {
-        // The critical correctness test for per-session (vs global)
-        // signature. Sketch from Oracle review:
-        //   1. Both A and B have stale caches.
-        //   2. A writes a tag — total_changes bumps for our connection.
-        //   3. A reloads — A's signature now holds the new total_changes.
-        //   4. B's next initFromDb compares its OWN signature (recorded
-        //      before the bump) against the current value — they differ,
-        //      so B reloads correctly.
-        // If we used a global signature pair, step 4 could falsely
-        // cache-hit because A's reload would have updated the global
-        // signature to match.
+    it("cross-session same-process tagger writes do not invalidate or contaminate another session", () => {
         const tagger = createTagger();
         const sessionA = "s-A";
         const sessionB = "s-B";
+        const reloads = trackAssignmentReloads(db);
+        try {
+            tagger.initFromDb(sessionA, db);
+            tagger.initFromDb(sessionB, db);
+            expect(reloads.count()).toBe(2);
 
-        // Both sessions have their initial caches recorded.
-        tagger.assignTag(sessionA, "a-msg-1", "message", 100, db);
-        tagger.assignTag(sessionB, "b-msg-1", "message", 100, db);
-        tagger.initFromDb(sessionA, db);
-        tagger.initFromDb(sessionB, db);
-        expect(tagger.getCounter(sessionA)).toBe(1);
-        expect(tagger.getCounter(sessionB)).toBe(1);
+            expect(tagger.assignTag(sessionB, "b-msg-1", "message", 100, db)).toBe(1);
+            tagger.initFromDb(sessionB, db);
+            expect(reloads.count()).toBe(2);
 
-        // Concurrent writer (different connection, simulated via direct
-        // SQL on this connection — same effect: total_changes bumps).
-        // Writes to BOTH sessions.
-        db.prepare(
-            "INSERT INTO tags (session_id, message_id, type, byte_size, tag_number) VALUES (?, ?, 'message', 0, ?)",
-        ).run(sessionA, "a-direct-2", 2);
-        db.prepare(
-            "INSERT INTO tags (session_id, message_id, type, byte_size, tag_number) VALUES (?, ?, 'message', 0, ?)",
-        ).run(sessionB, "b-direct-2", 2);
+            expect(tagger.assignTag(sessionA, "a-msg-1", "message", 100, db)).toBe(1);
+            expect(tagger.assignTag(sessionA, "a-msg-2", "message", 100, db)).toBe(2);
 
-        //#when — A reloads first, then B reloads.
-        tagger.initFromDb(sessionA, db);
-        // After A's reload, the global-signature design would have
-        // updated the shared signature to match the post-write values.
-        // B's signature was recorded BEFORE the writes, so it's stale.
-        // With per-session signatures, B's check still sees a mismatch
-        // and reloads correctly. With a global signature, B would have
-        // been incorrectly told "cache fresh" because A just refreshed it.
-        tagger.initFromDb(sessionB, db);
+            // Session A's same-connection writes do not bump data_version and are
+            // scoped to A's map, so B's next initFromDb is a cache hit with no
+            // cross-contamination.
+            tagger.initFromDb(sessionB, db);
 
-        //#then — both sessions picked up their respective new rows.
-        expect(tagger.getCounter(sessionA)).toBe(2);
-        expect(tagger.getTag(sessionA, "a-direct-2", "message")).toBe(2);
-        expect(tagger.getCounter(sessionB)).toBe(2);
-        expect(tagger.getTag(sessionB, "b-direct-2", "message")).toBe(2);
+            expect(reloads.count()).toBe(2);
+            expect(tagger.getCounter(sessionB)).toBe(1);
+            expect(tagger.getTag(sessionB, "b-msg-1", "message")).toBe(1);
+            expect(tagger.getTag(sessionB, "a-msg-1", "message")).toBeUndefined();
+            expect(tagger.getTag(sessionB, "a-msg-2", "message")).toBeUndefined();
+            expect(tagger.getTag(sessionA, "a-msg-1", "message")).toBe(1);
+            expect(tagger.getTag(sessionA, "a-msg-2", "message")).toBe(2);
+        } finally {
+            reloads.restore();
+        }
     });
 
-    it("outer-transaction rollback: cache MUST miss on next pass even though assignTag bumped total_changes inside the rolled-back outer txn", () => {
-        // Oracle's reasoning for choosing option A (do NOT update signature
-        // from assignTag): if assignTag's write happens inside a SAVEPOINT
-        // that a caller-managed outer transaction later rolls back, the
-        // SAVEPOINT's commits are undone and the row no longer exists in
-        // the DB. If assignTag had updated the signature, the next pass
-        // would falsely cache-hit against in-memory state that no longer
-        // matches the DB.
-        //
-        // With option A (signature only updated from successful initFromDb
-        // full reloads), the first initFromDb call in the next pass sees
-        // the rolled-back state correctly: total_changes still bumped
-        // (rollback doesn't decrement it), so the cache misses and we
-        // reload, picking up the rolled-back state.
-        const sessionId = "s-rollback";
+    it("unbindTag removes an in-memory assignment without requiring a DB reload", () => {
+        const sessionId = "s-unbind";
         const tagger = createTagger();
-        tagger.assignTag(sessionId, "msg-pre", "message", 100, db);
-        tagger.initFromDb(sessionId, db);
-        expect(tagger.getCounter(sessionId)).toBe(1);
-
-        //#when — assignTag inside a caller-managed outer transaction
-        // that rolls back.
+        const reloads = trackAssignmentReloads(db);
         try {
-            db.transaction(() => {
-                tagger.assignTag(sessionId, "msg-rollback", "message", 100, db);
-                // Simulate caller deciding to abort the outer operation.
-                throw new Error("simulated outer rollback");
-            })();
-        } catch (e) {
-            expect((e as Error).message).toBe("simulated outer rollback");
+            tagger.initFromDb(sessionId, db);
+            expect(tagger.assignTag(sessionId, "msg-1", "message", 100, db)).toBe(1);
+            expect(tagger.getTag(sessionId, "msg-1", "message")).toBe(1);
+
+            tagger.unbindTag(sessionId, "msg-1");
+            tagger.initFromDb(sessionId, db);
+
+            expect(reloads.count()).toBe(1);
+            expect(tagger.getTag(sessionId, "msg-1", "message")).toBeUndefined();
+        } finally {
+            reloads.restore();
         }
-
-        // The DB row for msg-rollback is gone. But assignTag updated
-        // the in-memory map and counter before the rollback, so the
-        // in-memory state is now stale.
-        const inMemoryAfterRollback = tagger.getTag(sessionId, "msg-rollback", "message");
-        expect(inMemoryAfterRollback).toBeDefined();
-        // DB shows the row is gone.
-        expect(getMaxTagNumberBySession(db, sessionId)).toBe(1);
-
-        //#when — next pass calls initFromDb. Cache MUST miss (because
-        // total_changes bumped from the rolled-back work) and reload to
-        // restore consistency between in-memory assignments and DB.
-        tagger.initFromDb(sessionId, db);
-
-        //#then — assignments map now matches DB (rollback erased
-        // msg-rollback's tag row, full reload removed it from the map).
-        // This is the property the cache must guarantee.
-        //
-        // Note: the in-memory counter stays at 2 by design — assignTag is
-        // monotonic (preserves the highest seen value through the
-        // Math.max in initFromDb's reconciliation step) even when the
-        // underlying tag row was rolled back. That's intentional: it
-        // ensures the next allocation picks an unused number rather than
-        // immediately re-colliding with whoever ends up at tag 2 next.
-        // The cache correctness property is about the assignments map,
-        // not the counter.
-        expect(tagger.getTag(sessionId, "msg-rollback", "message")).toBeUndefined();
     });
 
     it("resetCounter invalidates signature so next initFromDb forces full reload", () => {
@@ -561,10 +513,9 @@ describe("initFromDb signature cache", () => {
         ).run(sessionId, "rebuilt-msg-2", 2);
 
         // initFromDb must not cache-hit against the pre-reset signature.
-        // The deletion + insertion above also bumps total_changes, but the
-        // explicit signature invalidation in resetCounter() is what
-        // guarantees correctness even if those counters were somehow
-        // unchanged (e.g. equal-volume swap on a different connection).
+        // resetCounter() explicitly invalidates the data_version signature so
+        // the next load sees the rebuilt rows even when the same connection
+        // performed the surrounding delete/insert work.
         tagger.initFromDb(sessionId, db);
 
         //#then — full reload picked up the rebuilt rows.

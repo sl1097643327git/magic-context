@@ -93,6 +93,7 @@ export function createExistingTagResolver(
             }
 
             updateTagMessageId(db, sessionId, fallback.tagNumber, currentContentId);
+            tagger.unbindTag(sessionId, fallback.contentId);
             tagger.bindTag(sessionId, currentContentId, fallback.tagNumber);
             usedTagNumbers.add(fallback.tagNumber);
             return fallback.tagNumber;

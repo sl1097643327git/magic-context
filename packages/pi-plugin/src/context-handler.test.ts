@@ -27,6 +27,7 @@ import {
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
 import { getEmergencyInputSample } from "@magic-context/core/features/magic-context/storage-meta-persisted";
+import { createTagger } from "@magic-context/core/features/magic-context/tagger";
 import { checkCompartmentTrigger } from "@magic-context/core/hooks/magic-context/compartment-trigger";
 import { deriveTriggerBudget } from "@magic-context/core/hooks/magic-context/derive-budgets";
 import { resolveExecuteThreshold } from "@magic-context/core/hooks/magic-context/event-resolvers";
@@ -35,6 +36,7 @@ import { withRawMessageProvider } from "@magic-context/core/hooks/magic-context/
 import { clearModelsDevCache } from "@magic-context/core/shared/models-dev-cache";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner";
+import { tagTranscript } from "@magic-context/core/shared/tag-transcript";
 import { clearAutoSearchForPiSession } from "./auto-search-pi";
 import {
 	awaitInFlightHistorians,
@@ -66,6 +68,7 @@ import {
 	toolResultMessage,
 	userMessage,
 } from "./test-utils.test";
+import { createPiTranscript } from "./transcript-pi";
 
 describe("applyForwardPressureFloor", () => {
 	const { FORWARD_PRESSURE_LIMIT_FACTOR, applyForwardPressureFloor } =
@@ -150,6 +153,76 @@ describe("applyForwardPressureFloor", () => {
 				"const alreadyMutatingThisPass = executedWorkThisPass",
 			);
 		});
+	});
+});
+
+describe("Pi fallback tag adoption", () => {
+	it("unbinds the pi-msg fallback alias while preserving the adopted §N§ prefix", () => {
+		const db = createTestDb();
+		try {
+			const sessionId = "ses-pi-fallback-adoption";
+			const tagger = createTagger();
+			tagger.initFromDb(sessionId, db);
+
+			const fallbackMessages = [userMessage("hello", 10)];
+			const fallbackTranscript = createPiTranscript(
+				fallbackMessages,
+				sessionId,
+				[undefined],
+			);
+			const fallbackId = fallbackTranscript.messages[0]?.info.id;
+			expect(fallbackId).toBe("pi-msg-0-10-user");
+			if (!fallbackId) throw new Error("missing fallback id");
+			const fallbackFingerprints =
+				contextHandlerInternals.buildEntryFingerprintMap(
+					fallbackMessages,
+					() => fallbackId,
+				);
+
+			tagTranscript(sessionId, fallbackTranscript, tagger, db, {
+				entryFingerprintByMessageId: fallbackFingerprints,
+			});
+			fallbackTranscript.commit();
+			expect(textOf(fallbackMessages[0])).toBe("§1§ hello");
+			expect(tagger.getTag(sessionId, `${fallbackId}:p0`, "message")).toBe(1);
+
+			// Next pass starts with a data_version-only cache hit after the tagger's
+			// own write, then Pi migrates the fallback row to the real entry id.
+			tagger.initFromDb(sessionId, db);
+			const realId = "entry-real-user";
+			const realMessages = [userMessage("hello", 10)];
+			const realFingerprints = contextHandlerInternals.buildEntryFingerprintMap(
+				realMessages,
+				() => realId,
+			);
+			contextHandlerInternals.adoptPiFallbackTags(
+				db,
+				sessionId,
+				tagger,
+				realFingerprints,
+			);
+			expect(
+				tagger.getTag(sessionId, `${fallbackId}:p0`, "message"),
+			).toBeUndefined();
+			expect(tagger.getTag(sessionId, `${realId}:p0`, "message")).toBe(1);
+
+			const realTranscript = createPiTranscript(realMessages, sessionId, [
+				realId,
+			]);
+			tagTranscript(sessionId, realTranscript, tagger, db, {
+				entryFingerprintByMessageId: realFingerprints,
+			});
+			realTranscript.commit();
+			expect(textOf(realMessages[0])).toBe("§1§ hello");
+
+			// A later data_version-only cache hit must not resurrect the old alias.
+			tagger.initFromDb(sessionId, db);
+			expect(
+				tagger.assignTag(sessionId, `${fallbackId}:p0`, "message", 5, db),
+			).toBe(2);
+		} finally {
+			closeQuietly(db);
+		}
 	});
 });
 

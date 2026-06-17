@@ -232,7 +232,9 @@ function applyForwardPressureFloor(
 
 export const __test = {
 	FORWARD_PRESSURE_LIMIT_FACTOR,
+	adoptPiFallbackTags,
 	applyForwardPressureFloor,
+	buildEntryFingerprintMap,
 };
 
 /**
