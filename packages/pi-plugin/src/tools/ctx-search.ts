@@ -215,6 +215,7 @@ export function createCtxSearchTool(
 							projectIdentity,
 							text,
 							signal,
+							"query",
 						);
 						return result?.vector ?? null;
 					},

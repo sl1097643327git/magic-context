@@ -13,7 +13,7 @@ import {
 } from "./compartment-chunk-embedding";
 import { embedAndStoreCompartmentChunks } from "./compartment-embedding";
 import { appendCompartments, getCompartments } from "./compartment-storage";
-import type { EmbeddingProvider } from "./memory/embedding-provider";
+import type { EmbeddingProvider, EmbeddingPurpose } from "./memory/embedding-provider";
 import { runMigrations } from "./migrations";
 import {
     _resetProjectEmbeddingRegistryForTests,
@@ -36,12 +36,20 @@ class CapturingEmbeddingProvider implements EmbeddingProvider {
         return true;
     }
 
-    async embed(text: string): Promise<Float32Array> {
+    async embed(
+        text: string,
+        _signal?: AbortSignal,
+        _purpose?: EmbeddingPurpose,
+    ): Promise<Float32Array> {
         this.texts.push(text);
         return new Float32Array([1, 0]);
     }
 
-    async embedBatch(texts: string[]): Promise<Float32Array[]> {
+    async embedBatch(
+        texts: string[],
+        _signal?: AbortSignal,
+        _purpose?: EmbeddingPurpose,
+    ): Promise<Float32Array[]> {
         this.texts.push(...texts);
         return texts.map(() => new Float32Array([1, 0]));
     }

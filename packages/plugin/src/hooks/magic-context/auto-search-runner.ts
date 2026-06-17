@@ -321,7 +321,12 @@ export async function runAutoSearchHint(args: {
             embeddingEnabled,
             gitCommitsEnabled,
             embedQuery: async (text, signal) => {
-                const result = await embedTextForProject(options.projectPath, text, signal);
+                const result = await embedTextForProject(
+                    options.projectPath,
+                    text,
+                    signal,
+                    "query",
+                );
                 return result?.vector ?? null;
             },
             isEmbeddingRuntimeEnabled: () => embeddingEnabled === true,

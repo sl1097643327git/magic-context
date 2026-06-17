@@ -1,14 +1,16 @@
 import { log } from "../../../shared/logger";
 import { getEmbeddingProviderIdentity } from "./embedding-identity";
-import type { EmbeddingProvider } from "./embedding-provider";
+import type { EmbeddingProvider, EmbeddingPurpose } from "./embedding-provider";
 import { blockedEmbeddingEndpointReason } from "./embedding-ssrf";
 
 interface OpenAICompatibleEmbeddingProviderOptions {
     endpoint?: string;
     model?: string;
     apiKey?: string;
-    /** Optional `input_type` body field (e.g. NVIDIA NIM 'query'/'passage'). */
+    /** Default/passage `input_type` body field (e.g. NVIDIA NIM 'passage'). */
     inputType?: string;
+    /** Optional query `input_type` for search embeddings; falls back to inputType when unset. */
+    queryInputType?: string;
     /** Optional `truncate` body field (e.g. NVIDIA NIM 'NONE'/'START'/'END'). */
     truncate?: string;
     /** Maximum safe input tokens for chunk embeddings. */
@@ -85,6 +87,7 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
     private readonly model: string;
     private readonly apiKey: string;
     private readonly inputType: string;
+    private readonly queryInputType: string;
     private readonly truncate: string;
     private initialized = false;
 
@@ -107,6 +110,7 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
         this.model = options.model?.trim() ?? "";
         this.apiKey = options.apiKey?.trim() ?? "";
         this.inputType = options.inputType?.trim() ?? "";
+        this.queryInputType = options.queryInputType?.trim() ?? "";
         this.truncate = options.truncate?.trim() ?? "";
         this.maxInputTokens =
             typeof options.maxInputTokens === "number" && Number.isFinite(options.maxInputTokens)
@@ -147,12 +151,27 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
         return true;
     }
 
-    async embed(text: string, signal?: AbortSignal): Promise<Float32Array | null> {
-        const [embedding] = await this.embedBatch([text], signal);
+    private resolveInputTypeForPurpose(purpose: EmbeddingPurpose = "passage"): string {
+        if (purpose === "query") {
+            return this.queryInputType || this.inputType;
+        }
+        return this.inputType;
+    }
+
+    async embed(
+        text: string,
+        signal?: AbortSignal,
+        purpose?: EmbeddingPurpose,
+    ): Promise<Float32Array | null> {
+        const [embedding] = await this.embedBatch([text], signal, purpose);
         return embedding ?? null;
     }
 
-    async embedBatch(texts: string[], signal?: AbortSignal): Promise<(Float32Array | null)[]> {
+    async embedBatch(
+        texts: string[],
+        signal?: AbortSignal,
+        purpose?: EmbeddingPurpose,
+    ): Promise<(Float32Array | null)[]> {
         if (texts.length === 0) {
             return [];
         }
@@ -195,6 +214,7 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
                 signal.addEventListener("abort", onOuterAbort, { once: true });
             }
 
+            const inputTypeForRequest = this.resolveInputTypeForPurpose(purpose);
             const response = await fetch(`${this.endpoint}/embeddings`, {
                 method: "POST",
                 headers: {
@@ -208,7 +228,7 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
                     // input_type; truncate is accepted by several providers).
                     // Omitted entirely when unset so standard OpenAI endpoints are
                     // unaffected.
-                    ...(this.inputType ? { input_type: this.inputType } : {}),
+                    ...(inputTypeForRequest ? { input_type: inputTypeForRequest } : {}),
                     ...(this.truncate ? { truncate: this.truncate } : {}),
                 }),
                 // SSRF: refuse to FOLLOW redirects. The pre-flight SSRF check only

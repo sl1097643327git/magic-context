@@ -168,7 +168,13 @@ const BaseEmbeddingConfigSchema = z
             .string()
             .optional()
             .describe(
-                "Optional input_type sent in the embedding request body. Required by some openai-compatible providers (e.g. NVIDIA NIM expects 'query' or 'passage'). Omitted from the request when unset.",
+                "Default input_type for stored/indexed (passage) embeddings in the request body. Required by some openai-compatible providers (e.g. NVIDIA NIM). Omitted from the request when unset.",
+            ),
+        query_input_type: z
+            .string()
+            .optional()
+            .describe(
+                "Optional input_type for query (search) embeddings on asymmetric models (e.g. NVIDIA NIM 'query'). When unset, query embeddings use embedding.input_type. Passage/stored content always uses embedding.input_type.",
             ),
         truncate: z
             .string()
@@ -215,6 +221,7 @@ export const EmbeddingConfigSchema = BaseEmbeddingConfigSchema.transform((data) 
     if (data.provider === "openai-compatible") {
         const apiKey = data.api_key?.trim();
         const inputType = data.input_type?.trim();
+        const queryInputType = data.query_input_type?.trim();
         const truncate = data.truncate?.trim();
         return {
             provider: "openai-compatible" as const,
@@ -222,6 +229,7 @@ export const EmbeddingConfigSchema = BaseEmbeddingConfigSchema.transform((data) 
             endpoint: data.endpoint?.trim() ?? "",
             ...(apiKey ? { api_key: apiKey } : {}),
             ...(inputType ? { input_type: inputType } : {}),
+            ...(queryInputType ? { query_input_type: queryInputType } : {}),
             ...(truncate ? { truncate } : {}),
             ...(data.max_input_tokens ? { max_input_tokens: data.max_input_tokens } : {}),
         };

@@ -381,6 +381,7 @@ export async function runAutoSearchHintForPi(args: {
 					options.projectPath,
 					text,
 					signal,
+					"query",
 				);
 				return result?.vector ?? null;
 			},

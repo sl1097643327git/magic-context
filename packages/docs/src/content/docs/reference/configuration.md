@@ -107,8 +107,10 @@ Durable project memory, semantic search, and recall features.
 | `embedding.model` | string | — | Embedding model name. Required for openai-compatible, ignored for local. |
 | `embedding.endpoint` | string | — | API endpoint URL. Required when provider is openai-compatible. |
 | `embedding.api_key` | string | — | API key for remote embedding provider (optional) |
-| `embedding.input_type` | string | — | Optional input_type sent in the embedding request body. Required by some openai-compatible providers (e.g. NVIDIA NIM expects 'query' or 'passage'). Omitted from the request when unset. |
+| `embedding.input_type` | string | — | Default input_type for stored/indexed (passage) embeddings in the request body. Required by some openai-compatible providers (e.g. NVIDIA NIM). Omitted from the request when unset. |
+| `embedding.query_input_type` | string | — | Optional input_type for query (search) embeddings on asymmetric models (e.g. NVIDIA NIM 'query'). When unset, query embeddings use embedding.input_type. Passage/stored content always uses embedding.input_type. |
 | `embedding.truncate` | string | — | Optional truncate mode sent in the embedding request body (e.g. NVIDIA NIM accepts 'NONE' \| 'START' \| 'END'). Omitted from the request when unset. |
+| `embedding.max_input_tokens` | integer (–9007199254740991) | — | Optional maximum input tokens for chunk embeddings. Defaults conservatively to 512 when omitted. |
 
 ## Background agents
 

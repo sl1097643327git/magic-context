@@ -10,7 +10,7 @@ import {
     replaceCompartmentChunkEmbeddings,
 } from "./compartment-chunk-embedding";
 import { appendCompartments, getCompartments } from "./compartment-storage";
-import type { EmbeddingProvider } from "./memory/embedding-provider";
+import type { EmbeddingProvider, EmbeddingPurpose } from "./memory/embedding-provider";
 import { insertMemory } from "./memory/storage-memory";
 import { getStoredModelId, saveEmbedding } from "./memory/storage-memory-embeddings";
 import {
@@ -39,11 +39,19 @@ class FakeEmbeddingProvider implements EmbeddingProvider {
         return true;
     }
 
-    async embed(text: string): Promise<Float32Array> {
+    async embed(
+        text: string,
+        _signal?: AbortSignal,
+        _purpose?: EmbeddingPurpose,
+    ): Promise<Float32Array> {
         return new Float32Array([text.length, this.modelId.length]);
     }
 
-    async embedBatch(texts: string[]): Promise<Float32Array[]> {
+    async embedBatch(
+        texts: string[],
+        _signal?: AbortSignal,
+        _purpose?: EmbeddingPurpose,
+    ): Promise<Float32Array[]> {
         return texts.map((text) => new Float32Array([text.length, this.modelId.length]));
     }
 

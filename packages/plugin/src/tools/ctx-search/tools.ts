@@ -170,7 +170,12 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                     memoryEnabled,
                     embeddingEnabled,
                     embedQuery: async (text, signal) => {
-                        const result = await embedTextForProject(projectPath, text, signal);
+                        const result = await embedTextForProject(
+                            projectPath,
+                            text,
+                            signal,
+                            "query",
+                        );
                         return result?.vector ?? null;
                     },
                     isEmbeddingRuntimeEnabled: () => embeddingEnabled === true,

@@ -66,6 +66,59 @@ describe("OpenAICompatibleEmbeddingProvider request body (NVIDIA NIM fields, iss
         expect("truncate" in body).toBe(false);
         expect(body.input).toBeDefined();
     });
+
+    test("purpose query sends queryInputType when configured (#155)", async () => {
+        const provider = new OpenAICompatibleEmbeddingProvider({
+            endpoint: "http://127.0.0.1:65535",
+            model: "nvidia/nv-embed",
+            inputType: "passage",
+            queryInputType: "query",
+        });
+        fetchSpy.mockImplementation((async () => successResponse()) as FetchLike);
+        await provider.embed("search text", undefined, "query");
+        const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
+        const body = JSON.parse(init.body as string) as Record<string, unknown>;
+        expect(body.input_type).toBe("query");
+    });
+
+    test("purpose passage sends inputType when configured (#155)", async () => {
+        const provider = new OpenAICompatibleEmbeddingProvider({
+            endpoint: "http://127.0.0.1:65535",
+            model: "nvidia/nv-embed",
+            inputType: "passage",
+            queryInputType: "query",
+        });
+        fetchSpy.mockImplementation((async () => successResponse()) as FetchLike);
+        await provider.embed("stored text", undefined, "passage");
+        const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
+        const body = JSON.parse(init.body as string) as Record<string, unknown>;
+        expect(body.input_type).toBe("passage");
+    });
+
+    test("purpose query falls back to inputType when queryInputType unset (backward compat)", async () => {
+        const provider = new OpenAICompatibleEmbeddingProvider({
+            endpoint: "http://127.0.0.1:65535",
+            model: "nvidia/nv-embed",
+            inputType: "passage",
+        });
+        fetchSpy.mockImplementation((async () => successResponse()) as FetchLike);
+        await provider.embed("search text", undefined, "query");
+        const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
+        const body = JSON.parse(init.body as string) as Record<string, unknown>;
+        expect(body.input_type).toBe("passage");
+    });
+
+    test("purpose query with both input types unset omits input_type", async () => {
+        const provider = new OpenAICompatibleEmbeddingProvider({
+            endpoint: "http://127.0.0.1:65535",
+            model: "text-embedding-3-small",
+        });
+        fetchSpy.mockImplementation((async () => successResponse()) as FetchLike);
+        await provider.embed("search text", undefined, "query");
+        const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
+        const body = JSON.parse(init.body as string) as Record<string, unknown>;
+        expect("input_type" in body).toBe(false);
+    });
 });
 
 describe("OpenAICompatibleEmbeddingProvider circuit breaker", () => {

@@ -36,7 +36,7 @@ import { invalidateProject } from "./memory/embedding-cache";
 import { getEmbeddingProviderIdentity } from "./memory/embedding-identity";
 import { LocalEmbeddingProvider } from "./memory/embedding-local";
 import { OpenAICompatibleEmbeddingProvider } from "./memory/embedding-openai";
-import type { EmbeddingProvider } from "./memory/embedding-provider";
+import type { EmbeddingProvider, EmbeddingPurpose } from "./memory/embedding-provider";
 import {
     clearEmbeddingsForProject,
     getDistinctStoredModelIds,
@@ -161,6 +161,7 @@ function resolveEmbeddingConfig(config?: EmbeddingConfig): EmbeddingConfig {
     if (config.provider === "openai-compatible") {
         const apiKey = config.api_key?.trim();
         const inputType = config.input_type?.trim();
+        const queryInputType = config.query_input_type?.trim();
         const truncate = config.truncate?.trim();
         return {
             provider: "openai-compatible",
@@ -171,8 +172,10 @@ function resolveEmbeddingConfig(config?: EmbeddingConfig): EmbeddingConfig {
             // truncate). They must survive normalization so (a) they reach the
             // provider request body and (b) a change to either is part of the
             // config identity hash → a real config change correctly wipes stale
-            // vectors. Dropping them here silently disabled NIM support.
+            // vectors. query_input_type shapes per-call requests only and is
+            // intentionally omitted from identity (stored vectors use passage).
             ...(inputType ? { input_type: inputType } : {}),
+            ...(queryInputType ? { query_input_type: queryInputType } : {}),
             ...(truncate ? { truncate } : {}),
             ...(config.max_input_tokens
                 ? {
@@ -202,6 +205,7 @@ function createProvider(config: EmbeddingConfig): EmbeddingProvider | null {
             model: config.model,
             apiKey: config.api_key,
             inputType: config.input_type,
+            queryInputType: config.query_input_type,
             truncate: config.truncate,
             maxInputTokens: config.max_input_tokens,
         });
@@ -489,6 +493,7 @@ export async function embedTextForProject(
     projectIdentity: string,
     text: string,
     signal?: AbortSignal,
+    purpose: EmbeddingPurpose = "passage",
 ): Promise<{ vector: Float32Array; modelId: string; generation: number } | null> {
     const registration = projectRegistrations.get(projectIdentity);
     if (!registration) return null;
@@ -497,7 +502,7 @@ export async function embedTextForProject(
     const provider = getOrCreateProjectProvider(registration);
     if (!provider) return null;
 
-    const vector = await provider.embed(text, signal);
+    const vector = await provider.embed(text, signal, purpose);
     if (!vector) return null;
 
     const current = projectRegistrations.get(projectIdentity);
@@ -516,6 +521,7 @@ export async function embedBatchForProject(
     projectIdentity: string,
     texts: string[],
     signal?: AbortSignal,
+    purpose: EmbeddingPurpose = "passage",
 ): Promise<{ vectors: (Float32Array | null)[]; modelId: string; generation: number } | null> {
     if (texts.length === 0) {
         const registration = projectRegistrations.get(projectIdentity);
@@ -531,7 +537,7 @@ export async function embedBatchForProject(
     const provider = getOrCreateProjectProvider(registration);
     if (!provider) return null;
 
-    const vectors = await provider.embedBatch(texts, signal);
+    const vectors = await provider.embedBatch(texts, signal, purpose);
     const current = projectRegistrations.get(projectIdentity);
     if (
         !current ||

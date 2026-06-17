@@ -82,6 +82,7 @@ function resolveEmbeddingConfig(config?: EmbeddingConfig): EmbeddingConfig {
     if (config.provider === "openai-compatible") {
         const apiKey = config.api_key?.trim();
         const inputType = config.input_type?.trim();
+        const queryInputType = config.query_input_type?.trim();
         const truncate = config.truncate?.trim();
         return {
             provider: "openai-compatible",
@@ -89,6 +90,7 @@ function resolveEmbeddingConfig(config?: EmbeddingConfig): EmbeddingConfig {
             endpoint: config.endpoint.trim(),
             ...(apiKey ? { api_key: apiKey } : {}),
             ...(inputType ? { input_type: inputType } : {}),
+            ...(queryInputType ? { query_input_type: queryInputType } : {}),
             ...(truncate ? { truncate } : {}),
             ...(config.max_input_tokens
                 ? {
@@ -118,6 +120,7 @@ function createProvider(config: EmbeddingConfig): EmbeddingProvider | null {
             model: config.model,
             apiKey: config.api_key,
             inputType: config.input_type,
+            queryInputType: config.query_input_type,
             truncate: config.truncate,
             maxInputTokens: config.max_input_tokens,
         });

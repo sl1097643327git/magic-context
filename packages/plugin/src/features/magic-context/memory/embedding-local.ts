@@ -6,7 +6,7 @@ import { DEFAULT_LOCAL_EMBEDDING_MODEL } from "../../../config/schema/magic-cont
 import { getMagicContextStorageDir } from "../../../shared/data-path";
 import { log } from "../../../shared/logger";
 import { getEmbeddingProviderIdentity } from "./embedding-identity";
-import type { EmbeddingProvider } from "./embedding-provider";
+import type { EmbeddingProvider, EmbeddingPurpose } from "./embedding-provider";
 
 /**
  * Cross-process mutex for embedding-model load. When two OpenCode processes
@@ -570,7 +570,11 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
         }
     }
 
-    async embed(text: string, signal?: AbortSignal): Promise<Float32Array | null> {
+    async embed(
+        text: string,
+        signal?: AbortSignal,
+        _purpose?: EmbeddingPurpose,
+    ): Promise<Float32Array | null> {
         // Local inference is fast (typically <100ms) and can't be cancelled
         // mid-compute with transformers.js, so we honor `signal` only as a
         // pre-flight check — callers whose timeout already fired get null
@@ -606,7 +610,11 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
         }
     }
 
-    async embedBatch(texts: string[], signal?: AbortSignal): Promise<(Float32Array | null)[]> {
+    async embedBatch(
+        texts: string[],
+        signal?: AbortSignal,
+        _purpose?: EmbeddingPurpose,
+    ): Promise<(Float32Array | null)[]> {
         if (texts.length === 0) {
             return [];
         }
