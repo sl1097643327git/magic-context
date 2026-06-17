@@ -761,6 +761,11 @@ body {
   background: var(--bg-base);
   padding: 8px 10px;
 }
+.cache-step-row.selected,
+.card.cache-step-selected {
+  border-color: var(--accent);
+  background: var(--bg-active);
+}
 
 .cache-step-header {
   display: flex;
@@ -951,6 +956,138 @@ body {
   background: var(--red);
 }
 .chart-bar.black {
+  background: var(--text-muted);
+}
+
+/* ── Context-scaled cache timeline ──────────────────────
+   Outer bar height = prompt / context_window (how full the window is).
+   Inner segment (bottom) = cache_read / prompt (the cached, cheap portion),
+   colored by severity. The neutral top gap = uncached tokens (full-price).
+   A full-height marker line flags steps where MC reclaimed context. */
+.ctx-chart {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  height: 120px;
+}
+.ctx-axis {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: flex-end;
+  width: 34px;
+  flex-shrink: 0;
+  font-size: 9px;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-muted);
+  padding: 1px 0;
+  border-right: 1px solid var(--border);
+}
+.ctx-bars-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  height: 100%;
+  overflow: hidden;
+}
+.ctx-gridline {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--border);
+  opacity: 0.4;
+  pointer-events: none;
+}
+.ctx-bars {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  gap: 1px;
+  height: 100%;
+}
+.ctx-bar-slot {
+  flex: 1 1 0;
+  min-width: 1px;
+  max-width: 16px;
+  height: 100%;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+/* full-height vertical line marking an MC context reclaim at this step */
+.ctx-drop-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 2px;
+  background: var(--accent);
+  opacity: 0.55;
+  pointer-events: auto;
+  cursor: help;
+  z-index: 1;
+}
+.ctx-drop-line:hover {
+  opacity: 0.9;
+}
+.ctx-bar {
+  width: 100%;
+  border-radius: 2px 2px 0 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  background: var(--border-light);
+  cursor: pointer;
+  transition: height 300ms ease-out;
+  overflow: hidden;
+}
+.ctx-bar:hover {
+  opacity: 0.85;
+}
+/* full_bust has cache_read=0 → no inner segment to color, so tint the whole
+   bar red. Regular bust shows its color via the inner segment below. */
+.ctx-bar.full_bust {
+  background: color-mix(in srgb, var(--red) 55%, var(--border-light));
+}
+.ctx-bar.overflow {
+  box-shadow: inset 0 2px 0 0 var(--red);
+}
+.ctx-bar.selected {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+.ctx-bar.unknown {
+  background: repeating-linear-gradient(
+    45deg,
+    var(--bg-hover),
+    var(--bg-hover) 3px,
+    var(--bg-active) 3px,
+    var(--bg-active) 6px
+  );
+}
+/* Inner segment = the cached (cache_read) portion. Its color follows the
+   step's severity so it matches the list pill: stable green, warning amber,
+   bust red. */
+.ctx-bar-cached {
+  width: 100%;
+  background: var(--green);
+  border-radius: 2px 2px 0 0;
+}
+.ctx-bar-cached.green {
+  background: var(--green);
+}
+.ctx-bar-cached.amber {
+  background: var(--amber);
+}
+.ctx-bar-cached.red {
+  background: var(--red);
+}
+.ctx-bar-cached.blue {
+  background: var(--accent);
+}
+.ctx-bar-cached.gray {
   background: var(--text-muted);
 }
 

@@ -96,6 +96,36 @@ lazy_static::lazy_static! {
     ).unwrap();
 }
 
+/// Substrings that mark a cache-cause log line (execute pass, hard fold, or
+/// comparting). Used to cheaply skip the overwhelming majority of lines in the
+/// very large, very verbose plugin log.
+const CAUSE_LINE_MARKERS: [&str; 3] =
+    ["decision=execute", "rematerialized=true", "compartmentInProgress flag set"];
+
+/// Stream the ENTIRE log front-to-back, parsing ONLY the sparse cause-bearing
+/// lines. The drop markers on the cache timeline can be many hours old, far
+/// older than any fixed line-count tail would cover (the log emits ~one cause
+/// line per thousand), so a tail read leaves every drop uncorrelated. Cause
+/// lines are rare, so scanning the whole file and keeping only matches stays
+/// cheap and bounds memory to the kept set.
+pub fn read_log_cause_lines(path: &PathBuf) -> Vec<LogEntry> {
+    use std::io::{BufRead, BufReader};
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+    let reader = BufReader::new(file);
+    let mut out = Vec::new();
+    for line in reader.lines().map_while(Result::ok) {
+        if CAUSE_LINE_MARKERS.iter().any(|m| line.contains(m)) {
+            if let Some(entry) = parse_log_line(&line) {
+                out.push(entry);
+            }
+        }
+    }
+    out
+}
+
 pub fn parse_log_line(line: &str) -> Option<LogEntry> {
     // Format: [timestamp] [magic-context][session_id] message
     // Also handle: [timestamp] message (no component/session)

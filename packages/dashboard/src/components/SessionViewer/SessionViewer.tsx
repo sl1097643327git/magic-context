@@ -29,6 +29,7 @@ import {
   updateNote,
   updateSessionFact,
 } from "../../lib/api";
+import { severityColorClass } from "../../lib/cache-format";
 import type {
   Compartment,
   DbCacheEvent,
@@ -39,6 +40,7 @@ import type {
   SessionRow,
 } from "../../lib/types";
 import HarnessBadge from "../HarnessBadge";
+import CacheTimeline from "../shared/CacheTimeline";
 import FilterSelect from "../shared/FilterSelect";
 
 const PROJECT_FILTER_KEY = "mc_sessions_project_filter";
@@ -612,10 +614,12 @@ export default function SessionViewer() {
     );
   };
 
-  const cacheHitRatio = (event: DbCacheEvent) => {
-    const total = event.cache_read + event.cache_write + event.input_tokens;
-    return total > 0 ? event.cache_read / total : 0;
-  };
+  // hit_ratio now carries the cross-step RETENTION (cache held vs the previous
+  // step's expected prefix), computed in the backend. This is the cache-health
+  // number to display — not the old single-row read/total ratio, which falsely
+  // flagged any step that merely added uncached input (a big tool result / file
+  // read) as a warning.
+  const cacheRetention = (event: DbCacheEvent) => event.hit_ratio;
 
   const severityIcon = (severity: string) => {
     switch (severity) {
@@ -629,19 +633,29 @@ export default function SessionViewer() {
         return "🔴";
       case "full_bust":
         return "⚫";
+      case "unknown":
+        return "⚪";
       default:
         return "⚪";
     }
   };
 
-  const severityBarClass = (ratio: number) => {
-    if (ratio >= 0.9) return "green";
-    if (ratio >= 0.5) return "amber";
-    return "red";
+  // Colors follow severity (the backend's cross-step classification) directly.
+  const barFraction = (event: DbCacheEvent): number => {
+    if (event.severity === "unknown" || event.severity === "info") return 1;
+    return Math.min(1, Math.max(0, event.hit_ratio));
   };
 
-  const hitColor = (ratio: number) =>
-    ratio >= 0.9 ? "var(--green)" : ratio >= 0.5 ? "var(--amber)" : "var(--red)";
+  // Clicking a timeline bar selects + scrolls to its event card in the list.
+  const [selectedCacheStepId, setSelectedCacheStepId] = createSignal<string | null>(null);
+  const focusCacheStep = (event: DbCacheEvent) => {
+    setSelectedCacheStepId(event.message_id);
+    requestAnimationFrame(() => {
+      document
+        .getElementById(`sv-cache-step-${event.message_id}`)
+        ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+  };
 
   const refetchFacts = () => refetchSessionDetail();
   const refetchNotes = () => refetchSessionDetail();
@@ -2340,28 +2354,22 @@ export default function SessionViewer() {
                         </select>
                       </div>
                     </div>
-                    <div class="chart-bars">
-                      <For each={cacheTimelineBars()}>
-                        {(event) => {
-                          const ratio = () => cacheHitRatio(event);
-                          return (
-                            <div
-                              class={`chart-bar ${ratio() === 0 ? "black" : severityBarClass(ratio())}`}
-                              style={{ height: `${Math.max(3, ratio() * 100)}%` }}
-                              title={`${formatDateTime(event.timestamp)}\nHit: ${(ratio() * 100).toFixed(1)}%\nPrompt: ${(event.cache_read + event.cache_write + event.input_tokens).toLocaleString()}\nCached: ${event.cache_read.toLocaleString()}\nNew: ${event.cache_write.toLocaleString()}\nUncached: ${event.input_tokens.toLocaleString()}${event.cause ? `\nCause: ${event.cause}` : ""}`}
-                            />
-                          );
-                        }}
-                      </For>
-                    </div>
+                    <CacheTimeline
+                      events={cacheTimelineBars()}
+                      selectedStepId={selectedCacheStepId()}
+                      onBarClick={focusCacheStep}
+                    />
                   </div>
 
                   <For each={[...(cacheEvents() ?? [])].reverse()}>
                     {(event) => {
-                      const ratio = cacheHitRatio(event);
+                      const retention = cacheRetention(event);
                       const totalPrompt = event.cache_read + event.cache_write + event.input_tokens;
                       return (
-                        <div class="card">
+                        <div
+                          id={`sv-cache-step-${event.message_id}`}
+                          class={`card ${selectedCacheStepId() === event.message_id ? "cache-step-selected" : ""}`}
+                        >
                           <div
                             style={{
                               display: "flex",
@@ -2377,28 +2385,43 @@ export default function SessionViewer() {
                             >
                               {formatDateTime(event.timestamp)}
                             </span>
-                            <span
-                              class={`pill ${event.severity === "stable" ? "green" : event.severity === "info" ? "blue" : event.severity === "warning" ? "amber" : "red"}`}
-                            >
+                            <span class={`pill ${severityColorClass(event.severity)}`}>
                               {event.severity === "full_bust"
                                 ? "FULL BUST"
-                                : event.severity.toUpperCase()}
+                                : event.severity === "info"
+                                  ? "NEW SESSION"
+                                  : event.severity === "unknown"
+                                    ? "NO CACHE DATA"
+                                    : event.severity.toUpperCase()}
                             </span>
                           </div>
                           <div class="card-meta" style={{ gap: "12px" }}>
-                            <span
-                              class="mono"
-                              style={{ color: hitColor(ratio), "font-weight": "600" }}
+                            <Show
+                              when={event.severity !== "unknown"}
+                              fallback={
+                                <span class="mono" style={{ color: "var(--text-muted)" }}>
+                                  no cache data
+                                </span>
+                              }
                             >
-                              {(ratio * 100).toFixed(1)}%
-                            </span>
+                              <span
+                                class="mono"
+                                style={{
+                                  color: `var(--${severityColorClass(event.severity)})`,
+                                  "font-weight": "600",
+                                }}
+                                title="Cache retention vs the previous step's expected prefix"
+                              >
+                                {(retention * 100).toFixed(1)}%
+                              </span>
+                            </Show>
                             <span class="mono">prompt={totalPrompt.toLocaleString()}</span>
                             <span class="mono">cached={event.cache_read.toLocaleString()}</span>
                             <span class="mono">new={event.cache_write.toLocaleString()}</span>
                             <div class="cache-bar">
                               <div
-                                class={`cache-bar-fill ${severityBarClass(ratio)}`}
-                                style={{ width: `${ratio * 100}%` }}
+                                class={`cache-bar-fill ${severityColorClass(event.severity)}`}
+                                style={{ width: `${barFraction(event) * 100}%` }}
                               />
                             </div>
                           </div>

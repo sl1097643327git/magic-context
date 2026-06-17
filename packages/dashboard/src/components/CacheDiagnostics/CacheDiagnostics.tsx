@@ -6,8 +6,10 @@ import {
   listSessions,
   truncate,
 } from "../../lib/api";
+import { severityColorClass } from "../../lib/cache-format";
 import type { DbCacheEvent, Harness, SessionCacheStats, SessionRow } from "../../lib/types";
 import HarnessBadge from "../HarnessBadge";
+import CacheTimeline from "../shared/CacheTimeline";
 import FilterSelect from "../shared/FilterSelect";
 
 type HarnessFilter = "all" | Harness;
@@ -51,6 +53,28 @@ export default function CacheDiagnostics() {
   // Cap the timeline to the most-recent N steps so long sessions (1000+ steps)
   // don't render an unreadable wall of hairline bars. Selectable 200/400/600.
   const [timelineLimit, setTimelineLimit] = createSignal(200);
+  // The step message_id selected by clicking a timeline bar — used to outline
+  // the bar and briefly highlight the matching list row after scrolling to it.
+  const [selectedStepId, setSelectedStepId] = createSignal<string | null>(null);
+
+  // Click a timeline bar → expand its turn (if multi-step) and scroll the
+  // matching list row into view. Expansion mutates the DOM, so scroll on the
+  // next frame once the step row has rendered.
+  const focusStepInList = (event: DbCacheEvent) => {
+    setSelectedStepId(event.message_id);
+    setExpandedTurns((prev) => {
+      const next = new Set(prev);
+      next.add(event.turn_id);
+      return next;
+    });
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const stepEl = document.getElementById(`cache-step-${event.message_id}`);
+        const target = stepEl ?? document.getElementById(`cache-turn-${event.turn_id}`);
+        target?.scrollIntoView({ behavior: "smooth", block: "center" });
+      });
+    });
+  };
 
   interface CacheTurn {
     turnId: string;
@@ -343,14 +367,17 @@ export default function CacheDiagnostics() {
   };
 
   // Ordering used for worst-severity promotion across multi-step turns.
-  // Higher rank wins — full_bust > bust > warming > warning > info > stable > unknown.
+  // Higher rank wins — full_bust > bust > warning > stable > info > unknown.
+  // "unknown" (provider reports no cache accounting) ranks below stable so a
+  // mixed turn never surfaces as unknown when any step was actually classified.
   const SEVERITY_RANK: Record<string, number> = {
     full_bust: 6,
     bust: 5,
     warming: 4,
     warning: 3,
-    info: 2,
-    stable: 1,
+    stable: 2,
+    info: 1,
+    unknown: 0,
   };
   const severityRank = (severity: string): number => SEVERITY_RANK[severity] ?? 0;
 
@@ -435,17 +462,26 @@ export default function CacheDiagnostics() {
         return "🔴";
       case "full_bust":
         return "⚫";
+      case "unknown":
+        return "⚪";
       default:
         return "⚪";
     }
   };
 
-  const severityBarClass = (ratio: number) => {
-    if (ratio >= 0.9) return "green";
-    if (ratio >= 0.5) return "amber";
-    return "red";
+  // Map a severity string to a bar/pill color class. Severity is the source of
+  // truth — list pills + bar-fills use the shared severityColorClass.
+
+  // Bar-fill WIDTH for the turn/step list rows scales with retention (hit_ratio
+  // now carries the cross-step retention), clamped to [0,1].
+  const barFraction = (event: { severity: string; hit_ratio: number }): number => {
+    if (event.severity === "unknown" || event.severity === "info") return 1;
+    return Math.min(1, Math.max(0, event.hit_ratio));
   };
 
+  // For the SESSION-aggregate strip only: stat.hit_ratio is an overall
+  // read/total efficiency number (not a per-step health classification), so a
+  // simple threshold color is appropriate there.
   const hitColor = (ratio: number) =>
     ratio >= 0.9 ? "var(--green)" : ratio >= 0.5 ? "var(--amber)" : "var(--red)";
 
@@ -638,27 +674,11 @@ export default function CacheDiagnostics() {
                 </select>
               </div>
             </div>
-            {/* Per-STEP bars (one bar per API round-trip), not per-turn. Turn
-                aggregation hid mid-turn busts inside a turn's final-step hit
-                ratio — a bust step in an otherwise-cached turn became visually
-                invisible. One bar per step surfaces every bust directly. The
-                expandable turn rows below still group steps for readability. */}
-            <div class="chart-bars">
-              <For each={timelineEvents()}>
-                {(event) => {
-                  const totalPrompt = event.cache_read + event.cache_write + event.input_tokens;
-                  const hitRatio =
-                    totalPrompt > 0 ? event.cache_read / totalPrompt : event.hit_ratio;
-                  return (
-                    <div
-                      class={`chart-bar ${hitRatio === 0 ? "black" : severityBarClass(hitRatio)}`}
-                      style={{ height: `${Math.max(3, hitRatio * 100)}%` }}
-                      title={`${formatDateTime(event.timestamp)}\nHit: ${(hitRatio * 100).toFixed(1)}%\nPrompt: ${totalPrompt.toLocaleString()}\nCached: ${event.cache_read.toLocaleString()}\nNew: ${event.cache_write.toLocaleString()}\nUncached: ${event.input_tokens.toLocaleString()}${event.cause ? `\nCause: ${event.cause}` : ""}`}
-                    />
-                  );
-                }}
-              </For>
-            </div>
+            <CacheTimeline
+              events={timelineEvents()}
+              selectedStepId={selectedStepId()}
+              onBarClick={focusStepInList}
+            />
           </div>
         </Show>
       </div>
@@ -689,8 +709,9 @@ export default function CacheDiagnostics() {
                   const last = turn.events[turn.events.length - 1];
                   const isExpanded = () => expandedTurns().has(turn.turnId);
                   const totalPrompt = last.cache_read + last.cache_write + last.input_tokens;
-                  const turnHitRatio =
-                    totalPrompt > 0 ? last.cache_read / totalPrompt : last.hit_ratio;
+                  // Retention of the turn's final (shipped) step — hit_ratio now
+                  // carries the cross-step retention computed in the backend.
+                  const turnRetention = last.hit_ratio;
                   const isMultiStep = turn.events.length > 1;
                   // Only multi-step turns are expandable. Interactive rows get a real
                   // button role + keyboard activation; single-step rows are purely
@@ -710,6 +731,7 @@ export default function CacheDiagnostics() {
                     : {};
                   return (
                     <div
+                      id={`cache-turn-${turn.turnId}`}
                       class="card cache-turn-row"
                       {...interactiveProps}
                       style={{ cursor: isMultiStep ? "pointer" : "default" }}
@@ -740,24 +762,16 @@ export default function CacheDiagnostics() {
                           {formatDateTime(turn.startTime)}
                         </span>
                         <span
-                          class={`pill ${
-                            turn.worstSeverity === "stable"
-                              ? "green"
-                              : turn.worstSeverity === "info"
-                                ? "blue"
-                                : turn.worstSeverity === "warning"
-                                  ? "amber"
-                                  : turn.worstSeverity === "warming"
-                                    ? "gray"
-                                    : "red"
-                          }`}
+                          class={`pill ${severityColorClass(turn.worstSeverity)}`}
                           style={{ "flex-shrink": "0" }}
                         >
                           {turn.worstSeverity === "full_bust"
                             ? "FULL BUST"
                             : turn.worstSeverity === "info"
                               ? "NEW SESSION"
-                              : turn.worstSeverity.toUpperCase()}
+                              : turn.worstSeverity === "unknown"
+                                ? "NO CACHE DATA"
+                                : turn.worstSeverity.toUpperCase()}
                         </span>
                         <Show when={isMultiStep}>
                           <span class="pill gray" style={{ "flex-shrink": "0" }}>
@@ -781,19 +795,34 @@ export default function CacheDiagnostics() {
                         </span>
                       </div>
                       <div class="card-meta" style={{ gap: "12px" }}>
-                        <span
-                          class="mono"
-                          style={{ color: hitColor(turnHitRatio), "font-weight": "600" }}
+                        <Show
+                          when={turn.worstSeverity !== "unknown"}
+                          fallback={
+                            <span class="mono" style={{ color: "var(--text-muted)" }}>
+                              no cache data
+                            </span>
+                          }
                         >
-                          {(turnHitRatio * 100).toFixed(1)}%
-                        </span>
+                          <span
+                            class="mono"
+                            style={{
+                              color: `var(--${severityColorClass(turn.worstSeverity)})`,
+                              "font-weight": "600",
+                            }}
+                            title="Cache retention vs the previous step's expected prefix"
+                          >
+                            {(turnRetention * 100).toFixed(1)}%
+                          </span>
+                        </Show>
                         <span class="mono">prompt={totalPrompt.toLocaleString()}</span>
                         <span class="mono">cached={last.cache_read.toLocaleString()}</span>
                         <span class="mono">new={turn.totalCacheWrite.toLocaleString()}</span>
                         <div class="cache-bar">
                           <div
-                            class={`cache-bar-fill ${severityBarClass(turnHitRatio)}`}
-                            style={{ width: `${turnHitRatio * 100}%` }}
+                            class={`cache-bar-fill ${severityColorClass(turn.worstSeverity)}`}
+                            style={{
+                              width: `${barFraction({ severity: turn.worstSeverity, hit_ratio: turnRetention }) * 100}%`,
+                            }}
                           />
                         </div>
                       </div>
@@ -818,7 +847,10 @@ export default function CacheDiagnostics() {
                               const evTotalPrompt =
                                 event.cache_read + event.cache_write + event.input_tokens;
                               return (
-                                <div class="cache-step-row">
+                                <div
+                                  id={`cache-step-${event.message_id}`}
+                                  class={`cache-step-row ${selectedStepId() === event.message_id ? "selected" : ""}`}
+                                >
                                   <div class="cache-step-header">
                                     <span style={{ "flex-shrink": "0" }}>
                                       {severityIcon(event.severity)}
@@ -834,36 +866,38 @@ export default function CacheDiagnostics() {
                                       {formatDateTime(event.timestamp)}
                                     </span>
                                     <span
-                                      class={`pill ${
-                                        event.severity === "stable"
-                                          ? "green"
-                                          : event.severity === "info"
-                                            ? "blue"
-                                            : event.severity === "warning"
-                                              ? "amber"
-                                              : event.severity === "warming"
-                                                ? "gray"
-                                                : "red"
-                                      }`}
+                                      class={`pill ${severityColorClass(event.severity)}`}
                                       style={{ "flex-shrink": "0" }}
                                     >
                                       {event.severity === "full_bust"
                                         ? "FULL BUST"
                                         : event.severity === "info"
                                           ? "NEW SESSION"
-                                          : event.severity.toUpperCase()}
+                                          : event.severity === "unknown"
+                                            ? "NO CACHE DATA"
+                                            : event.severity.toUpperCase()}
                                     </span>
                                   </div>
                                   <div class="cache-step-meta">
-                                    <span
-                                      class="mono"
-                                      style={{
-                                        color: hitColor(event.hit_ratio),
-                                        "font-weight": "600",
-                                      }}
+                                    <Show
+                                      when={event.severity !== "unknown"}
+                                      fallback={
+                                        <span class="mono" style={{ color: "var(--text-muted)" }}>
+                                          no cache data
+                                        </span>
+                                      }
                                     >
-                                      {(event.hit_ratio * 100).toFixed(1)}%
-                                    </span>
+                                      <span
+                                        class="mono"
+                                        style={{
+                                          color: `var(--${severityColorClass(event.severity)})`,
+                                          "font-weight": "600",
+                                        }}
+                                        title="Cache retention vs the previous step's expected prefix"
+                                      >
+                                        {(event.hit_ratio * 100).toFixed(1)}%
+                                      </span>
+                                    </Show>
                                     <span class="mono">
                                       prompt={evTotalPrompt.toLocaleString()}
                                     </span>
@@ -875,8 +909,8 @@ export default function CacheDiagnostics() {
                                     </span>
                                     <div class="cache-bar">
                                       <div
-                                        class={`cache-bar-fill ${severityBarClass(event.hit_ratio)}`}
-                                        style={{ width: `${event.hit_ratio * 100}%` }}
+                                        class={`cache-bar-fill ${severityColorClass(event.severity)}`}
+                                        style={{ width: `${barFraction(event) * 100}%` }}
                                       />
                                     </div>
                                   </div>

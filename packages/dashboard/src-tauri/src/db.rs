@@ -479,6 +479,15 @@ pub struct DbCacheEvent {
     pub finish: Option<String>,
     pub turn_id: String,
     pub is_turn_start: bool,
+    // The model's context window for this session (tokens), so the timeline can
+    // scale each bar as prompt/context_limit. Resolved from the plugin's
+    // last_usage_context_limit; falls back to the session's own max prompt
+    // (auto-scale) when the plugin never recorded a limit for the session.
+    pub context_limit: i64,
+    // True when the prompt shrank meaningfully vs the previous step — i.e. Magic
+    // Context reclaimed context (execute-pass drops, comparting). The `cause`
+    // field carries the reason pulled from the plugin logs for these steps.
+    pub is_drop: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -692,64 +701,67 @@ fn parse_log_timestamp_millis(timestamp: &str) -> Option<i64> {
         .ok()
 }
 
-fn detect_log_cache_cause(
-    entries: &[crate::log_parser::LogEntry],
-    event_idx: usize,
-) -> Option<String> {
-    let event = &entries[event_idx];
-    let window_start = event_idx.saturating_sub(10);
-    let window_end = std::cmp::min(event_idx + 4, entries.len());
-    let mut causes = Vec::new();
-
-    for entry in &entries[window_start..window_end] {
-        if entry.session_id != event.session_id {
-            continue;
-        }
-
-        let msg = &entry.message;
-        if msg.contains("Execute pass") || (msg.contains("applied") && msg.contains("ops")) {
-            causes.push("Execute pass".to_string());
-        }
-        if msg.contains("compartments") && msg.contains("→") {
-            causes.push("Historian output".to_string());
-        }
-        if msg.contains("variant change") || msg.contains("Variant change") {
-            causes.push("Variant change".to_string());
-        }
-        if msg.contains("system prompt hash") {
-            causes.push("System prompt hash change".to_string());
-        }
-        if msg.contains("heuristic cleanup") || msg.contains("tool tags dropped") {
-            causes.push("Heuristic cleanup".to_string());
-        }
+/// Classify a single plugin-log line into a human cause, matching the CURRENT
+/// log format. The reason-bearing lines carry no cache tokens, so candidates are
+/// built from these directly (not from token-carrying lines):
+///   - "transform scheduler: ... decision=execute" → an execute pass (tool reclaim)
+///   - "injected m[0]/m[1] (rematerialized=true, reason=X)" → a hard m[0] fold
+///   - "compartmentInProgress flag set, starting agent"     → historian comparting
+fn cause_from_log_message(msg: &str) -> Option<String> {
+    if msg.contains("decision=execute") {
+        return Some("Execute pass (reclaimed tool output)".to_string());
     }
-
-    causes.dedup();
-    if causes.is_empty() {
-        None
-    } else {
-        Some(causes.join(", "))
+    if msg.contains("compartmentInProgress flag set") {
+        return Some("Comparting history".to_string());
     }
+    if msg.contains("rematerialized=true") {
+        // Pull reason=<token> and map to a friendly label.
+        let reason = msg
+            .split("reason=")
+            .nth(1)
+            .map(|rest| {
+                rest.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .next()
+                    .unwrap_or("")
+            })
+            .unwrap_or("");
+        let label = match reason {
+            "first_render" => "First render",
+            "ttl_idle" => "Idle cache refresh",
+            "system_hash" => "System prompt change",
+            "model_key" => "Model change",
+            "project_memory_epoch" => "Memory change",
+            "max_mutation_id" => "History edit",
+            "explicit_flush" => "Manual flush",
+            "cached_m1_missing" | "pressure" => "Compaction pressure",
+            "cache_hit" => return None,
+            _ => "History rematerialized",
+        };
+        return Some(label.to_string());
+    }
+    None
 }
 
 fn build_log_cause_candidates() -> Vec<LogCauseCandidate> {
-    let log_path = crate::log_parser::resolve_log_path();
-    let entries = crate::log_parser::read_log_tail(&log_path, 5000);
+    // Read both harness logs, keeping ONLY cause-bearing lines. A fixed line-count
+    // tail covers far too little wall-time of these very large, very verbose logs
+    // (cause lines are ~1-per-1000), so timeline drops that are hours old never
+    // correlate. Scan the whole file for the sparse cause lines instead.
+    let mut entries = crate::log_parser::read_log_cause_lines(
+        &crate::log_parser::resolve_log_path_for(crate::log_parser::Harness::Opencode),
+    );
+    entries.extend(crate::log_parser::read_log_cause_lines(
+        &crate::log_parser::resolve_log_path_for(crate::log_parser::Harness::Pi),
+    ));
 
     entries
         .iter()
-        .enumerate()
-        .filter_map(|(idx, entry)| {
-            if entry.session_id.is_empty()
-                || entry.cache_read.is_none()
-                || entry.cache_write.is_none()
-            {
+        .filter_map(|entry| {
+            if entry.session_id.is_empty() {
                 return None;
             }
-
             let timestamp = parse_log_timestamp_millis(&entry.timestamp)?;
-            let cause = detect_log_cache_cause(&entries, idx)?;
-
+            let cause = cause_from_log_message(&entry.message)?;
             Some(LogCauseCandidate {
                 session_id: entry.session_id.clone(),
                 timestamp,
@@ -764,12 +776,22 @@ fn match_log_cause(
     session_id: &str,
     timestamp: i64,
 ) -> Option<String> {
+    // The cause log line is written when the transform runs (start of the
+    // request), while the cache event's timestamp is the assistant message's
+    // creation time (end of the request) — so the cause PRECEDES the event by
+    // the generation latency, which can be tens of seconds on long turns.
+    // Execute passes / folds are sparse, so a wide nearest-wins window that
+    // favors causes at-or-before the event is reliable.
+    const MATCH_WINDOW_MS: i64 = 120_000;
     let mut matches: Vec<(i64, &str)> = candidates
         .iter()
         .filter(|candidate| candidate.session_id == session_id)
         .filter_map(|candidate| {
-            let distance = (candidate.timestamp - timestamp).abs();
-            if distance <= 5_000 {
+            let signed = timestamp - candidate.timestamp; // >0 when cause precedes event
+            let distance = signed.abs();
+            // Allow the full window before the event, but only a small slack
+            // after it (clock jitter) since the cause should precede the event.
+            if signed >= -5_000 && distance <= MATCH_WINDOW_MS {
                 Some((distance, candidate.cause.as_str()))
             } else {
                 None
@@ -948,6 +970,56 @@ fn load_raw_pi_cache_events(limit: usize, since_timestamp: Option<i64>) -> Vec<R
     all_rows
 }
 
+/// Minimum prompt shrink (tokens) between consecutive steps to count as a
+/// Magic-Context-initiated drop (vs token-accounting noise). MC reclaims are
+/// large (tens of thousands+); this stays well above per-step jitter.
+const DROP_MARKER_MIN_TOKENS: i64 = 15_000;
+
+/// Resolve each session's model context window (tokens) from the plugin's
+/// context.db `session_meta.last_usage_context_limit`. Read-only and
+/// best-effort: a missing DB / column just yields an empty map, and the caller
+/// auto-scales those sessions to their own max prompt instead.
+fn resolve_session_context_limits(
+    keys: &HashSet<(Harness, String)>,
+) -> HashMap<(Harness, String), i64> {
+    let mut out: HashMap<(Harness, String), i64> = HashMap::new();
+    if keys.is_empty() {
+        return out;
+    }
+    let Some(db_path) = resolve_db_path() else {
+        return out;
+    };
+    let Ok(conn) = open_readonly(&db_path) else {
+        return out;
+    };
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT session_id, harness, COALESCE(last_usage_context_limit, 0)
+         FROM session_meta
+         WHERE COALESCE(last_usage_context_limit, 0) > 0",
+    ) else {
+        return out;
+    };
+    let rows = stmt.query_map([], |row| {
+        let sid: String = row.get(0)?;
+        let harness_str: String = row.get(1)?;
+        let limit: i64 = row.get(2)?;
+        Ok((sid, harness_str, limit))
+    });
+    if let Ok(rows) = rows {
+        for r in rows.flatten() {
+            let harness = match r.1.as_str() {
+                "pi" => Harness::Pi,
+                _ => Harness::Opencode,
+            };
+            let key = (harness, r.0);
+            if keys.contains(&key) {
+                out.insert(key, r.2);
+            }
+        }
+    }
+    out
+}
+
 fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec<DbCacheEvent> {
     let log_cause_candidates = if enrich_causes {
         build_log_cause_candidates()
@@ -1081,48 +1153,25 @@ fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec
         .chain(pi_true_first)
         .collect();
 
-    let mut seen_sessions: HashSet<(Harness, String)> = HashSet::new();
+    // ── Pass 1: build chronological events (severity assigned in pass 2) ──
+    // Cache health is classified by COMPARING each step against the PREVIOUS
+    // step's accounting, not by a single-row ratio. A single-row ratio
+    // (cache_read / total_prompt) conflates new uncached input — a big tool
+    // result or a 30k file read — with cache loss: a perfectly healthy step
+    // that merely added uncached input would wrongly read as WARNING. The
+    // cross-step retention metric in pass 2 is immune to that and works across
+    // providers without per-provider casing.
     let mut chronological = Vec::with_capacity(rows.len());
-
     for row in rows.into_iter().rev() {
+        // hit_ratio is overwritten with the cross-step retention in pass 2 for
+        // classified rows; for unclassifiable rows it stays this single-row
+        // value (best available with no baseline).
         let total_prompt = row.input_tokens + row.cache_read + row.cache_write;
         let hit_ratio = if total_prompt > 0 {
             row.cache_read as f64 / total_prompt as f64
         } else {
             0.0
         };
-
-        let session_key = (row.harness, row.session_id.clone());
-        let is_first_session_event = seen_sessions.insert(session_key.clone());
-        let is_truly_first = is_first_session_event && true_first_sessions.contains(&session_key);
-        let (severity, cause) = if is_truly_first {
-            (
-                "info".to_string(),
-                Some("First message (new session)".to_string()),
-            )
-        } else if row.cache_read == 0 && row.cache_write > 0 {
-            (
-                "full_bust".to_string(),
-                match_log_cause(&log_cause_candidates, &row.session_id, row.timestamp),
-            )
-        } else if hit_ratio < 0.5 {
-            (
-                "bust".to_string(),
-                match_log_cause(&log_cause_candidates, &row.session_id, row.timestamp),
-            )
-        } else if hit_ratio < 0.9 {
-            (
-                "warning".to_string(),
-                if enrich_causes {
-                    match_log_cause(&log_cause_candidates, &row.session_id, row.timestamp)
-                } else {
-                    None
-                },
-            )
-        } else {
-            ("stable".to_string(), None)
-        };
-
         chronological.push(DbCacheEvent {
             harness: row.harness,
             message_id: row.message_id,
@@ -1133,28 +1182,47 @@ fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec
             cache_write: row.cache_write,
             total_tokens: row.total_tokens,
             hit_ratio,
-            severity,
-            cause,
+            severity: String::new(),
+            cause: None,
             agent: row.agent,
             finish: row.finish,
             turn_id: String::new(),
             is_turn_start: false,
+            context_limit: 0, // filled in after sessions are known
+            is_drop: false,   // computed in pass 2
         });
     }
 
-    // ── Turn grouping & warming severity ────────────────────────────
-    // Walk chronological events per session. A new turn starts when:
-    //   - this is the first event for the session, OR
-    //   - the PREVIOUS event in the same session had finish != "tool-calls"
-    // Continuation events that show cache_read < 90% of expected
-    // (previous.cache_read + previous.cache_write) are downgraded to "warming".
-    //
-    // Inputs to this function may arrive in any order; the severity-loop above
-    // happens to consume rows newest→oldest via .rev(), producing a vec that
-    // is NOT guaranteed chronological. Sort ascending by timestamp here so
-    // "previous" really means "earlier in time" before computing turn IDs.
+    // Inputs may arrive in any order; sort ascending so "previous" really means
+    // "earlier in time" before computing turn IDs and cross-step retention.
     chronological.sort_by_key(|e| e.timestamp);
 
+    // A session where NO row reports a positive cache_read doesn't expose cache
+    // accounting at all (e.g. ollama-cloud reports cache_read=0 everywhere). We
+    // can't judge its cache health, so every row is UNKNOWN, never a false bust.
+    let mut session_has_cache: HashMap<(Harness, String), bool> = HashMap::new();
+    for e in &chronological {
+        let entry = session_has_cache
+            .entry((e.harness, e.session_id.clone()))
+            .or_insert(false);
+        if e.cache_read > 0 {
+            *entry = true;
+        }
+    }
+
+    // ── Pass 2: turn grouping + cross-step retention severity ──
+    // Expected next cache_read = prev.cache_read + growth, where growth is the
+    // freshly-cacheable content the previous step contributed:
+    //   - Anthropic reports it directly as cache_write (cache_creation tokens).
+    //   - Other providers never report cache_write (always 0), so the previous
+    //     step's own input + output is what becomes cached on the next step.
+    //   growth = prev.cache_write > 0 ? prev.cache_write : prev.input + prev.output
+    // retention = current.cache_read / expected (only when prev had a cache):
+    //   >= 0.95 stable · 0.80..0.95 warning · < 0.80 bust · ==0 full_bust
+    // (Verified empirically: on a stable step retention is 0.97-1.00+ across
+    // anthropic/openai/etc.; real busts land < 0.4. Recovery steps grow exactly
+    // as predicted, so they classify stable with no separate "warming" state.)
+    let mut seen_sessions: HashSet<(Harness, String)> = HashSet::new();
     let mut last_finish_by_session: HashMap<(Harness, String), String> = HashMap::new();
     let mut current_turn_id_by_session: HashMap<(Harness, String), String> = HashMap::new();
     let mut prev_event_idx_by_session: HashMap<(Harness, String), usize> = HashMap::new();
@@ -1164,13 +1232,15 @@ fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec
             chronological[i].harness,
             chronological[i].session_id.clone(),
         );
+
+        // Turn grouping: a new turn starts at the session's first event or when
+        // the previous event's finish != "tool-calls".
         let prev_finish = last_finish_by_session.get(&session_key).cloned();
         let is_new_turn = match prev_finish.as_deref() {
             None => true,
             Some("tool-calls") => false,
             Some(_) => true,
         };
-
         chronological[i].is_turn_start = is_new_turn;
         if is_new_turn {
             chronological[i].turn_id = chronological[i].message_id.clone();
@@ -1183,19 +1253,114 @@ fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec
                 .unwrap_or_default();
         }
 
-        // Warming check for continuation events
-        if !is_new_turn {
-            if let Some(&prev_idx) = prev_event_idx_by_session.get(&session_key) {
+        // Severity.
+        let is_first_in_window = seen_sessions.insert(session_key.clone());
+        let no_cache_session = !session_has_cache.get(&session_key).copied().unwrap_or(false);
+        let cur_read = chronological[i].cache_read;
+        let cur_session = chronological[i].session_id.clone();
+        let cur_ts = chronological[i].timestamp;
+
+        let (severity, cause, retention): (String, Option<String>, Option<f64>) = if no_cache_session
+        {
+            ("unknown".to_string(), None, None)
+        } else if is_first_in_window {
+            if true_first_sessions.contains(&session_key) {
+                (
+                    "info".to_string(),
+                    Some("First message (new session)".to_string()),
+                    None,
+                )
+            } else {
+                // No previous step in the loaded window → no baseline to compare
+                // against. Default benign rather than risk a false bust on the
+                // single edge row at the top of the window.
+                ("stable".to_string(), None, None)
+            }
+        } else if let Some(&prev_idx) = prev_event_idx_by_session.get(&session_key) {
+            // Snapshot prev values out before mutating chronological[i].
+            let (prev_read, prev_write, prev_input, prev_total) = {
                 let prev = &chronological[prev_idx];
-                let expected = prev.cache_read + prev.cache_write;
-                if expected > 0
-                    && chronological[i].cache_read < (expected as f64 * 0.9) as i64
-                    && (chronological[i].severity == "warning"
-                        || chronological[i].severity == "bust")
-                {
-                    chronological[i].severity = "warming".to_string();
+                (
+                    prev.cache_read,
+                    prev.cache_write,
+                    prev.input_tokens,
+                    prev.total_tokens,
+                )
+            };
+            if prev_read == 0 {
+                // No cache was established on the prior step (cold / still
+                // warming up), so a low/zero cache_read now isn't a LOSS.
+                ("stable".to_string(), None, None)
+            } else {
+                let prev_output =
+                    (prev_total - prev_input - prev_read - prev_write).max(0);
+                let growth = if prev_write > 0 {
+                    prev_write
+                } else {
+                    prev_input + prev_output
+                };
+                let expected = prev_read + growth; // > 0 since prev_read > 0
+                if cur_read == 0 {
+                    (
+                        "full_bust".to_string(),
+                        match_log_cause(&log_cause_candidates, &cur_session, cur_ts),
+                        Some(0.0),
+                    )
+                } else {
+                    let ret = cur_read as f64 / expected as f64;
+                    if ret >= 0.95 {
+                        ("stable".to_string(), None, Some(ret))
+                    } else if ret >= 0.80 {
+                        (
+                            "warning".to_string(),
+                            if enrich_causes {
+                                match_log_cause(&log_cause_candidates, &cur_session, cur_ts)
+                            } else {
+                                None
+                            },
+                            Some(ret),
+                        )
+                    } else {
+                        (
+                            "bust".to_string(),
+                            match_log_cause(&log_cause_candidates, &cur_session, cur_ts),
+                            Some(ret),
+                        )
+                    }
                 }
             }
+        } else {
+            ("stable".to_string(), None, None)
+        };
+
+        // Drop detection: a meaningful prompt shrink vs the previous step means
+        // MC reclaimed context this step. Mark it and (if not already) attach the
+        // log cause so the timeline can show a marker explaining WHY it dropped.
+        let mut is_drop = false;
+        let mut cause = cause;
+        if let Some(&prev_idx) = prev_event_idx_by_session.get(&session_key) {
+            let prev_prompt = {
+                let prev = &chronological[prev_idx];
+                prev.input_tokens + prev.cache_read + prev.cache_write
+            };
+            let cur_prompt =
+                chronological[i].input_tokens + chronological[i].cache_read + chronological[i].cache_write;
+            if prev_prompt - cur_prompt >= DROP_MARKER_MIN_TOKENS {
+                is_drop = true;
+                if cause.is_none() && enrich_causes {
+                    cause = match_log_cause(&log_cause_candidates, &cur_session, cur_ts);
+                }
+            }
+        }
+
+        chronological[i].severity = severity;
+        chronological[i].cause = cause;
+        chronological[i].is_drop = is_drop;
+        if let Some(ret) = retention {
+            // Display the cross-step RETENTION (cache held vs expected), not the
+            // single-row prompt-composition ratio, so bars/percentages reflect
+            // actual cache health.
+            chronological[i].hit_ratio = ret;
         }
 
         prev_event_idx_by_session.insert(session_key.clone(), i);
@@ -1203,6 +1368,35 @@ fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec
             session_key,
             chronological[i].finish.clone().unwrap_or_default(),
         );
+    }
+
+    // ── Context-window scale: attach each session's context limit ──
+    // Prefer the plugin's recorded limit; fall back to the session's own max
+    // prompt so the timeline still shows the sawtooth shape (it just loses the
+    // absolute "% of window" meaning for sessions the plugin never sized).
+    let session_keys: HashSet<(Harness, String)> = chronological
+        .iter()
+        .map(|e| (e.harness, e.session_id.clone()))
+        .collect();
+    let recorded_limits = resolve_session_context_limits(&session_keys);
+    let mut max_prompt_by_session: HashMap<(Harness, String), i64> = HashMap::new();
+    for e in &chronological {
+        let prompt = e.input_tokens + e.cache_read + e.cache_write;
+        let entry = max_prompt_by_session
+            .entry((e.harness, e.session_id.clone()))
+            .or_insert(0);
+        if prompt > *entry {
+            *entry = prompt;
+        }
+    }
+    for e in &mut chronological {
+        let key = (e.harness, e.session_id.clone());
+        e.context_limit = recorded_limits
+            .get(&key)
+            .copied()
+            .filter(|&l| l > 0)
+            .or_else(|| max_prompt_by_session.get(&key).copied().filter(|&m| m > 0))
+            .unwrap_or(0);
     }
 
     chronological
@@ -4846,12 +5040,11 @@ mod cache_turn_tests {
     }
 
     #[test]
-    fn warming_downgrades_continuation_with_degraded_cache() {
-        // First event: cache_read=120, cache_write=20 → expected next prefix ~140.
-        //   total_prompt = input(10)+read(120)+write(20)=150; hit_ratio=0.80 → "warning".
-        //   But this is a TURN START so warming downgrade does not apply.
-        //   We accept "warning" here — the point of THIS test is the second event.
-        // Second event: cache_read=50 (< 0.9 * 140 = 126) and hit_ratio < 0.5 → bust → warming
+    fn cache_read_drop_classifies_as_bust() {
+        // m1: read=120, write=20 → expected next prefix = 120 + 20 = 140.
+        // m2: read=50 → retention = 50/140 = 0.357 < 0.80 → bust (the cached
+        //     prefix shrank). Previously this was masked as "warming"; a real
+        //     prefix loss should read as a bust.
         let rows = vec![
             raw(
                 Harness::Opencode,
@@ -4877,16 +5070,13 @@ mod cache_turn_tests {
             ),
         ];
         let events = build_db_cache_events(rows, false);
-        // events[0] is the turn-start; severity stays whatever the absolute hit_ratio classifies it as.
-        // events[1] is the continuation with degraded cache_read → downgraded from bust/warning to warming.
-        assert_eq!(events[1].severity, "warming");
+        assert_eq!(events[1].severity, "bust");
     }
 
     #[test]
-    fn warming_does_not_downgrade_stable() {
-        // Continuation with good cache_read stays stable.
-        // m1: total_prompt=10+135+5=150, hit_ratio=0.90 → "stable".
-        // m2: cache_read=140 ≥ 0.9*(135+5)=126, total_prompt=10+140+5=155, hit_ratio≈0.903 → "stable".
+    fn cache_read_grows_as_expected_stays_stable() {
+        // m1: read=135, write=5 → expected next prefix = 140.
+        // m2: read=140 → retention = 1.0 → stable.
         let rows = vec![
             raw(
                 Harness::Opencode,
@@ -4912,7 +5102,227 @@ mod cache_turn_tests {
             ),
         ];
         let events = build_db_cache_events(rows, false);
+        // First-in-window with no baseline defaults benign.
         assert_eq!(events[0].severity, "stable");
+        assert_eq!(events[1].severity, "stable");
+    }
+
+    #[test]
+    fn big_input_does_not_false_warn() {
+        // The core fix: a step that merely ADDS a large uncached input (a 30k
+        // file read / tool result) is NOT a cache bust. m1 establishes a 200k
+        // prefix; m2 reads a 30k file (input jumps) but the cached prefix holds.
+        // Old single-row ratio: 201000/(30000+201000+1000)=0.866 → WARNING.
+        // New cross-step retention: 201000/(200000+1000)=1.0 → STABLE.
+        let rows = vec![
+            raw(
+                Harness::Opencode,
+                "m1",
+                "s1",
+                100,
+                2,
+                200_000,
+                1_000,
+                201_102,
+                Some("tool-calls"),
+            ),
+            raw(
+                Harness::Opencode,
+                "m2",
+                "s1",
+                200,
+                30_000,
+                201_000,
+                1_000,
+                232_200,
+                Some("tool-calls"),
+            ),
+        ];
+        let events = build_db_cache_events(rows, false);
+        assert_eq!(events[1].severity, "stable");
+    }
+
+    #[test]
+    fn cache_read_to_zero_is_full_bust() {
+        // m1 established a prefix; m2 reads nothing from cache → full_bust.
+        let rows = vec![
+            raw(
+                Harness::Opencode,
+                "m1",
+                "s1",
+                100,
+                2,
+                200_000,
+                1_000,
+                201_102,
+                Some("tool-calls"),
+            ),
+            raw(
+                Harness::Opencode,
+                "m2",
+                "s1",
+                200,
+                205_000,
+                0,
+                0,
+                205_500,
+                Some("stop"),
+            ),
+        ];
+        let events = build_db_cache_events(rows, false);
+        assert_eq!(events[1].severity, "full_bust");
+    }
+
+    #[test]
+    fn cause_mapping_matches_current_log_format() {
+        // Execute pass (the common drop cause).
+        assert_eq!(
+            cause_from_log_message(
+                "transform scheduler: percentage=66.0% inputTokens=600000 decision=execute"
+            )
+            .as_deref(),
+            Some("Execute pass (reclaimed tool output)")
+        );
+        // Hard fold reasons.
+        assert_eq!(
+            cause_from_log_message(
+                "transform: injected m[0]/m[1] (rematerialized=true, reason=system_hash)"
+            )
+            .as_deref(),
+            Some("System prompt change")
+        );
+        assert_eq!(
+            cause_from_log_message(
+                "transform: injected m[0]/m[1] (rematerialized=true, reason=ttl_idle)"
+            )
+            .as_deref(),
+            Some("Idle cache refresh")
+        );
+        // Comparting.
+        assert_eq!(
+            cause_from_log_message("transform: compartmentInProgress flag set, starting agent")
+                .as_deref(),
+            Some("Comparting history")
+        );
+        // Routine cache-hit injects and unrelated lines yield no cause.
+        assert_eq!(
+            cause_from_log_message(
+                "transform: injected m[0]/m[1] (rematerialized=false, reason=cache_hit)"
+            ),
+            None
+        );
+        assert_eq!(cause_from_log_message("transform stage: stage=tagMessages"), None);
+    }
+
+    #[test]
+    fn prompt_shrink_marks_drop() {
+        // m1: large prompt (~250k). m2: prompt drops by >15k → MC reclaim → is_drop.
+        // m3: prompt grows again → not a drop.
+        let rows = vec![
+            raw(
+                Harness::Opencode,
+                "m1",
+                "s1",
+                100,
+                2,
+                250_000,
+                1_000,
+                251_500,
+                Some("tool-calls"),
+            ),
+            raw(
+                Harness::Opencode,
+                "m2",
+                "s1",
+                200,
+                2,
+                150_000,
+                500,
+                151_000,
+                Some("tool-calls"),
+            ),
+            raw(
+                Harness::Opencode,
+                "m3",
+                "s1",
+                300,
+                2,
+                151_000,
+                400,
+                152_000,
+                Some("stop"),
+            ),
+        ];
+        let events = build_db_cache_events(rows, false);
+        assert!(!events[0].is_drop, "first step has no previous to drop from");
+        assert!(events[1].is_drop, "prompt shrank ~100k → drop");
+        assert!(!events[2].is_drop, "prompt grew → not a drop");
+    }
+
+    #[test]
+    fn session_with_no_cache_reporting_is_unknown() {
+        // A provider that never reports cache_read (e.g. ollama-cloud) must not
+        // be classified as a string of busts — every row is UNKNOWN.
+        let rows = vec![
+            raw(
+                Harness::Opencode,
+                "m1",
+                "s1",
+                100,
+                60_000,
+                0,
+                0,
+                60_500,
+                Some("tool-calls"),
+            ),
+            raw(
+                Harness::Opencode,
+                "m2",
+                "s1",
+                200,
+                80_000,
+                0,
+                0,
+                80_500,
+                Some("stop"),
+            ),
+        ];
+        let events = build_db_cache_events(rows, false);
+        assert_eq!(events[0].severity, "unknown");
+        assert_eq!(events[1].severity, "unknown");
+    }
+
+    #[test]
+    fn non_anthropic_growth_uses_input_plus_output() {
+        // No cache_write (write=0) → expected growth = prev.input + prev.output.
+        // m1: read=100000, input=2000, output=500 (total=102500), write=0.
+        //     expected next prefix = 100000 + 2000 + 500 = 102500.
+        // m2: read=102500 → retention = 1.0 → stable.
+        let rows = vec![
+            raw(
+                Harness::Opencode,
+                "m1",
+                "s1",
+                100,
+                2_000,
+                100_000,
+                0,
+                102_500,
+                Some("tool-calls"),
+            ),
+            raw(
+                Harness::Opencode,
+                "m2",
+                "s1",
+                200,
+                1_000,
+                102_500,
+                0,
+                103_700,
+                Some("tool-calls"),
+            ),
+        ];
+        let events = build_db_cache_events(rows, false);
         assert_eq!(events[1].severity, "stable");
     }
 
@@ -4968,6 +5378,8 @@ mod get_session_cache_events_by_turn_count_tests {
             finish: Some("stop".to_string()),
             turn_id: String::new(),
             is_turn_start,
+            context_limit: 0,
+            is_drop: false,
         }
     }
 
