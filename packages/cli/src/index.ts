@@ -9,6 +9,7 @@
  *     --issue         Bundle a sanitized issue report and submit/open.
  *     --clear         Interactive picker to clear plugin caches.
  *   doctor migrate  Migrate OpenCode session content to Pi JSONL.
+ *   doctor migrate-session  Re-home an OpenCode session to another directory/project.
  *
  * Common flags:
  *   --harness opencode|pi   Target one harness (default: auto-detect / prompt)
@@ -60,6 +61,7 @@ function printUsage(): void {
     console.log("    doctor --retry-v22-backfill       Retry failed v22 memory backfill rows");
     console.log("    doctor --rekey-v22-dir-identity <path>  Re-key legacy dir identity rows");
     console.log("    doctor migrate   Migrate OpenCode session to Pi JSONL");
+    console.log("    doctor migrate-session   Re-home an OpenCode session to another directory");
     console.log("");
     console.log("  Harness selection:");
     console.log("    --harness opencode    Target OpenCode only");
@@ -99,6 +101,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
         if (rest[0] === "migrate") {
             const { runMigrateCli } = await import("./commands/migrate");
             return runMigrateCli(rest.slice(1));
+        }
+        if (rest[0] === "migrate-session") {
+            const { runMigrateSessionCli } = await import("./commands/migrate-session");
+            return runMigrateSessionCli(rest.slice(1));
         }
         const { runDoctor } = await import("./commands/doctor");
         const rekeyV22DirIdentity = valueAfter(rest, "--rekey-v22-dir-identity");

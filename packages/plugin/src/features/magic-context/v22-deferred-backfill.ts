@@ -8,6 +8,7 @@ import {
     resolveProjectIdentity,
     resolveProjectIdentityStrict,
 } from "./memory/project-identity";
+import { rekeyMemoryRowWithCollisionMerge } from "./memory/relocate-memory";
 import type { V22BackfillErrorClass } from "./storage-v22-backfill-failures";
 
 export const BATCH_SIZE = 25;
@@ -375,59 +376,6 @@ export async function runDeferredV22Backfill(
         failureCount,
         lastCursor,
     };
-}
-
-/**
- * Collision-aware single-row rekey, mirroring the main batch backfill's merge
- * branch. Rekeying a memory's project_path can violate
- * UNIQUE(project_path, category, normalized_hash) when the target identity
- * already holds an equivalent memory (one project written under multiple raw
- * legacy paths). A blind UPDATE there aborts the whole transaction and leaves
- * the doctor repair stuck. Instead: if a collision row exists, merge into it
- * (keep the larger seen_count, delete the source — embedding FK-cascades) and
- * report it as changed; otherwise do the guarded UPDATE.
- *
- * Returns true if the row was rekeyed or merged. MUST run inside a transaction.
- */
-function rekeyMemoryRowWithCollisionMerge(
-    db: Database,
-    rowId: number,
-    fromProjectPath: string,
-    toIdentity: string,
-): boolean {
-    const row = db
-        .prepare("SELECT category, normalized_hash, seen_count FROM memories WHERE id = ?")
-        .get(rowId) as
-        | { category: string; normalized_hash: string; seen_count: number }
-        | undefined;
-    if (!row) return false;
-
-    const collision = db
-        .prepare(
-            `SELECT id, seen_count FROM memories
-             WHERE project_path = ? AND category = ? AND normalized_hash = ?
-             LIMIT 1`,
-        )
-        .get(toIdentity, row.category, row.normalized_hash) as
-        | { id: number; seen_count: number }
-        | undefined;
-
-    if (collision && collision.id !== rowId) {
-        const mergedSeen = Math.max(collision.seen_count ?? 1, row.seen_count ?? 1);
-        if (mergedSeen !== (collision.seen_count ?? 1)) {
-            db.prepare("UPDATE memories SET seen_count = ? WHERE id = ?").run(
-                mergedSeen,
-                collision.id,
-            );
-        }
-        db.prepare("DELETE FROM memories WHERE id = ?").run(rowId);
-        return true;
-    }
-
-    const result = db
-        .prepare("UPDATE memories SET project_path = ? WHERE id = ? AND project_path = ?")
-        .run(toIdentity, rowId, fromProjectPath) as { changes?: number };
-    return (result.changes ?? 0) > 0;
 }
 
 export async function doctorRetryV22Backfill(db: Database): Promise<{
