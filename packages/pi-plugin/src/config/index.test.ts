@@ -246,7 +246,10 @@ describe("loadPiConfig", () => {
 
 		expect(result.config.dreamer?.disable).toBe(true);
 		expect(result.config.sidekick?.disable).toBe(true);
-		expect(result.config.historian).toEqual({ two_pass: false, disallowed_tools: [] });
+		expect(result.config.historian).toEqual({
+			two_pass: false,
+			disallowed_tools: [],
+		});
 		expect(result.warnings.join("\n")).toContain(
 			'Migrated "dreamer.enabled=false" → "dreamer.disable=true" in-memory (run doctor to persist). This now also disables manual /ctx-dream; for manual-only remove disable and set schedule="".',
 		);

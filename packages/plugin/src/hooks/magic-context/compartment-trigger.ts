@@ -133,11 +133,7 @@ function estimateUntaggedInMemoryTailUpperBound(
     taggerFloor = 0,
 ): number {
     const lastCompartmentEnd = getLastCompartmentEndMessage(db, sessionId);
-    const coveredOwnerMessageIds = getActiveOrDroppedTagOwnerMessageIds(
-        db,
-        sessionId,
-        taggerFloor,
-    );
+    const coveredOwnerMessageIds = getActiveOrDroppedTagOwnerMessageIds(db, sessionId, taggerFloor);
     let total = 0;
     for (const message of inMemoryTail.messages) {
         // The anchored in-memory tail includes the last compartment boundary row

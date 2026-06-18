@@ -637,8 +637,10 @@ async function collectHistorianRuns(storageDirPath: string): Promise<HistorianRu
         return [];
     }
 
-    let db: { prepare: (sql: string) => { all: (...p: unknown[]) => unknown[] }; close: () => void } | null =
-        null;
+    let db: {
+        prepare: (sql: string) => { all: (...p: unknown[]) => unknown[] };
+        close: () => void;
+    } | null = null;
     try {
         db = new DatabaseClass(contextDbPath, { readonly: true });
         // Defensive: the table only exists at schema v24+. A pre-v24 DB throws
