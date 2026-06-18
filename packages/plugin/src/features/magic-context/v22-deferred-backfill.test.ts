@@ -179,6 +179,45 @@ describe("runDeferredV22Backfill", () => {
         expect(unresolved.count).toBe(0);
     });
 
+    test("collision-merge preserves the source row's embedding on the survivor (no FK-cascade loss)", async () => {
+        // Regression: when a legacy source row carrying an embedding collides with
+        // an existing target row that has NONE, the merge deletes the source —
+        // FK-cascading its embedding away. Without the INSERT OR IGNORE transfer,
+        // the survivor would be left unembedded (silent vector loss). The DB is
+        // initialized with foreign_keys=ON, so the cascade is real here.
+        const database = makeDb();
+        const targetId = insertMemory(database, "/proj/canonical", "dup-hash");
+        const sourceId = insertMemory(database, "/proj/symlinked", "dup-hash");
+        // Only the SOURCE (later-deleted) row has an embedding.
+        database
+            .prepare(
+                "INSERT INTO memory_embeddings (memory_id, embedding, model_id) VALUES (?, ?, 'm')",
+            )
+            .run(sourceId, new Uint8Array([1, 2, 3, 4]));
+
+        const summary = await runDeferredV22Backfill(database, {
+            resolveIdentity: () => "git:sharedidentity",
+            yieldToEventLoop: async () => {},
+        });
+
+        expect(summary.status).toBe("completed");
+        // Source row gone; survivor is the earlier (target) row. (.get() returns
+        // null on node:sqlite / undefined on bun:sqlite for a missing row.)
+        expect(
+            database.prepare("SELECT id FROM memories WHERE id = ?").get(sourceId) ?? null,
+        ).toBeNull();
+        // The survivor must now carry the adopted embedding — not lost to cascade.
+        const surviving = database
+            .prepare("SELECT COUNT(*) AS c FROM memory_embeddings WHERE memory_id = ?")
+            .get(targetId) as { c: number };
+        expect(surviving.c).toBe(1);
+        // And no orphaned embedding rows remain anywhere.
+        const total = database.prepare("SELECT COUNT(*) AS c FROM memory_embeddings").get() as {
+            c: number;
+        };
+        expect(total.c).toBe(1);
+    });
+
     test("concurrent project_path mutation is a guarded no-op", async () => {
         const database = makeDb();
         const rowId = insertMemory(database, "/race", "race");

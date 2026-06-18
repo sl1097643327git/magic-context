@@ -452,4 +452,17 @@ describe("applyMigrateSession — memory actions", () => {
         expect(session.directory).toBe("/old/dir");
         expect(session.project_id).toBe("global");
     });
+
+    it("refuses to apply when the OpenCode session row is missing (no half-migration)", () => {
+        const { oc, ctx } = setup();
+        const plan = planMigrateSession(SID, "/home/u/benchmarks", makeDeps(oc, ctx));
+        // Session vanishes between plan and apply (e.g. deleted while we worked).
+        oc.prepare("DELETE FROM session WHERE id = ?").run(SID);
+        expect(() => applyMigrateSession(plan, "leave", makeDeps(oc, ctx))).toThrow(/not found/i);
+        // Context.db must be untouched — ownership stays on the source identity.
+        const ownership = ctx
+            .prepare("SELECT project_path FROM session_projects WHERE session_id = ?")
+            .get(SID) as { project_path: string };
+        expect(ownership.project_path).toBe(FROM);
+    });
 });

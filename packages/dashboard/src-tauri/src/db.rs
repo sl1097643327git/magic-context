@@ -2868,14 +2868,20 @@ pub fn update_memory_category(
     // Phase A: resolve the target row before opening a write transaction.
     let target = lookup_memory_mutation_target(conn, memory_id)?;
 
-    // Phase B: re-check the target row, mutate, and queue once.
+    // No-op guard: changing a memory to its current category must NOT bump any
+    // epoch (that would force a needless hard fold across every workspace member).
+    if target.category.as_deref() == Some(new_category) {
+        return Ok(());
+    }
+
+    // Phase B: re-check the target row, mutate, and bump epochs once.
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     verify_memory_project_path_unchanged(&tx, memory_id, &target.project_path)?;
 
-    let (content, normalized_hash): (String, String) = tx.query_row(
-        "SELECT content, normalized_hash FROM memories WHERE id = ?1",
+    let normalized_hash: String = tx.query_row(
+        "SELECT normalized_hash FROM memories WHERE id = ?1",
         params![memory_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| row.get(0),
     )?;
 
     // Pre-check the UNIQUE(project_path, category, normalized_hash) constraint
@@ -2903,15 +2909,17 @@ pub fn update_memory_category(
         params![new_category, now_millis(), memory_id],
     )?;
 
-    queue_memory_mutation(
-        &tx,
-        &target.project_path,
-        "update",
-        memory_id,
-        None,
-        Some(new_category),
-        Some(&content),
-    )?;
+    // A category change is visibility- AND render-changing: it alters the heading
+    // a memory renders under in <project-memory>, and (in a workspace) can flip a
+    // foreign memory between shared and non-shared. Both change m[0] bytes, so bump
+    // member epochs to force a hard fold — exactly like update_memory_status. The
+    // hard fold re-renders m[0] from true memory state, so we do NOT also queue an
+    // m[1] "update" delta (epoch-bump XOR delta, matching the status path). Fan-out
+    // is resolved INSIDE the write tx so a concurrent add-member can't miss it.
+    let project_identity = normalize_stored_project_path(&target.project_path);
+    let epoch_bump_identities =
+        crate::workspaces::workspace_member_identities_for_project(&tx, &project_identity)?;
+    crate::workspaces::bump_epochs_for_identities(&tx, &epoch_bump_identities)?;
 
     tx.commit()?;
     Ok(())

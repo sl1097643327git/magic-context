@@ -702,17 +702,33 @@ fn test_update_memory_category_success() {
         .expect("get category");
     assert_eq!(category, "NAMING");
 
-    // Verify mutation log row is written
-    assert_eq!(
-        mutation_log_rows(&conn),
-        vec![(
-            "git:project-a".to_string(),
-            "update".to_string(),
-            id,
-            Some("NAMING".to_string()),
-            Some("memory for git:project-a".to_string()),
-        )]
-    );
+    // A category change is render- AND visibility-changing (heading + workspace
+    // shared/non-shared flip), so it bumps the epoch to force a hard fold and
+    // writes NO m[1] mutation-log row (epoch-bump XOR delta, like status changes).
+    assert_eq!(memory_epoch(&conn, "git:project-a"), 12);
+    assert_eq!(mutation_log_rows(&conn), vec![]);
+}
+
+#[test]
+fn update_memory_category_noop_does_not_bump_epoch() {
+    // Changing a memory to its CURRENT category must not bump any epoch (that
+    // would force a needless hard fold across every workspace member).
+    let mut conn = make_db();
+    let id = insert_memory(&conn, "git:project-a", "active");
+    // Re-setting a memory to its existing category must be a no-op.
+    let current: String = conn
+        .query_row(
+            "SELECT category FROM memories WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .expect("get category");
+    seed_project_state(&conn, "git:project-a", 5, 0);
+
+    db::update_memory_category(&mut conn, id, &current).expect("noop category update");
+
+    assert_eq!(memory_epoch(&conn, "git:project-a"), 5);
+    assert_eq!(mutation_log_rows(&conn), vec![]);
 }
 
 #[test]

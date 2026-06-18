@@ -276,6 +276,61 @@ describe("checkCompartmentTrigger", () => {
         expect(covered.partReads()).toBeGreaterThan(0);
     });
 
+    it("does NOT cheap-skip below-floor tags when inMemoryTail is undefined (no historian suppression)", () => {
+        // Regression: with NO in-memory tail (post-restart / marker-drain lag),
+        // the cheap-gate cannot account for below-floor tags via
+        // estimateUntaggedInMemoryTailUpperBound (that path needs the tail). If a
+        // collapsed floor sits ABOVE live eligible tags, a SCOPED bound would
+        // exclude their tokens → falsely cheap-skip a needed historian fire. The
+        // fix uses floor 0 for the bound when inMemoryTail is undefined, so the
+        // gate stays conservative and falls through to the authoritative path,
+        // which then fires on the meaningful eligible head.
+        useTempDataHome("compartment-trigger-belowfloor-undefined-tail-");
+        const sessionId = "ses-belowfloor-undefined";
+        // Big narratable eligible head (m-1..m-6) + protected tail (m-7..m-11).
+        createOpenCodeDb(sessionId, [
+            { id: "m-1", role: "user", text: "a ".repeat(3500) },
+            { id: "m-2", role: "assistant", text: "done" },
+            { id: "m-3", role: "user", text: "b ".repeat(3500) },
+            { id: "m-4", role: "assistant", text: "done" },
+            { id: "m-5", role: "user", text: "c ".repeat(3500) },
+            { id: "m-6", role: "assistant", text: "done" },
+            { id: "m-7", role: "user", text: "protected 1" },
+            { id: "m-8", role: "user", text: "protected 2" },
+            { id: "m-9", role: "user", text: "protected 3" },
+            { id: "m-10", role: "user", text: "protected 4" },
+            { id: "m-11", role: "user", text: "protected 5" },
+        ]);
+        const db = openDatabase();
+        // Tag the eligible head at LOW tag_numbers (1..3) carrying real tokens.
+        insertCoveredMessageTag(db, sessionId, "m-1", 1, 3500);
+        insertCoveredMessageTag(db, sessionId, "m-3", 2, 3500);
+        insertCoveredMessageTag(db, sessionId, "m-5", 3, 3500);
+
+        // Pass a taggerFloorOverride ABOVE every tag (simulating a collapsed
+        // floor) with NO in-memory tail. Pre-fix: the scoped bound excludes tags
+        // 1..3 (bound 0, nullCount 0) → cheap-skip → shouldFire:false (WRONG).
+        // Post-fix: floor 0 includes them → bound >> budget → fall through →
+        // tail_size fires on the eligible head.
+        const result = checkCompartmentTrigger(
+            db,
+            sessionId,
+            makeSessionMeta(sessionId, 25),
+            { percentage: 25, inputTokens: 50_000 },
+            25,
+            65,
+            1_000,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined, // inMemoryTail undefined — the regressing condition
+            10_000, // taggerFloorOverride well above the tags' numbers (1..3)
+        );
+
+        expect(result.shouldFire).toBe(true);
+    });
+
     it("falls through when the in-memory upper bound equals the trigger budget", () => {
         useTempDataHome("compartment-trigger-memory-equality-");
         const db = openDatabase();

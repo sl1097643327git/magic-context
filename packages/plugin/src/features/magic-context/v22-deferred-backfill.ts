@@ -295,6 +295,16 @@ export async function runDeferredV22Backfill(
                  LIMIT 1`,
             );
             const bumpSeenCount = db.prepare("UPDATE memories SET seen_count = ? WHERE id = ?");
+            // Preserve an embedding on the surviving target BEFORE the source row's
+            // embedding FK-cascades away on DELETE. Same fix as the live
+            // collision-merge path (rekeyMemoryRowWithCollisionMerge): the two rows
+            // are content-equivalent (same category + normalized_hash), so either
+            // vector is valid; INSERT OR IGNORE keeps the target's if it has one,
+            // adopts the source's otherwise — so a merged row never loses its vector.
+            const preserveEmbedding = db.prepare(
+                `INSERT OR IGNORE INTO memory_embeddings (memory_id, embedding, model_id)
+                 SELECT ?, embedding, model_id FROM memory_embeddings WHERE memory_id = ?`,
+            );
             const deleteMemoryRow = db.prepare("DELETE FROM memories WHERE id = ?");
 
             for (const row of resolvedRows) {
@@ -312,6 +322,7 @@ export async function runDeferredV22Backfill(
                     if (mergedSeen !== (collision.seen_count ?? 1)) {
                         bumpSeenCount.run(mergedSeen, collision.id);
                     }
+                    preserveEmbedding.run(collision.id, row.id);
                     deleteMemoryRow.run(row.id);
                     changedRows += 1;
                     changedIdentities.add(row.identity);

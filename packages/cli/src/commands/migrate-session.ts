@@ -240,6 +240,14 @@ export function applyMigrateSession(
     const priorRow = deps.opencodeDb
         .prepare(`SELECT ${restoreCols.join(", ")} FROM session WHERE id = ?`)
         .get(plan.sessionId) as Record<string, string | null> | undefined;
+    // If the session row vanished between planning and applying (it shouldn't —
+    // the precondition is "OpenCode stopped"), refuse rather than mutate context
+    // for a session OpenCode no longer has and leave nothing to compensate with.
+    if (!priorRow) {
+        throw new Error(
+            `Session ${plan.sessionId} not found in opencode.db — aborting (is OpenCode still running, or was the session deleted?).`,
+        );
+    }
 
     deps.opencodeDb.exec("BEGIN IMMEDIATE");
     try {
@@ -248,7 +256,11 @@ export function applyMigrateSession(
             .run(...params, plan.sessionId);
         deps.opencodeDb.exec("COMMIT");
     } catch (error) {
-        deps.opencodeDb.exec("ROLLBACK");
+        try {
+            deps.opencodeDb.exec("ROLLBACK");
+        } catch {
+            // ignore — nothing committed yet, the throw below is what matters
+        }
         throw error;
     }
 
@@ -280,8 +292,13 @@ export function applyMigrateSession(
     let chunkEmbeddingsRestamped = 0;
     const epochsBumped: string[] = [];
 
-    deps.contextDb.exec("BEGIN IMMEDIATE");
+    // BEGIN is INSIDE the try: if it throws (e.g. DB locked), OpenCode is already
+    // committed, so we must still compensate. `txBegan` gates the rollback so we
+    // never ROLLBACK a transaction that never started.
+    let txBegan = false;
     try {
+        deps.contextDb.exec("BEGIN IMMEDIATE");
+        txBegan = true;
         // session_projects ownership → new identity (upsert).
         deps.contextDb
             .prepare(
@@ -351,9 +368,18 @@ export function applyMigrateSession(
 
         deps.contextDb.exec("COMMIT");
     } catch (error) {
-        deps.contextDb.exec("ROLLBACK");
-        // Context.db rolled back atomically; now undo the already-committed
-        // OpenCode move so the two databases stay consistent (no split-brain).
+        // Roll back context.db only if a transaction actually began, and never let
+        // a failing ROLLBACK mask the original error OR skip compensation.
+        if (txBegan) {
+            try {
+                deps.contextDb.exec("ROLLBACK");
+            } catch {
+                // ignore — compensation below is what keeps the two DBs consistent
+            }
+        }
+        // OpenCode was already committed; undo it so the two databases stay
+        // consistent (no split-brain). Runs for ANY post-OpenCode-commit failure,
+        // including a BEGIN that never started a transaction.
         compensateOpenCode();
         throw error;
     }
@@ -481,6 +507,18 @@ export async function runMigrateSessionCli(args: string[]): Promise<number> {
     const contextDbPath = defaultContextDbPath();
     const opencodeDb = new Database(opencodeDbPath);
     const contextDb = new Database(contextDbPath);
+    // This CLI opens context.db directly (bypassing initializeDatabase), so the
+    // pragmas the plugin normally sets are absent. foreign_keys=ON is REQUIRED:
+    // the collision-merge path (rekeyMemoryRowWithCollisionMerge) relies on
+    // memory_embeddings FK-cascading when a source memory row is deleted — without
+    // it, deletes leave ORPHANED embedding rows. busy_timeout avoids instant-fail
+    // if a plugin process touches the shared DB during the move.
+    try {
+        contextDb.exec("PRAGMA foreign_keys=ON");
+        contextDb.exec("PRAGMA busy_timeout=5000");
+    } catch {
+        // best-effort; the move's own transactions are the real safety net
+    }
     try {
         const deps = realDeps(opencodeDb, contextDb);
         const plan = planMigrateSession(sessionId, expandedTo, deps);

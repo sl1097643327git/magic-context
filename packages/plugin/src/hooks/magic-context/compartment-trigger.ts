@@ -489,10 +489,21 @@ export function checkCompartmentTrigger(
             // sum is a uselessly-loose bound AND leaves nullCount stuck at the
             // legacy-row count forever (never backfilled), so the skip could never
             // trigger; scoping makes it a tight valid upper bound with nullCount≈0.
+            // When there IS an in-memory tail, the scoped floor is safe: any live
+            // tag sitting below the floor has its owner message in `inMemoryTail`
+            // and is NOT in the (also-floor-scoped) covered-owner set, so
+            // estimateUntaggedInMemoryTailUpperBound charges its true-raw tokens —
+            // nothing is lost. But with NO in-memory tail (post-restart /
+            // marker-drain lag) there is no such compensation: a scoped bound would
+            // silently DROP the tokens of any live tool tag below the floor and
+            // could falsely cheap-skip a needed historian fire (context overflow).
+            // So fall back to floor 0 here — the full active+dropped sum is still a
+            // valid UPPER bound (pre-boundary tags only inflate it), just looser.
+            const boundFloor = inMemoryTail ? taggerFloor : 0;
             const { bound: persistedBound, nullCount } = getTriggerTagTokenUpperBound(
                 db,
                 sessionId,
-                taggerFloor,
+                boundFloor,
             );
             if (nullCount === 0) {
                 const untaggedUpperBound = inMemoryTail
