@@ -192,112 +192,77 @@ echo "  → CI is now building all platforms"
 echo "  → Watch: https://github.com/cortexkit/magic-context/actions"
 echo ""
 
-# Step 6: Wait for CI
-echo "→ Waiting for CI to create the draft release..."
-echo "  (checking every 30s for up to 60 minutes)"
-ATTEMPTS=0
-MAX_ATTEMPTS=120
-while [[ $ATTEMPTS -lt $MAX_ATTEMPTS ]]; do
-  RELEASE_STATE=$(gh release view "$TAG" --repo cortexkit/magic-context --json isDraft --jq '.isDraft' 2>/dev/null || echo "not_found")
-  
-  if [[ "$RELEASE_STATE" == "true" ]]; then
-    echo "  ✓ Draft release found"
-    break
-  elif [[ "$RELEASE_STATE" == "false" ]]; then
-    echo "  ✓ Release already published"
-    break
-  fi
-  
-  ATTEMPTS=$((ATTEMPTS + 1))
-  if [[ $((ATTEMPTS % 4)) -eq 0 ]]; then
-    echo "  ... still waiting ($((ATTEMPTS * 30 / 60))m elapsed)"
-  fi
-  sleep 30
-done
-
-if [[ $ATTEMPTS -ge $MAX_ATTEMPTS ]]; then
-  echo "  ⚠ Timed out waiting for release. Check CI manually."
-  echo "  → https://github.com/cortexkit/magic-context/actions"
-  exit 0
-fi
-
-# Step 7: Wait for all platform assets
-MIN_ASSETS=10
-echo ""
-echo "→ Waiting for all platform assets (expecting ≥$MIN_ASSETS)..."
-echo "  (checking every 30s for up to 60 minutes)"
-ASSET_ATTEMPTS=0
-ASSET_MAX=120
-ASSET_COUNT=0
-while [[ $ASSET_ATTEMPTS -lt $ASSET_MAX ]]; do
-  ASSET_COUNT=$(gh release view "$TAG" --repo cortexkit/magic-context --json assets --jq '.assets | length' 2>/dev/null || echo "0")
-
-  if [[ "$ASSET_COUNT" -ge "$MIN_ASSETS" ]]; then
-    echo "  ✓ Found $ASSET_COUNT assets — minimum asset threshold reached"
-    break
-  fi
-
-  ASSET_ATTEMPTS=$((ASSET_ATTEMPTS + 1))
-  if [[ $((ASSET_ATTEMPTS % 4)) -eq 0 ]]; then
-    ELAPSED=$((ASSET_ATTEMPTS * 30 / 60))
-    echo "  ... $ASSET_COUNT assets so far (${ELAPSED}m elapsed)"
-  fi
-  sleep 30
-done
-
-if [[ "$ASSET_COUNT" -lt "$MIN_ASSETS" ]]; then
-  echo "  ⚠ Only $ASSET_COUNT assets after waiting. Some platforms may have failed."
-  if have_tty; then
-    read -r -p "  Publish with $ASSET_COUNT assets? [y/N] " confirm </dev/tty
-  else
-    confirm=""
-  fi
-  if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
-    echo "  Skipping publish. Run manually: gh release edit $TAG --repo cortexkit/magic-context --draft=false"
-    exit 0
-  fi
-fi
-
-# Step 8: Wait for the release workflow to finish before publishing
-echo ""
-echo "→ Waiting for Dashboard Release workflow to complete..."
-echo "  (checking every 30s for up to 60 minutes)"
-WORKFLOW_ATTEMPTS=0
-WORKFLOW_MAX=120
+# Step 6: Wait for the Dashboard Release workflow — FAIL FAST.
+#
+# The build is a 6-platform matrix (fail-fast:false, so every leg runs to its
+# own end). The release is only valid if the WHOLE run succeeds. The old code
+# had three sequential 60-min poll loops (draft-exists → asset-count → workflow-
+# conclusion) and only detected a failed leg in the LAST one — so a leg that
+# died 23s in still cost ~10min of waiting behind the slow legs before the script
+# noticed. Instead: poll the run's conclusion directly and ABORT THE INSTANT it
+# concludes failure, regardless of how many legs are still nominally "running"
+# (a concluded run means GitHub already stopped scheduling). One loop, one
+# concern: did the run succeed?
+echo "→ Waiting for the Dashboard Release workflow (fail-fast on any leg)..."
+echo "  (checking every 15s for up to 60 minutes)"
 RUN_ID=""
-while [[ $WORKFLOW_ATTEMPTS -lt $WORKFLOW_MAX ]]; do
-  RUN_INFO=$(gh run list --repo cortexkit/magic-context --workflow "Dashboard Release" --limit 20 --json databaseId,status,conclusion,headBranch --jq ".[] | select(.headBranch == \"$TAG\") | \"\(.databaseId) \(.status) \(.conclusion)\"" 2>/dev/null | head -n 1 || true)
+DEADLINE=$(( $(date +%s) + 3600 ))
+while [[ $(date +%s) -lt $DEADLINE ]]; do
+  RUN_INFO=$(gh run list --repo cortexkit/magic-context --workflow "Dashboard Release" --limit 20 \
+    --json databaseId,status,conclusion,headBranch \
+    --jq ".[] | select(.headBranch == \"$TAG\") | \"\(.databaseId) \(.status) \(.conclusion)\"" 2>/dev/null | head -n 1 || true)
 
   if [[ -n "$RUN_INFO" ]]; then
     read -r RUN_ID RUN_STATUS RUN_CONCLUSION <<<"$RUN_INFO"
+
+    # Surface a failed leg the moment the run reports it, even while sibling legs
+    # are still finishing — `gh run view --json jobs` shows per-leg conclusions
+    # before the overall run flips to completed.
+    if [[ -n "$RUN_ID" ]]; then
+      FAILED_LEG=$(gh run view "$RUN_ID" --repo cortexkit/magic-context --json jobs \
+        --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out") | .name' 2>/dev/null | head -n 1 || true)
+      if [[ -n "$FAILED_LEG" ]]; then
+        echo ""
+        echo "  ✗ Build leg failed: $FAILED_LEG"
+        echo "  → https://github.com/cortexkit/magic-context/actions/runs/$RUN_ID"
+        echo "  Release NOT published. Fix the leg (or re-run it if transient), then re-run this script."
+        exit 1
+      fi
+    fi
+
     if [[ "$RUN_STATUS" == "completed" ]]; then
       if [[ "$RUN_CONCLUSION" == "success" ]]; then
         echo "  ✓ Workflow completed successfully"
         break
       fi
-      echo "  ✗ Workflow completed with conclusion: $RUN_CONCLUSION"
+      echo ""
+      echo "  ✗ Workflow concluded: $RUN_CONCLUSION"
       echo "  → https://github.com/cortexkit/magic-context/actions/runs/$RUN_ID"
       exit 1
     fi
   fi
 
-  WORKFLOW_ATTEMPTS=$((WORKFLOW_ATTEMPTS + 1))
-  if [[ $((WORKFLOW_ATTEMPTS % 4)) -eq 0 ]]; then
-    ELAPSED=$((WORKFLOW_ATTEMPTS * 30 / 60))
-    if [[ -n "$RUN_ID" ]]; then
-      echo "  ... workflow $RUN_STATUS (${ELAPSED}m elapsed)"
-    else
-      echo "  ... waiting for workflow run (${ELAPSED}m elapsed)"
-    fi
-  fi
-  sleep 30
+  printf "\r  ... %s (run %s)        " "${RUN_STATUS:-waiting for run}" "${RUN_ID:-?}"
+  sleep 15
 done
 
-if [[ $WORKFLOW_ATTEMPTS -ge $WORKFLOW_MAX ]]; then
-  echo "  ⚠ Timed out waiting for workflow. Skipping publish."
+if [[ $(date +%s) -ge $DEADLINE ]]; then
+  echo ""
+  echo "  ⚠ Timed out waiting for workflow. Check CI manually."
   echo "  → https://github.com/cortexkit/magic-context/actions"
-  exit 0
+  exit 1
 fi
+
+# Sanity: the run succeeded, so every leg uploaded its asset. Confirm the count
+# before publishing (a defensive check, not a wait — the run is already green).
+ASSET_COUNT=$(gh release view "$TAG" --repo cortexkit/magic-context --json assets --jq '.assets | length' 2>/dev/null || echo "0")
+MIN_ASSETS=10
+if [[ "$ASSET_COUNT" -lt "$MIN_ASSETS" ]]; then
+  echo "  ⚠ Workflow succeeded but only $ASSET_COUNT/$MIN_ASSETS assets are attached."
+  echo "  → https://github.com/cortexkit/magic-context/releases/tag/$TAG"
+  exit 1
+fi
+echo "  ✓ $ASSET_COUNT assets attached"
 
 # Step 9: Prompt for release notes
 echo ""

@@ -15,7 +15,20 @@ env:
 jobs:
   build:
     name: Build Dashboard (${{ matrix.settings.label }})
+    # Harden cargo against the transient crates.io drops we hit in the wild
+    # ("download of … failed / curl … Connection reset by peer" mid-build, which
+    # killed a single matrix leg ~23s in despite the code being fine). Retry hard
+    # and disable HTTP/2 multiplexing — the documented workaround for spurious
+    # connection resets against the cargo download CDN on hosted runners.
+    env:
+      CARGO_NET_RETRY: "10"
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      CARGO_HTTP_MULTIPLEXING: "false"
     strategy:
+      # Keep building every platform leg even if one fails: a release wants to
+      # surface ALL broken platforms in one run, not cancel the survivors. The
+      # release SCRIPT fail-fasts instead (aborts the moment the run concludes
+      # failure), so a single failed leg no longer hides behind the slow ones.
       fail-fast: false
       matrix:
         settings:
