@@ -360,6 +360,36 @@ export function buildCanonicalChunkTextFromFts(
 }
 
 /**
+ * Fallback embeddable text for a compartment whose RAW span has NO indexable
+ * content. A thin one-beat compartment — e.g. a host-injected
+ * `<system-reminder>` notification (stripped to empty by the indexer) plus an
+ * assistant tool-call (no text) — leaves `buildCanonicalChunkTextFromFts`
+ * returning "". Such a compartment would never acquire an embedding row, so it
+ * stays counted as "remaining" forever and the auto-embed drain re-fires its
+ * start/finish notification on every restart (the desktop "Embedding 1 /
+ * Embedded 0" loop).
+ *
+ * The compartment still carries a real summary (title + p1 paraphrase) — the
+ * ONLY signal it has — so we embed that instead. This is NOT the redundancy that
+ * retired `p1_embedding` (which embedded the summary ALONGSIDE the raw chunk):
+ * here there is no raw chunk to embed, so the summary is the sole content.
+ * Returns "" only when the compartment has neither a title nor p1/content.
+ */
+export function buildCompartmentSummaryFallbackText(db: Database, compartmentId: number): string {
+    const row = db
+        .prepare("SELECT title, p1, content FROM compartments WHERE id = ?")
+        .get(compartmentId) as
+        | { title?: string | null; p1?: string | null; content?: string | null }
+        | undefined;
+    if (!row) return "";
+    const title = typeof row.title === "string" ? row.title.trim() : "";
+    const p1 = typeof row.p1 === "string" ? row.p1.trim() : "";
+    // v2 rows mirror p1 into `content`; legacy rows only have `content`.
+    const body = p1.length > 0 ? p1 : typeof row.content === "string" ? row.content.trim() : "";
+    return [title, body].filter((s) => s.length > 0).join("\n");
+}
+
+/**
  * Convert historian input text into the same embeddable subset used by the FTS
  * backfill producer: only U:/A: conversational lines remain, and TC: tool-call
  * summaries are removed because they are better served by exact FTS probes.

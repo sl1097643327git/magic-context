@@ -262,4 +262,55 @@ describe("compartment chunk embedding core", () => {
             closeQuietly(db);
         }
     });
+
+    test("empty raw span falls back to embedding the compartment summary (title + p1)", async () => {
+        const db = createDb();
+        const embeddedTexts: string[] = [];
+        try {
+            _setTestProviderFactoryForProject(() => new CapturingEmbeddingProvider(embeddedTexts));
+            registerProjectEmbeddingAndMaybeWipe(
+                db,
+                "/repo/fallback",
+                { provider: "local", model: "mock-local" },
+                { memoryEnabled: true, gitCommitEnabled: false },
+                "/repo/fallback",
+            );
+            // A thin notification/tool-only compartment: no FTS rows for its span,
+            // and the in-memory source strips to empty (system-reminder + TC line).
+            appendCompartments(db, "ses-fallback", [
+                {
+                    sequence: 0,
+                    startMessage: 5,
+                    endMessage: 6,
+                    startMessageId: "u5",
+                    endMessageId: "a6",
+                    title: "Executed background oracle audit for oxc engine",
+                    content: "Ran the background oracle audit to verify the oxc cutover.",
+                    p1: "Ran the background oracle audit to verify the oxc cutover.",
+                },
+            ]);
+            const compartment = getCompartments(db, "ses-fallback")[0];
+
+            await embedAndStoreCompartmentChunks(db, "ses-fallback", "/repo/fallback", [
+                {
+                    id: compartment.id,
+                    startMessage: 5,
+                    endMessage: 6,
+                    // Both lines strip away: no [ord] U:/A: meaningful text survives.
+                    sourceChunkText: "[5] A: TC: task(Audit oxc engine)",
+                },
+            ]);
+
+            // Embedded the summary (title + p1), not the empty raw span.
+            expect(embeddedTexts).toEqual([
+                "Executed background oracle audit for oxc engine\nRan the background oracle audit to verify the oxc cutover.",
+            ]);
+            expect(
+                loadCompartmentChunkEmbeddingsForSearch(db, "ses-fallback", "/repo/fallback"),
+            ).toHaveLength(1);
+        } finally {
+            _resetProjectEmbeddingRegistryForTests();
+            closeQuietly(db);
+        }
+    });
 });

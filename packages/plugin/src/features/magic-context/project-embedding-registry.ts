@@ -6,6 +6,7 @@ import { log } from "../../shared/logger";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import {
     buildCanonicalChunkTextFromFts,
+    buildCompartmentSummaryFallbackText,
     type CompartmentChunkBackfillCandidate,
     chunkCanonicalText,
     chunkEmbeddingWindowsAreCurrent,
@@ -737,12 +738,17 @@ async function embedCandidateChunkBatch(
     };
     const prepared: Prepared[] = [];
     for (const candidate of candidates) {
-        const canonicalText = buildCanonicalChunkTextFromFts(
-            db,
-            candidate.sessionId,
-            candidate.startMessage,
-            candidate.endMessage,
-        );
+        // Raw-span text first; fall back to the compartment's summary (title+p1)
+        // when the span has no indexable content (notification/tool-only beat),
+        // so such compartments still get a real embedding row instead of being
+        // re-counted as "remaining" forever (the desktop auto-embed loop).
+        const canonicalText =
+            buildCanonicalChunkTextFromFts(
+                db,
+                candidate.sessionId,
+                candidate.startMessage,
+                candidate.endMessage,
+            ) || buildCompartmentSummaryFallbackText(db, candidate.id);
         if (canonicalText.length === 0) {
             noWork.push(candidate.id);
             continue;

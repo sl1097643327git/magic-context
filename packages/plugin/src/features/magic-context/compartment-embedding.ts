@@ -2,6 +2,7 @@ import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import {
     buildCanonicalChunkTextFromFts,
+    buildCompartmentSummaryFallbackText,
     canonicalizeInMemoryChunkTextForEmbedding,
     chunkCanonicalText,
     chunkEmbeddingWindowsAreCurrent,
@@ -68,7 +69,8 @@ export async function embedAndStoreCompartmentChunks(
                     sessionId,
                     compartment.startMessage,
                     compartment.endMessage,
-                );
+                ) ||
+                buildCompartmentSummaryFallbackText(db, compartment.id);
             if (canonicalText.length === 0) continue;
 
             const windows = chunkCanonicalText(
