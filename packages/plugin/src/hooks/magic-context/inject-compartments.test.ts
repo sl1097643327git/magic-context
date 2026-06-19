@@ -1133,6 +1133,124 @@ describe("m[0]/m[1] materialization", () => {
         expect(renderedText(secondMessages[0])).toBe(firstM0);
     });
 
+    it("SOFT /ctx-flush pass keeps m0 byte-identical, refreshes m1, and avoids first_render", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        const state = readStateFromMeta();
+        const hardV1 = {
+            systemHash: "sys-v1",
+            modelKey: "model-v1",
+            cacheExpired: false,
+            lastResponseTime: 0,
+        };
+        const baselineMessages = [userMessage("m1", "hello")];
+        injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: baselineMessages,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            hardSignals: hardV1,
+        });
+        const m0BeforeFlush =
+            baselineMessages[0].parts[0] &&
+            renderedText(baselineMessages[0]).match(
+                /<session-history>[\s\S]*?<\/session-history>/,
+            )?.[0];
+        expect(m0BeforeFlush).toBeTruthy();
+
+        const flushMessages = [userMessage("m2", "after flush")];
+        const flushPass = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: flushMessages,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            isCacheBustingPass: true,
+        });
+        expect(flushPass.decision.reason).not.toBe("first_render");
+        expect(flushPass.m0RematerializedThisPass).toBe(false);
+        const m0AfterFlush = renderedText(flushMessages[0]).match(
+            /<session-history>[\s\S]*?<\/session-history>/,
+        )?.[0];
+        expect(m0AfterFlush).toBe(m0BeforeFlush);
+
+        const deferMessages = [userMessage("m3", "defer")];
+        const deferPass = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: deferMessages,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+        });
+        expect(deferPass.m0RematerializedThisPass).toBe(false);
+        expect(renderedText(deferMessages[0])).toBe(renderedText(flushMessages[0]));
+    });
+
+    it("HARD fold binds memory expiry cutoff and materializedAt to one timestamp", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "KNOWN_ISSUES",
+            content: "D16c expiry-gap memory",
+            expiresAt: 10_500,
+        });
+        insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "ARCHITECTURE",
+            content: "D16c permanent anchor",
+        });
+
+        const realNow = Date.now;
+        const foldAt = 10_000;
+        let nowCalls = 0;
+        Date.now = () => {
+            nowCalls += 1;
+            return nowCalls === 1 ? foldAt : 99_000;
+        };
+
+        try {
+            const state = readStateFromMeta();
+            const hard = {
+                systemHash: "fold-a",
+                modelKey: "model-v1",
+                cacheExpired: false,
+                lastResponseTime: 0,
+            };
+            const first = materializeM0({
+                db,
+                sessionId: SESSION_ID,
+                state,
+                projectPath: PROJECT_PATH,
+                projectDirectory,
+                hardSignals: hard,
+            });
+            expect(first.m0Text).toContain("D16c expiry-gap memory");
+            expect(getOrCreateSessionMeta(db, SESSION_ID).cachedM0MaterializedAt).toBe(foldAt);
+
+            nowCalls = 0;
+            const state2 = readStateFromMeta();
+            const second = materializeM0({
+                db,
+                sessionId: SESSION_ID,
+                state: state2,
+                projectPath: PROJECT_PATH,
+                projectDirectory,
+                hardSignals: { ...hard, systemHash: "fold-b" },
+            });
+            expect(second.m0Text).toContain("D16c expiry-gap memory");
+            expect(second.m0Text.match(/<project-memory>[\s\S]*?<\/project-memory>/)?.[0]).toBe(
+                first.m0Text.match(/<project-memory>[\s\S]*?<\/project-memory>/)?.[0],
+            );
+        } finally {
+            Date.now = realNow;
+        }
+    });
+
     it("does NOT drift-refold on a defer pass when m[1] is the empty placeholder (tiny-baseline guard)", () => {
         // Regression: the +15% drift refold must key off GENUINE accumulated
         // delta, not the placeholder. With a tiny m[0], the ~80-byte empty

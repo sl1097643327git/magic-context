@@ -1498,6 +1498,11 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
         canonicalHash: "",
     };
 
+    // One timestamp for the whole HARD fold: memory expiry cutoff at read time must
+    // match persisted materializedAt (defer replays that value). Live Date.now() at
+    // read vs a later Date.now() at persist created a determinism gap inside the fold.
+    const foldMaterializedAt = Date.now();
+
     options.db.exec("BEGIN");
     try {
         workspace = resolveWorkspaceRenderContext({
@@ -1532,11 +1537,16 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
                       options.db,
                       workspace.expandedIdentities,
                       ["active", "permanent"],
-                      Date.now(),
+                      foldMaterializedAt,
                       workspace.ownIdentities,
                       workspace.shareCategories,
                   )
-                : getMemoriesByProject(options.db, projectPath, ["active", "permanent"])
+                : getMemoriesByProject(
+                      options.db,
+                      projectPath,
+                      ["active", "permanent"],
+                      foldMaterializedAt,
+                  )
             : [];
         userMemories = safeGetActiveUserMemories(options.db);
         options.db.exec("COMMIT");
@@ -1599,7 +1609,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
 
     if (m0Text.length === 0) m0Text = M0_EMPTY_BODY;
     const m0Bytes = Buffer.from(m0Text, "utf8");
-    snapshotMarkers.materializedAt = Date.now();
+    snapshotMarkers.materializedAt = foldMaterializedAt;
     const renderedMemoryIds = trimmed.renderOrder.map((m) => m.id);
     const preRenderedKeyFilesBlock = preRenderKeyFilesBlock(options);
     const phase3ProjectDocsHash = projectDirectory ? computeProjectDocsHash(projectDirectory) : "";
@@ -1640,7 +1650,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
                   ? (getMaxMemoryMutationId(options.db, projectPath) ?? 0)
                   : 0,
             projectDocsHash: phase3ProjectDocsHash,
-            materializedAt: Date.now(),
+            materializedAt: foldMaterializedAt,
             sessionFactsVersion: getSessionFactsVersion(options.db, options.sessionId),
             upgradeState: getUpgradeState(options.db, options.sessionId),
             // HARD-bust markers are flight-constant (system/tool/model identity of

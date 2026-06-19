@@ -322,16 +322,19 @@ describe("createMagicContextCommandHandler", () => {
             expect(getTagStatus(db, "ses-flush", 2)).toBe("dropped");
         });
 
-        it("clears cached m0 fields for the current session", async () => {
+        it("is SOFT: keeps cached m0/m1 bytes and invokes onFlush", async () => {
             seedCachedM0(db, "ses-flush-cache");
+            const onFlush = mock(() => {});
             const sendNotification = mock(async () => {});
             const handler = createMagicContextCommandHandler({
                 db,
                 protectedTags: 3,
                 sendNotification,
+                onFlush,
             });
 
-            expect(getCachedM0Row(db, "ses-flush-cache")?.bytes).not.toBeNull();
+            const before = getCachedM0Row(db, "ses-flush-cache");
+            expect(before?.bytes).not.toBeNull();
 
             await expectSentinel(
                 handler["command.execute.before"](
@@ -342,42 +345,8 @@ describe("createMagicContextCommandHandler", () => {
                 "__CONTEXT_MANAGEMENT_CTX-FLUSH_HANDLED__",
             );
 
-            expect(getCachedM0Row(db, "ses-flush-cache")).toMatchObject({
-                bytes: null,
-                projectMemoryEpoch: null,
-                userProfileVersion: null,
-                maxCompartmentSeq: null,
-                maxMemoryId: null,
-                maxMutationId: null,
-                projectDocsHash: null,
-                materializedAt: null,
-                sessionFactsVersion: null,
-                upgradeState: null,
-            });
-        });
-
-        it("does not clear cached m0 fields for other sessions", async () => {
-            seedCachedM0(db, "ses-flush-cache");
-            seedCachedM0(db, "ses-other-cache");
-            const sendNotification = mock(async () => {});
-            const handler = createMagicContextCommandHandler({
-                db,
-                protectedTags: 3,
-                sendNotification,
-            });
-
-            await expectSentinel(
-                handler["command.execute.before"](
-                    { command: "ctx-flush", sessionID: "ses-flush-cache", arguments: "" },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-FLUSH_HANDLED__",
-            );
-
-            expect(getCachedM0Row(db, "ses-flush-cache")?.bytes).toBeNull();
-            expect(getCachedM0Row(db, "ses-other-cache")?.bytes).not.toBeNull();
-            expect(getCachedM0Row(db, "ses-other-cache")?.projectMemoryEpoch).toBe(7);
+            expect(onFlush).toHaveBeenCalledWith("ses-flush-cache");
+            expect(getCachedM0Row(db, "ses-flush-cache")).toEqual(before);
         });
     });
 

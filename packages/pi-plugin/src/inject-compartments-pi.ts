@@ -1220,7 +1220,7 @@ function readFrozenM0InputsPi(
 			projectUserProfileVersion: globalState?.projectUserProfileVersion ?? 0,
 			projectDocsHash: docs.canonicalHash,
 			sessionFactsVersion: getSessionFactsVersion(db, state.sessionId),
-			materializedAt: Date.now(),
+			materializedAt: memoryCutoff ?? Date.now(),
 			upgradeState: `${PI_M0_UPGRADE_STATE}:${
 				compartments.some((c) => c.legacy === 1) ? "legacy" : "ready"
 			}`,
@@ -1305,8 +1305,10 @@ export function materializeM0Pi(
 	// Phase 1 (no lock): read markers + render. Rendering can be slow, so we do
 	// it OUTSIDE the write lock to keep the BEGIN IMMEDIATE critical section tiny.
 	const docs = readProjectDocsCanonical(state.projectDirectory);
-	const frozen = readFrozenM0InputsPi(state, db, docs);
+	const foldMaterializedAt = Date.now();
+	const frozen = readFrozenM0InputsPi(state, db, docs, foldMaterializedAt);
 	const snapshotMarkers = frozen.markers;
+
 	const snapshotMemories = frozen.memories;
 	const snapshotCompartments = frozen.compartments;
 	const snapshotUserProfile = frozen.userProfile;
@@ -1399,10 +1401,8 @@ export function materializeM0Pi(
 			db.exec("ROLLBACK");
 			throw new PiMaterializeContentionError("snapshot changed before persist");
 		}
-		// Refresh materializedAt to NOW, right before persist (parity with
-		// OpenCode materializeM0). m[1] freezes memory-expiry cutoff at this timestamp;
-		// defer passes replay the persisted value verbatim.
-		snapshotMarkers.materializedAt = Date.now();
+		snapshotMarkers.materializedAt = foldMaterializedAt;
+
 		const m1Render = renderM1PiWithMetadata(
 			state,
 			db,

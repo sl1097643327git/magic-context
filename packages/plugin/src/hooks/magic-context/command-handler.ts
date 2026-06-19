@@ -5,7 +5,7 @@ import {
     processDreamQueue,
 } from "../../features/magic-context/dreamer";
 import { runSidekick } from "../../features/magic-context/sidekick/agent";
-import { clearCachedM0M1, getCompartments } from "../../features/magic-context/storage";
+import { getCompartments } from "../../features/magic-context/storage";
 import type { PluginContext } from "../../plugin/types";
 import { sessionLog } from "../../shared";
 import { isTuiConnected, pushNotification } from "../../shared/rpc-notifications";
@@ -496,7 +496,6 @@ export function createMagicContextCommandHandler(deps: {
 
             if (isFlush) {
                 result = executeFlush(deps.db, sessionId);
-                clearCachedM0M1(deps.db, sessionId);
                 deps.onFlush?.(sessionId);
                 if (isTuiConnected(sessionId)) {
                     pushNotification(

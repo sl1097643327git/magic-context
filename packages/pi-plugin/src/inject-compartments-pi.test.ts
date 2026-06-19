@@ -1299,6 +1299,65 @@ describe("renderM0Pi sibling-block layout (OpenCode parity)", () => {
 			closeQuietly(db);
 		}
 	});
+
+	it("HARD fold binds memory expiry cutoff and materializedAt to one timestamp", () => {
+		const db = createTestDb();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-d16c-"));
+		try {
+			const state = piState("ses-pi-d16c", cwd);
+			insertMemory(db, {
+				projectPath: state.projectIdentity,
+				category: "KNOWN_ISSUES",
+				content: "Pi D16c expiry-gap memory",
+				expiresAt: 10_500,
+			});
+			insertMemory(db, {
+				projectPath: state.projectIdentity,
+				category: "ARCHITECTURE",
+				content: "Pi D16c permanent anchor",
+			});
+
+			const realNow = Date.now;
+			const foldAt = 10_000;
+			let nowCalls = 0;
+			Date.now = () => {
+				nowCalls += 1;
+				return nowCalls === 1 ? foldAt : 99_000;
+			};
+
+			try {
+				state.hardSignals = {
+					systemHash: "fold-a",
+					modelKey: "model-v1",
+					cacheExpired: false,
+					lastResponseTime: 0,
+				};
+				const first = materializeM0Pi(state, db);
+				expect(first.m0).toContain("Pi D16c expiry-gap memory");
+				expect(first.snapshotMarkers.materializedAt).toBe(foldAt);
+
+				nowCalls = 0;
+				state.hardSignals = {
+					systemHash: "fold-b",
+					modelKey: "model-v1",
+					cacheExpired: false,
+					lastResponseTime: 0,
+				};
+				const second = materializeM0Pi(state, db);
+				expect(second.m0).toContain("Pi D16c expiry-gap memory");
+				expect(
+					second.m0.match(/<project-memory>[\s\S]*?<\/project-memory>/)?.[0],
+				).toBe(
+					first.m0.match(/<project-memory>[\s\S]*?<\/project-memory>/)?.[0],
+				);
+			} finally {
+				Date.now = realNow;
+			}
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+			closeQuietly(db);
+		}
+	});
 });
 
 describe("mustMaterializePi — SOFT/HARD taxonomy (parity with OpenCode)", () => {
