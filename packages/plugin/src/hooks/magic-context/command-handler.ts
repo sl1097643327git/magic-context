@@ -1,9 +1,10 @@
 import type { DreamerConfig, SidekickConfig } from "../../config/schema/magic-context";
 import {
-    type DreamRunResult,
-    enqueueDream,
-    processDreamQueue,
-} from "../../features/magic-context/dreamer";
+    CANONICAL_DREAM_TASKS,
+    type DreamTaskName,
+    isCanonicalDreamTask,
+} from "../../features/magic-context/dreamer/task-registry";
+import type { ManualRunResult } from "../../features/magic-context/dreamer/task-scheduler";
 import { runSidekick } from "../../features/magic-context/sidekick/agent";
 import { getCompartments } from "../../features/magic-context/storage";
 import type { PluginContext } from "../../plugin/types";
@@ -242,24 +243,24 @@ async function executeAugmentation(
     throwSentinel("CTX-AUG");
 }
 
-function summarizeDreamResult(result: DreamRunResult): string {
-    const taskLines = result.tasks.map((task: DreamRunResult["tasks"][number]) => {
-        const seconds = (task.durationMs / 1000).toFixed(1);
-        return task.error
-            ? `- ${task.name}: failed after ${seconds}s — ${task.error}`
-            : `- ${task.name}: completed in ${seconds}s`;
-    });
+export type ManualDreamSummary = ManualRunResult;
 
-    return [
-        "## /ctx-dream",
-        "",
-        `Started: ${new Date(result.startedAt).toISOString()}`,
-        `Finished: ${new Date(result.finishedAt).toISOString()}`,
-        `Lease holder: ${result.holderId}`,
-        "",
-        "### Tasks",
-        ...(taskLines.length > 0 ? taskLines : ["- No tasks ran."]),
-    ].join("\n");
+function summarizeManualDream(s: ManualDreamSummary): string {
+    const lines: string[] = ["## /ctx-dream", ""];
+    if (s.ran.length > 0) lines.push(`Ran: ${s.ran.join(", ")}`);
+    if (s.failed.length > 0) lines.push(`Failed: ${s.failed.join(", ")}`);
+    if (s.skippedNoWork.length > 0) lines.push(`Skipped (no work): ${s.skippedNoWork.join(", ")}`);
+    if (s.deferredBusy.length > 0)
+        lines.push(`Busy (already running): ${s.deferredBusy.join(", ")}`);
+    if (
+        s.ran.length === 0 &&
+        s.failed.length === 0 &&
+        s.skippedNoWork.length === 0 &&
+        s.deferredBusy.length === 0
+    ) {
+        lines.push("No enabled dream tasks to run.");
+    }
+    return lines.join("\n");
 }
 
 async function executeDreaming(
@@ -274,26 +275,19 @@ async function executeDreaming(
         dreamer?: {
             config: DreamerConfig;
             projectPath: string;
-            client: unknown;
-            directory: string;
-            executeDream?: (sessionId: string) => Promise<DreamRunResult | null>;
-            experimentalUserMemories?: { enabled: boolean; promotionThreshold: number };
-            experimentalPinKeyFiles?: {
-                enabled: boolean;
-                token_budget: number;
-                min_reads: number;
-            };
-            /** Resolved dreamer fallback chain (forwarded to processDreamQueue). */
-            fallbackModels?: readonly string[];
+            /** Run dream tasks NOW (Dreamer v2 per-task scheduler manual path).
+             *  `task` forces one task ignoring its gate; omitted runs all enabled. */
+            runManual: (task?: DreamTaskName) => Promise<ManualDreamSummary>;
         };
     },
     sessionId: string,
+    argText?: string,
 ): Promise<never> {
     const dreamNotificationParams: NotificationParams = {
         toastDurationMs: deps.toastDurationMs ?? 5000,
     };
 
-    if (!deps.dreamer?.config?.tasks?.length) {
+    if (!deps.dreamer) {
         await deps.sendNotification(
             sessionId,
             "## /ctx-dream\n\nDreaming is not configured for this project.",
@@ -302,49 +296,30 @@ async function executeDreaming(
         throwSentinel("CTX-DREAM");
     }
 
-    // dream_queue table is created in initializeDatabase() — no ensureDreamQueueTable needed.
-    // force=true uses the lease-aware stale cleanup path in enqueueDream: a crashed or
-    // restarted runner can be recovered after the lease TTL, but a healthy in-flight
-    // runner with an unexpired lease is never deleted just because it is older than 2m.
-    const entry = enqueueDream(deps.db, deps.dreamer.projectPath, "manual", true);
-    if (!entry) {
-        await deps.sendNotification(
-            sessionId,
-            "Dream already queued for this project",
-            dreamNotificationParams,
-        );
-        throwSentinel("CTX-DREAM");
+    // Optional single-task arg: `/ctx-dream consolidate`.
+    const requested = argText?.trim();
+    let task: DreamTaskName | undefined;
+    if (requested) {
+        if (!isCanonicalDreamTask(requested)) {
+            await deps.sendNotification(
+                sessionId,
+                `## /ctx-dream\n\nUnknown task "${requested}". Valid tasks: ${CANONICAL_DREAM_TASKS.join(", ")}.`,
+                dreamNotificationParams,
+            );
+            throwSentinel("CTX-DREAM");
+        }
+        task = requested;
     }
-
-    await deps.sendNotification(sessionId, "Starting dream run...", dreamNotificationParams);
-
-    const result = deps.dreamer.executeDream
-        ? await deps.dreamer.executeDream(sessionId)
-        : await processDreamQueue({
-              db: deps.db,
-              client: deps.dreamer.client as never,
-              tasks: deps.dreamer.config.tasks,
-              taskTimeoutMinutes: deps.dreamer.config.task_timeout_minutes,
-              maxRuntimeMinutes: deps.dreamer.config.max_runtime_minutes,
-              experimentalUserMemories: deps.dreamer.experimentalUserMemories,
-              experimentalPinKeyFiles: deps.dreamer.experimentalPinKeyFiles,
-              // /ctx-dream is project-scoped: it should only ever drain THIS
-              // project's queue entry, never accidentally pick up another
-              // host's enqueued work that is sitting at the queue head.
-              projectIdentity: deps.dreamer.projectPath,
-              // Run in this command's own checkout, not a stale sibling
-              // worktree resolved from the shared git:<sha> identity map.
-              sessionDirectoryOverride: deps.dreamer.directory,
-              fallbackModels: deps.dreamer.fallbackModels,
-          });
 
     await deps.sendNotification(
         sessionId,
-        result
-            ? summarizeDreamResult(result)
-            : "Dream queued, but another worker is already processing the queue.",
+        task ? `Running dream task "${task}"...` : "Starting dream run...",
         dreamNotificationParams,
     );
+
+    const summary = await deps.dreamer.runManual(task);
+
+    await deps.sendNotification(sessionId, summarizeManualDream(summary), dreamNotificationParams);
     throwSentinel("CTX-DREAM");
 }
 
@@ -393,17 +368,9 @@ export function createMagicContextCommandHandler(deps: {
     dreamer?: {
         config: DreamerConfig;
         projectPath: string;
-        client: unknown;
-        directory: string;
-        executeDream?: (sessionId: string) => Promise<DreamRunResult | null>;
-        experimentalUserMemories?: { enabled: boolean; promotionThreshold: number };
-        experimentalPinKeyFiles?: {
-            enabled: boolean;
-            token_budget: number;
-            min_reads: number;
-        };
-        /** Resolved dreamer fallback chain (forwarded to processDreamQueue). */
-        fallbackModels?: readonly string[];
+        /** Dreamer v2 manual `/ctx-dream` entry — runs tasks now via the per-task
+         *  scheduler (one forced task, or all enabled). Wired in hook.ts. */
+        runManual: (task?: DreamTaskName) => Promise<ManualRunResult>;
     };
 }) {
     const isStatusCommand = (command: string): boolean => command === "ctx-status";
@@ -449,7 +416,7 @@ export function createMagicContextCommandHandler(deps: {
             }
 
             if (isDream) {
-                await executeDreaming(deps, sessionId);
+                await executeDreaming(deps, sessionId, input.arguments);
                 return;
             }
 

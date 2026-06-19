@@ -6,7 +6,6 @@ import type {
   ContextTokenBreakdown,
   DbCacheEvent,
   DbHealth,
-  DreamQueueEntry,
   DreamRun,
   DreamRunMemoryDetail,
   DreamStateEntry,
@@ -27,6 +26,7 @@ import type {
   SessionSummary,
   SubagentInvocation,
   SubagentTotals,
+  TaskScheduleEntry,
   UserMemory,
   UserMemoryCandidate,
   WorkspaceListItem,
@@ -321,8 +321,8 @@ export async function getSessionCacheStatsFromDb(
 
 // ── Dreamer API ─────────────────────────────────────────────
 
-export async function getDreamQueue(): Promise<DreamQueueEntry[]> {
-  return invoke("get_dream_queue");
+export async function getTaskScheduleState(): Promise<TaskScheduleEntry[]> {
+  return invoke("get_task_schedule_state");
 }
 
 export async function getDreamState(): Promise<DreamStateEntry[]> {
@@ -338,14 +338,6 @@ export async function getDreamRuns(projectPath?: string, limit?: number): Promis
 
 export async function getDreamRunMemoryChanges(runId: number): Promise<DreamRunMemoryDetail> {
   return invoke("get_dream_run_memory_changes", { runId });
-}
-
-export async function enqueueDream(projectPath: string, reason: string): Promise<number> {
-  return invoke("enqueue_dream", { projectPath, reason });
-}
-
-export async function deleteDreamQueueEntry(id: number): Promise<number> {
-  return invoke("delete_dream_queue_entry", { id });
 }
 
 // ── Log & Cache API ─────────────────────────────────────────

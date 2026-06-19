@@ -39,6 +39,10 @@ export interface DreamRunInput {
     smartNotesSurfaced: number;
     smartNotesPending: number;
     memoryChanges?: DreamRunMemoryChanges | null;
+    /** Dreamer child session that produced this run — lets the dashboard scope
+     *  the token join to this run (avoids cross-summing concurrent same-name
+     *  cross-project runs). null when no parent session was resolved. */
+    parentSessionId?: string | null;
 }
 
 const insertDreamRunStatements = new WeakMap<Database, PreparedStatement>();
@@ -48,7 +52,7 @@ function getInsertDreamRunStatement(db: Database): PreparedStatement {
     let stmt = insertDreamRunStatements.get(db);
     if (!stmt) {
         stmt = db.prepare(
-            "INSERT INTO dream_runs (project_path, started_at, finished_at, holder_id, tasks_json, tasks_succeeded, tasks_failed, smart_notes_surfaced, smart_notes_pending, memory_changes_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO dream_runs (project_path, started_at, finished_at, holder_id, tasks_json, tasks_succeeded, tasks_failed, smart_notes_surfaced, smart_notes_pending, memory_changes_json, parent_session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         );
         insertDreamRunStatements.set(db, stmt);
     }
@@ -107,6 +111,7 @@ export function insertDreamRun(db: Database, run: DreamRunInput): void {
         run.smartNotesSurfaced,
         run.smartNotesPending,
         run.memoryChanges ? JSON.stringify(run.memoryChanges) : null,
+        run.parentSessionId ?? null,
     );
 }
 

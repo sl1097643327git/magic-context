@@ -226,7 +226,11 @@ describe("loadPluginConfig — secret redaction", () => {
 });
 
 describe("loadPluginConfig — experimental graduation migration", () => {
-    it("migrates experimental.user_memories object block to dreamer.user_memories", () => {
+    // These cover the FULL chain: experimental.* → (migrate-experimental) →
+    // legacy dreamer.user_memories/pin_key_files → (migrate-dreamer-v2) → the v2
+    // per-task `dreamer.tasks` record. review-user-memories enabled ⇔ schedule != "";
+    // key-files likewise.
+    it("migrates experimental.user_memories object block to a scheduled review-user-memories task", () => {
         const config = JSON.stringify({
             experimental: {
                 user_memories: {
@@ -237,15 +241,16 @@ describe("loadPluginConfig — experimental graduation migration", () => {
         });
 
         const result = loadWithUserConfig(config);
-        expect(result.dreamer?.user_memories?.enabled).toBe(true);
-        expect(result.dreamer?.user_memories?.promotion_threshold).toBe(5);
+        const rum = result.dreamer?.tasks["review-user-memories"];
+        expect(rum?.schedule).not.toBe("");
+        expect(rum?.promotion_threshold).toBe(5);
         // Warning so users know to run doctor.
         expect(result.configWarnings?.join("\n")).toContain("experimental.user_memories");
     });
 
-    it("coerces primitive experimental.user_memories: false to dreamer object shape", () => {
-        // Without coercion, Zod rejects the primitive and silently falls back
-        // to the new default (enabled=true) — flipping the user's opt-out.
+    it("coerces primitive experimental.user_memories: false to a disabled review task", () => {
+        // Without the chain, the user's opt-out would silently flip to the new
+        // default (enabled). The disabled opt-out must survive as schedule "".
         const config = JSON.stringify({
             experimental: {
                 user_memories: false,
@@ -253,10 +258,10 @@ describe("loadPluginConfig — experimental graduation migration", () => {
         });
 
         const result = loadWithUserConfig(config);
-        expect(result.dreamer?.user_memories?.enabled).toBe(false);
+        expect(result.dreamer?.tasks["review-user-memories"].schedule).toBe("");
     });
 
-    it("coerces primitive experimental.pin_key_files: true to dreamer object shape", () => {
+    it("coerces primitive experimental.pin_key_files: true to a scheduled key-files task", () => {
         const config = JSON.stringify({
             experimental: {
                 pin_key_files: true,
@@ -264,28 +269,24 @@ describe("loadPluginConfig — experimental graduation migration", () => {
         });
 
         const result = loadWithUserConfig(config);
-        expect(result.dreamer?.pin_key_files?.enabled).toBe(true);
+        expect(result.dreamer?.tasks["key-files"].schedule).not.toBe("");
     });
 
-    it("merges experimental.pin_key_files sub-fields when dreamer.pin_key_files is a boolean shorthand", () => {
+    it("carries experimental.pin_key_files sub-fields into the key-files task", () => {
         const config = JSON.stringify({
             experimental: {
-                pin_key_files: { token_budget: 9000, min_reads: 5 },
-            },
-            dreamer: {
-                pin_key_files: true,
+                pin_key_files: { enabled: true, token_budget: 9000, min_reads: 5 },
             },
         });
 
         const result = loadWithUserConfig(config);
-        expect(result.dreamer?.pin_key_files?.enabled).toBe(true);
-        expect(result.dreamer?.pin_key_files?.token_budget).toBe(9000);
-        expect(result.dreamer?.pin_key_files?.min_reads).toBe(5);
+        const kf = result.dreamer?.tasks["key-files"];
+        expect(kf?.schedule).not.toBe("");
+        expect(kf?.token_budget).toBe(9000);
+        expect(kf?.min_reads).toBe(5);
     });
 
-    it("preserves existing dreamer.user_memories over legacy experimental.user_memories", () => {
-        // When both exist, dreamer.* wins (user has graduated), but missing
-        // sub-fields from the old block fill in.
+    it("preserves an explicit promotion_threshold through the v2 migration", () => {
         const config = JSON.stringify({
             experimental: {
                 user_memories: {
@@ -293,19 +294,13 @@ describe("loadPluginConfig — experimental graduation migration", () => {
                     promotion_threshold: 10,
                 },
             },
-            dreamer: {
-                user_memories: {
-                    enabled: true,
-                    // Intentionally no promotion_threshold — should pick up from old block.
-                },
-            },
         });
 
         const result = loadWithUserConfig(config);
-        // dreamer.user_memories wins.
-        expect(result.dreamer?.user_memories?.enabled).toBe(true);
-        // Missing sub-field fills in from old block.
-        expect(result.dreamer?.user_memories?.promotion_threshold).toBe(10);
+        const rum = result.dreamer?.tasks["review-user-memories"];
+        // enabled:false → disabled task, but the threshold is carried.
+        expect(rum?.schedule).toBe("");
+        expect(rum?.promotion_threshold).toBe(10);
     });
 
     it("is a no-op when no experimental block exists", () => {

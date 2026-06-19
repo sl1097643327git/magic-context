@@ -62,12 +62,10 @@ fn main() {
             commands::get_session_meta,
             commands::get_context_token_breakdown,
             // Dreamer
-            commands::get_dream_queue,
+            commands::get_task_schedule_state,
             commands::get_dream_state,
             commands::get_dream_runs,
             commands::get_dream_run_memory_changes,
-            commands::enqueue_dream,
-            commands::delete_dream_queue_entry,
             // Logs & Cache
             commands::get_log_entries,
             commands::get_cache_events,

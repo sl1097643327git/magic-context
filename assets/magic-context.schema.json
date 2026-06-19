@@ -345,102 +345,603 @@
             }
           ]
         },
-        "schedule": {
-          "default": "02:00-06:00",
-          "description": "Scheduled window for overnight dreaming (e.g. '02:00-06:00')",
-          "type": "string"
-        },
-        "max_runtime_minutes": {
-          "default": 120,
-          "description": "Maximum runtime per dream session in minutes",
-          "type": "number",
-          "minimum": 10
-        },
         "tasks": {
-          "default": [
-            "consolidate",
-            "verify",
-            "archive-stale",
-            "improve"
-          ],
-          "description": "Tasks to run during dreaming, in order",
-          "type": "array",
-          "items": {
-            "type": "string",
-            "enum": [
-              "consolidate",
-              "verify",
-              "archive-stale",
-              "improve",
-              "maintain-docs"
-            ]
-          }
-        },
-        "task_timeout_minutes": {
-          "default": 20,
-          "description": "Minutes allocated per task before moving to next",
-          "type": "number",
-          "minimum": 5
+          "default": {
+            "consolidate": {
+              "schedule": "0 3 * * *",
+              "timeout_minutes": 20
+            },
+            "verify": {
+              "schedule": "0 3 * * *",
+              "timeout_minutes": 20
+            },
+            "archive-stale": {
+              "schedule": "0 3 * * *",
+              "timeout_minutes": 20
+            },
+            "improve": {
+              "schedule": "0 3 * * *",
+              "timeout_minutes": 20
+            },
+            "maintain-docs": {
+              "schedule": "",
+              "timeout_minutes": 20
+            },
+            "key-files": {
+              "schedule": "",
+              "timeout_minutes": 20,
+              "token_budget": 10000,
+              "min_reads": 4
+            },
+            "evaluate-smart-notes": {
+              "schedule": "0 3 * * *",
+              "timeout_minutes": 20
+            },
+            "review-user-memories": {
+              "schedule": "0 3 * * *",
+              "timeout_minutes": 20,
+              "promotion_threshold": 3
+            }
+          },
+          "type": "object",
+          "properties": {
+            "consolidate": {
+              "default": {
+                "schedule": "0 3 * * *",
+                "timeout_minutes": 20
+              },
+              "type": "object",
+              "properties": {
+                "schedule": {
+                  "default": "",
+                  "type": "string",
+                  "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
+                },
+                "model": {
+                  "description": "Per-task model override (inherits dreamer.model)",
+                  "type": "string"
+                },
+                "fallback_models": {
+                  "description": "Per-task fallback chain (inherits dreamer.fallback_models)",
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  ]
+                },
+                "thinking_level": {
+                  "description": "Pi only: per-task thinking level",
+                  "type": "string",
+                  "enum": [
+                    "off",
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh"
+                  ]
+                },
+                "timeout_minutes": {
+                  "default": 20,
+                  "description": "Minutes allowed for this task before it is aborted",
+                  "type": "number",
+                  "minimum": 5
+                },
+                "promotion_threshold": {
+                  "description": "review-user-memories: min candidate observations before promotion is considered (default: 3)",
+                  "type": "number",
+                  "minimum": 2,
+                  "maximum": 20
+                },
+                "token_budget": {
+                  "description": "key-files: total token budget for pinned files (default: 10000)",
+                  "type": "number",
+                  "minimum": 2000,
+                  "maximum": 30000
+                },
+                "min_reads": {
+                  "description": "key-files: min full-read count before a file is pinned (default: 4)",
+                  "type": "number",
+                  "minimum": 2,
+                  "maximum": 20
+                }
+              }
+            },
+            "verify": {
+              "default": {
+                "schedule": "0 3 * * *",
+                "timeout_minutes": 20
+              },
+              "type": "object",
+              "properties": {
+                "schedule": {
+                  "default": "",
+                  "type": "string",
+                  "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
+                },
+                "model": {
+                  "description": "Per-task model override (inherits dreamer.model)",
+                  "type": "string"
+                },
+                "fallback_models": {
+                  "description": "Per-task fallback chain (inherits dreamer.fallback_models)",
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  ]
+                },
+                "thinking_level": {
+                  "description": "Pi only: per-task thinking level",
+                  "type": "string",
+                  "enum": [
+                    "off",
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh"
+                  ]
+                },
+                "timeout_minutes": {
+                  "default": 20,
+                  "description": "Minutes allowed for this task before it is aborted",
+                  "type": "number",
+                  "minimum": 5
+                },
+                "promotion_threshold": {
+                  "description": "review-user-memories: min candidate observations before promotion is considered (default: 3)",
+                  "type": "number",
+                  "minimum": 2,
+                  "maximum": 20
+                },
+                "token_budget": {
+                  "description": "key-files: total token budget for pinned files (default: 10000)",
+                  "type": "number",
+                  "minimum": 2000,
+                  "maximum": 30000
+                },
+                "min_reads": {
+                  "description": "key-files: min full-read count before a file is pinned (default: 4)",
+                  "type": "number",
+                  "minimum": 2,
+                  "maximum": 20
+                }
+              }
+            },
+            "archive-stale": {
+              "default": {
+                "schedule": "0 3 * * *",
+                "timeout_minutes": 20
+              },
+              "type": "object",
+              "properties": {
+                "schedule": {
+                  "default": "",
+                  "type": "string",
+                  "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
+                },
+                "model": {
+                  "description": "Per-task model override (inherits dreamer.model)",
+                  "type": "string"
+                },
+                "fallback_models": {
+                  "description": "Per-task fallback chain (inherits dreamer.fallback_models)",
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  ]
+                },
+                "thinking_level": {
+                  "description": "Pi only: per-task thinking level",
+                  "type": "string",
+                  "enum": [
+                    "off",
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh"
+                  ]
+                },
+                "timeout_minutes": {
+                  "default": 20,
+                  "description": "Minutes allowed for this task before it is aborted",
+                  "type": "number",
+                  "minimum": 5
+                },
+                "promotion_threshold": {
+                  "description": "review-user-memories: min candidate observations before promotion is considered (default: 3)",
+                  "type": "number",
+                  "minimum": 2,
+                  "maximum": 20
+                },
+                "token_budget": {
+                  "description": "key-files: total token budget for pinned files (default: 10000)",
+                  "type": "number",
+                  "minimum": 2000,
+                  "maximum": 30000
+                },
+                "min_reads": {
+                  "description": "key-files: min full-read count before a file is pinned (default: 4)",
+                  "type": "number",
+                  "minimum": 2,
+                  "maximum": 20
+                }
+              }
+            },
+            "improve": {
+              "default": {
+                "schedule": "0 3 * * *",
+                "timeout_minutes": 20
+              },
+              "type": "object",
+              "properties": {
+                "schedule": {
+                  "default": "",
+                  "type": "string",
+                  "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
+                },
+                "model": {
+                  "description": "Per-task model override (inherits dreamer.model)",
+                  "type": "string"
+                },
+                "fallback_models": {
+                  "description": "Per-task fallback chain (inherits dreamer.fallback_models)",
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  ]
+                },
+                "thinking_level": {
+                  "description": "Pi only: per-task thinking level",
+                  "type": "string",
+                  "enum": [
+                    "off",
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh"
+                  ]
+                },
+                "timeout_minutes": {
+                  "default": 20,
+                  "description": "Minutes allowed for this task before it is aborted",
+                  "type": "number",
+                  "minimum": 5
+                },
+                "promotion_threshold": {
+                  "description": "review-user-memories: min candidate observations before promotion is considered (default: 3)",
+                  "type": "number",
+                  "minimum": 2,
+                  "maximum": 20
+                },
+                "token_budget": {
+                  "description": "key-files: total token budget for pinned files (default: 10000)",
+                  "type": "number",
+                  "minimum": 2000,
+                  "maximum": 30000
+                },
+                "min_reads": {
+                  "description": "key-files: min full-read count before a file is pinned (default: 4)",
+                  "type": "number",
+                  "minimum": 2,
+                  "maximum": 20
+                }
+              }
+            },
+            "maintain-docs": {
+              "default": {
+                "schedule": "",
+                "timeout_minutes": 20
+              },
+              "type": "object",
+              "properties": {
+                "schedule": {
+                  "default": "",
+                  "type": "string",
+                  "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
+                },
+                "model": {
+                  "description": "Per-task model override (inherits dreamer.model)",
+                  "type": "string"
+                },
+                "fallback_models": {
+                  "description": "Per-task fallback chain (inherits dreamer.fallback_models)",
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  ]
+                },
+                "thinking_level": {
+                  "description": "Pi only: per-task thinking level",
+                  "type": "string",
+                  "enum": [
+                    "off",
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh"
+                  ]
+                },
+                "timeout_minutes": {
+                  "default": 20,
+                  "description": "Minutes allowed for this task before it is aborted",
+                  "type": "number",
+                  "minimum": 5
+                },
+                "promotion_threshold": {
+                  "description": "review-user-memories: min candidate observations before promotion is considered (default: 3)",
+                  "type": "number",
+                  "minimum": 2,
+                  "maximum": 20
+                },
+                "token_budget": {
+                  "description": "key-files: total token budget for pinned files (default: 10000)",
+                  "type": "number",
+                  "minimum": 2000,
+                  "maximum": 30000
+                },
+                "min_reads": {
+                  "description": "key-files: min full-read count before a file is pinned (default: 4)",
+                  "type": "number",
+                  "minimum": 2,
+                  "maximum": 20
+                }
+              }
+            },
+            "key-files": {
+              "default": {
+                "schedule": "",
+                "timeout_minutes": 20,
+                "token_budget": 10000,
+                "min_reads": 4
+              },
+              "type": "object",
+              "properties": {
+                "schedule": {
+                  "default": "",
+                  "type": "string",
+                  "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
+                },
+                "model": {
+                  "description": "Per-task model override (inherits dreamer.model)",
+                  "type": "string"
+                },
+                "fallback_models": {
+                  "description": "Per-task fallback chain (inherits dreamer.fallback_models)",
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  ]
+                },
+                "thinking_level": {
+                  "description": "Pi only: per-task thinking level",
+                  "type": "string",
+                  "enum": [
+                    "off",
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh"
+                  ]
+                },
+                "timeout_minutes": {
+                  "default": 20,
+                  "description": "Minutes allowed for this task before it is aborted",
+                  "type": "number",
+                  "minimum": 5
+                },
+                "promotion_threshold": {
+                  "description": "review-user-memories: min candidate observations before promotion is considered (default: 3)",
+                  "type": "number",
+                  "minimum": 2,
+                  "maximum": 20
+                },
+                "token_budget": {
+                  "description": "key-files: total token budget for pinned files (default: 10000)",
+                  "type": "number",
+                  "minimum": 2000,
+                  "maximum": 30000
+                },
+                "min_reads": {
+                  "description": "key-files: min full-read count before a file is pinned (default: 4)",
+                  "type": "number",
+                  "minimum": 2,
+                  "maximum": 20
+                }
+              }
+            },
+            "evaluate-smart-notes": {
+              "default": {
+                "schedule": "0 3 * * *",
+                "timeout_minutes": 20
+              },
+              "type": "object",
+              "properties": {
+                "schedule": {
+                  "default": "",
+                  "type": "string",
+                  "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
+                },
+                "model": {
+                  "description": "Per-task model override (inherits dreamer.model)",
+                  "type": "string"
+                },
+                "fallback_models": {
+                  "description": "Per-task fallback chain (inherits dreamer.fallback_models)",
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  ]
+                },
+                "thinking_level": {
+                  "description": "Pi only: per-task thinking level",
+                  "type": "string",
+                  "enum": [
+                    "off",
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh"
+                  ]
+                },
+                "timeout_minutes": {
+                  "default": 20,
+                  "description": "Minutes allowed for this task before it is aborted",
+                  "type": "number",
+                  "minimum": 5
+                },
+                "promotion_threshold": {
+                  "description": "review-user-memories: min candidate observations before promotion is considered (default: 3)",
+                  "type": "number",
+                  "minimum": 2,
+                  "maximum": 20
+                },
+                "token_budget": {
+                  "description": "key-files: total token budget for pinned files (default: 10000)",
+                  "type": "number",
+                  "minimum": 2000,
+                  "maximum": 30000
+                },
+                "min_reads": {
+                  "description": "key-files: min full-read count before a file is pinned (default: 4)",
+                  "type": "number",
+                  "minimum": 2,
+                  "maximum": 20
+                }
+              }
+            },
+            "review-user-memories": {
+              "default": {
+                "schedule": "0 3 * * *",
+                "timeout_minutes": 20,
+                "promotion_threshold": 3
+              },
+              "type": "object",
+              "properties": {
+                "schedule": {
+                  "default": "",
+                  "type": "string",
+                  "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
+                },
+                "model": {
+                  "description": "Per-task model override (inherits dreamer.model)",
+                  "type": "string"
+                },
+                "fallback_models": {
+                  "description": "Per-task fallback chain (inherits dreamer.fallback_models)",
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  ]
+                },
+                "thinking_level": {
+                  "description": "Pi only: per-task thinking level",
+                  "type": "string",
+                  "enum": [
+                    "off",
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh"
+                  ]
+                },
+                "timeout_minutes": {
+                  "default": 20,
+                  "description": "Minutes allowed for this task before it is aborted",
+                  "type": "number",
+                  "minimum": 5
+                },
+                "promotion_threshold": {
+                  "description": "review-user-memories: min candidate observations before promotion is considered (default: 3)",
+                  "type": "number",
+                  "minimum": 2,
+                  "maximum": 20
+                },
+                "token_budget": {
+                  "description": "key-files: total token budget for pinned files (default: 10000)",
+                  "type": "number",
+                  "minimum": 2000,
+                  "maximum": 30000
+                },
+                "min_reads": {
+                  "description": "key-files: min full-read count before a file is pinned (default: 4)",
+                  "type": "number",
+                  "minimum": 2,
+                  "maximum": 20
+                }
+              }
+            }
+          },
+          "description": "Per-task scheduling + model config. Each task has its own cron schedule and may override the dreamer-level model."
         },
         "inject_docs": {
           "default": true,
           "description": "Inject ARCHITECTURE.md and STRUCTURE.md into system prompt",
           "type": "boolean"
         },
-        "user_memories": {
-          "default": {
-            "enabled": true,
-            "promotion_threshold": 3
-          },
-          "description": "User memory pipeline: historian extracts behavior observations from each compartment run; dreamer reviews recurring patterns and promotes them to stable user memories injected into all sessions as <user-profile>. Requires dreamer to not be disabled for promotion to actually happen. Graduated from experimental in v0.14. Default: enabled.",
-          "type": "object",
-          "properties": {
-            "enabled": {
-              "default": true,
-              "description": "Enable user memory extraction and promotion (default: true)",
-              "type": "boolean"
-            },
-            "promotion_threshold": {
-              "default": 3,
-              "description": "Minimum candidate observations before dreamer considers promotion (default: 3)",
-              "type": "number",
-              "minimum": 2,
-              "maximum": 20
-            }
-          }
-        },
-        "pin_key_files": {
-          "default": {
-            "enabled": false,
-            "token_budget": 10000,
-            "min_reads": 4
-          },
-          "description": "Pin frequently-read key files into the system prompt so the agent doesn't need to re-read them after context drops. Dreamer identifies key files per session based on read patterns. Requires dreamer to not be disabled for selection to happen. Graduated from experimental in v0.14. Default: disabled.",
-          "type": "object",
-          "properties": {
-            "enabled": {
-              "default": false,
-              "description": "Enable key file pinning (default: false)",
-              "type": "boolean"
-            },
-            "token_budget": {
-              "default": 10000,
-              "description": "Total token budget for all pinned key files (min: 2000, max: 30000, default: 10000)",
-              "type": "number",
-              "minimum": 2000,
-              "maximum": 30000
-            },
-            "min_reads": {
-              "default": 4,
-              "description": "Minimum full-read count before a file is considered for pinning (min: 2, default: 4)",
-              "type": "number",
-              "minimum": 2,
-              "maximum": 20
-            }
-          }
-        },
         "thinking_level": {
-          "description": "Pi only: explicit thinking level for dreamer subagent invocations. See historian.thinking_level.",
+          "description": "Pi only: default thinking level for dreamer subagent invocations. See historian.thinking_level.",
           "type": "string",
           "enum": [
             "off",

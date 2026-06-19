@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { replaceAllCompartmentState } from "@magic-context/core/features/magic-context/compartment-storage";
-import { enqueueDream } from "@magic-context/core/features/magic-context/dreamer/queue";
+
 import { runMigrations } from "@magic-context/core/features/magic-context/migrations";
 import { initializeDatabase } from "@magic-context/core/features/magic-context/storage-db";
 import { queuePendingOp } from "@magic-context/core/features/magic-context/storage-ops";
@@ -160,7 +160,7 @@ describe("Pi Magic Context commands", () => {
 		expect(sent[0]?.options?.triggerTurn).toBe(false);
 	});
 
-	it("registers /ctx-dream and reports existing or new queue state", async () => {
+	it("registers /ctx-dream and starts a run (Dreamer v2 manual path)", async () => {
 		const db = createDb();
 		const { pi, handlers, sent } = createMockPi();
 
@@ -169,15 +169,17 @@ describe("Pi Magic Context commands", () => {
 			projectDir: "/tmp/project",
 			projectIdentity: "/tmp/project",
 		});
+		// Not registered with the dreamer timer in this unit test, so runManual
+		// throws "not registered" → the handler reports the failure. We only
+		// assert the command is wired and emits a /ctx-dream status message.
 		await handlers.get("ctx-dream")?.("", createCtx());
 
 		expect(sent[0]?.message.customType).toBe("ctx-status");
 		expect(sent[0]?.message.content).toContain("/ctx-dream");
 		expect(sent[0]?.options?.triggerTurn).toBe(false);
-		expect(enqueueDream(db, "/tmp/project", "manual")).toBeNull();
 	});
 
-	it("/ctx-dream reports friendly disabled state without queueing", async () => {
+	it("/ctx-dream reports friendly disabled state without running", async () => {
 		const db = createDb();
 		const { pi, handlers, sent } = createMockPi();
 
@@ -190,7 +192,6 @@ describe("Pi Magic Context commands", () => {
 		await handlers.get("ctx-dream")?.("", createCtx());
 
 		expect(sent[0]?.message.content).toContain("Dreamer is disabled");
-		expect(enqueueDream(db, "/tmp/project", "manual")).not.toBeNull();
 	});
 
 	it("/ctx-status resolves project identity at command time", async () => {
@@ -219,13 +220,13 @@ describe("Pi Magic Context commands", () => {
 		registerCtxStatusCommand(pi as never, {
 			db,
 			projectIdentity: "/tmp/project",
-			dreamer: { runnable: true, schedule: "daily" },
+			dreamer: { runnable: true, scheduleSummary: "consolidate 0 3 * * *" },
 		});
 
 		await handlers.get("ctx-status")?.("", createCtx());
 		expect(sent[0]?.message.details).toMatchObject({
 			details: {
-				dreamer: { enabled: true, schedule: "daily" },
+				dreamer: { enabled: true, scheduleSummary: "consolidate 0 3 * * *" },
 			},
 		});
 	});

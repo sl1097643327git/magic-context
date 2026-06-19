@@ -10,11 +10,18 @@ import {
     type SidekickConfig,
 } from "../../config/schema/magic-context";
 import type { createCompactionHandler } from "../../features/magic-context/compaction";
+import { openOpenCodeDb } from "../../features/magic-context/dreamer/open-opencode-db";
 import {
-    checkScheduleAndEnqueue,
-    processDreamQueue,
-    registerDreamProjectDirectory,
-} from "../../features/magic-context/dreamer";
+    buildDreamTaskRuntimeConfigs,
+    keyFilesEnabled,
+    keyFilesTokenBudget,
+    userMemoryCollectionEnabled,
+} from "../../features/magic-context/dreamer/task-config";
+import { createDreamTaskExecutor } from "../../features/magic-context/dreamer/task-executor";
+import {
+    runDueTasksForProject,
+    runManualDream,
+} from "../../features/magic-context/dreamer/task-scheduler";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import {
     embedSessionCompartmentChunks,
@@ -192,7 +199,6 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     }
 
     const projectPath = resolveProjectIdentity(deps.directory);
-    registerDreamProjectDirectory(projectPath, deps.directory);
 
     // Startup consistency check: reconcile any compaction markers whose state
     // references rows that no longer exist in OpenCode's DB. This can happen
@@ -341,7 +347,11 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         })(),
         historianTwoPass: deps.config.historian?.two_pass === true,
         runMigration: deps.config.memory?.enabled !== false && !!deps.config.historian?.model,
-        userMemoriesEnabled: dreamerConfig?.user_memories?.enabled === true,
+        // Option C privacy gate: behavioral observation candidates are collected
+        // during historian runs only when the user has SCHEDULED the
+        // review-user-memories task (schedule != ""). Replaces the v1
+        // user_memories.enabled flag that gated both collection and review.
+        userMemoriesEnabled: userMemoryCollectionEnabled(dreamerConfig),
         ensureProjectRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
         getNotificationParams: (sid) =>
             getLiveNotificationParams(
@@ -580,9 +590,9 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         },
         projectPath,
         historianRunnable,
-        experimentalUserMemories: dreamerConfig?.user_memories?.enabled,
-        experimentalPinKeyFiles: dreamerConfig?.pin_key_files?.enabled ?? false,
-        experimentalPinKeyFilesTokenBudget: dreamerConfig?.pin_key_files?.token_budget,
+        experimentalUserMemories: userMemoryCollectionEnabled(dreamerConfig),
+        experimentalPinKeyFiles: keyFilesEnabled(dreamerConfig),
+        experimentalPinKeyFilesTokenBudget: keyFilesTokenBudget(dreamerConfig),
         experimentalTemporalAwareness: deps.config.temporal_awareness === true,
         historianTwoPass: deps.config.historian?.two_pass === true,
         liveModelBySession,
@@ -658,7 +668,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
 
     const runDreamQueueInBackground = (): void => {
         const dreaming = deps.config.dreamer;
-        if (!dreaming || dreaming.disable === true || !dreaming.schedule?.trim()) {
+        if (!dreaming || dreaming.disable === true) {
             return;
         }
 
@@ -666,41 +676,26 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         if (now - lastScheduleCheckMs < DREAM_SCHEDULE_CHECK_INTERVAL_MS) {
             return;
         }
+        lastScheduleCheckMs = now;
 
-        try {
-            checkScheduleAndEnqueue(db, dreaming.schedule, projectPath);
-            lastScheduleCheckMs = now;
-        } catch (error) {
-            log("[dreamer] scheduled enqueue check failed:", error);
-            return;
-        }
-
-        void processDreamQueue({
-            db,
+        // Dreamer v2: the per-task scheduler owns due-evaluation + keyed leases.
+        // This message-event-driven path is a secondary trigger to the process
+        // timer; both call the same idempotent scheduler (leases prevent overlap).
+        const runtimeConfigs = buildDreamTaskRuntimeConfigs(dreaming);
+        const executor = createDreamTaskExecutor({
             client: deps.client,
             // Run in the directory this hook instance owns, not a stale sibling
             // checkout resolved from the shared git:<sha> identity map.
-            sessionDirectoryOverride: deps.directory,
-            tasks: dreaming.tasks,
-            taskTimeoutMinutes: dreaming.task_timeout_minutes,
-            maxRuntimeMinutes: dreaming.max_runtime_minutes,
-            experimentalUserMemories: dreaming.user_memories?.enabled
-                ? {
-                      enabled: true,
-                      promotionThreshold: dreaming.user_memories.promotion_threshold,
-                  }
-                : undefined,
-            experimentalPinKeyFiles: dreaming.pin_key_files?.enabled
-                ? {
-                      enabled: true,
-                      token_budget: dreaming.pin_key_files.token_budget,
-                      min_reads: dreaming.pin_key_files.min_reads,
-                  }
-                : undefined,
-            fallbackModels: resolveFallbackChain(dreaming.fallback_models),
+            sessionDirectory: deps.directory,
+            openOpenCodeDb,
+        });
+        void runDueTasksForProject({
+            db,
             projectIdentity: projectPath,
+            tasks: runtimeConfigs,
+            executor,
         }).catch((error: unknown) => {
-            log("[dreamer] scheduled queue processing failed:", error);
+            log("[dreamer] scheduled task run failed:", error);
         });
     };
 
@@ -778,22 +773,21 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             ? {
                   config: dreamerConfig,
                   projectPath,
-                  client: deps.client,
-                  directory: deps.directory,
-                  experimentalUserMemories: dreamerConfig.user_memories?.enabled
-                      ? {
-                            enabled: true,
-                            promotionThreshold: dreamerConfig.user_memories.promotion_threshold,
-                        }
-                      : undefined,
-                  experimentalPinKeyFiles: dreamerConfig.pin_key_files?.enabled
-                      ? {
-                            enabled: true,
-                            token_budget: dreamerConfig.pin_key_files.token_budget,
-                            min_reads: dreamerConfig.pin_key_files.min_reads,
-                        }
-                      : undefined,
-                  fallbackModels: resolveFallbackChain(dreamerConfig.fallback_models),
+                  // Manual /ctx-dream → Dreamer v2 per-task scheduler. Runs in this
+                  // hook's own checkout (not a stale sibling worktree from the
+                  // shared git:<sha> identity map).
+                  runManual: (task) =>
+                      runManualDream({
+                          db,
+                          projectIdentity: projectPath,
+                          tasks: buildDreamTaskRuntimeConfigs(dreamerConfig),
+                          executor: createDreamTaskExecutor({
+                              client: deps.client,
+                              sessionDirectory: deps.directory,
+                              openOpenCodeDb,
+                          }),
+                          task,
+                      }),
               }
             : undefined,
     });
@@ -821,9 +815,9 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             "<!-- magic-context: skip -->",
         ],
         internalChildSessions,
-        experimentalUserMemories: deps.config.dreamer?.user_memories?.enabled,
-        experimentalPinKeyFiles: deps.config.dreamer?.pin_key_files?.enabled ?? false,
-        experimentalPinKeyFilesTokenBudget: deps.config.dreamer?.pin_key_files?.token_budget,
+        experimentalUserMemories: userMemoryCollectionEnabled(deps.config.dreamer),
+        experimentalPinKeyFiles: keyFilesEnabled(deps.config.dreamer),
+        experimentalPinKeyFilesTokenBudget: keyFilesTokenBudget(deps.config.dreamer),
         experimentalTemporalAwareness: deps.config.temporal_awareness === true,
         // Caveman text compression only runs when ctx_reduce_enabled === false
         // (gated in transform.ts and in hook.ts cavemanTextCompression wiring above).

@@ -1538,6 +1538,34 @@ const MIGRATIONS: Migration[] = [
             ensureColumn(db, "session_meta", "detected_context_limit_model_key", "TEXT");
         },
     },
+    {
+        version: 42,
+        description: "per-task dreamer scheduling state (Dreamer v2 A+B)",
+        up: (db: Database) => {
+            // Create the empty per-task schedule table. last_run_at seeding from
+            // the legacy dream_state['last_dream_at:<project>'] happens at
+            // scheduler FIRST-SEED time (config-aware — the migration can't know
+            // which tasks are enabled). dream_queue is intentionally NOT dropped
+            // here: already-open older binaries + the separate dashboard process
+            // still read it; it's retired by stopping all plugin reads/writes and
+            // dropped in a later migration once those have cycled.
+            db.exec(`
+                CREATE TABLE IF NOT EXISTS task_schedule_state (
+                    project_path  TEXT    NOT NULL,
+                    task          TEXT    NOT NULL,
+                    last_run_at   INTEGER,
+                    next_due_at   INTEGER,
+                    schedule      TEXT,
+                    last_status   TEXT,
+                    last_error    TEXT,
+                    retry_count   INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (project_path, task)
+                );
+                CREATE INDEX IF NOT EXISTS idx_task_schedule_due
+                    ON task_schedule_state(next_due_at);
+            `);
+        },
+    },
 ];
 
 /**

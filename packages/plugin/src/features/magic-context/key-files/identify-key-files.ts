@@ -9,6 +9,7 @@ import { getErrorMessage } from "../../../shared/error-message";
 import { getHarness } from "../../../shared/harness";
 import { shouldKeepSubagents } from "../../../shared/keep-subagents";
 import { log } from "../../../shared/logger";
+import { modelBodyField } from "../../../shared/resolve-fallbacks";
 import type { Database } from "../../../shared/sqlite";
 import { peekLeaseHolderAndExpiry, renewLease } from "../dreamer/lease";
 import { recordChildInvocation } from "../subagent-token-capture";
@@ -409,6 +410,8 @@ export function commitKeyFiles(args: {
     configHash: string;
     modelId: string;
     leaseHolderId: string;
+    /** Keyed lease to verify at commit time (Dreamer v2). Defaults to legacy. */
+    leaseKey?: string;
     bumpVersion?: typeof bumpKeyFilesVersion;
 }): number | null {
     if (args.validated.no_change) return null;
@@ -426,9 +429,13 @@ export function commitKeyFiles(args: {
     args.db.exec("BEGIN IMMEDIATE");
     let committed = false;
     try {
-        if (!peekLeaseHolderAndExpiry(args.db, args.leaseHolderId)) {
+        if (!peekLeaseHolderAndExpiry(args.db, args.leaseHolderId, args.leaseKey)) {
+            // Lease-loss is a FAILURE, not a no-op: throwing (vs returning null,
+            // which is also the no_change signal) makes runKeyFilesTask propagate
+            // it to the executor so the run records "failed" and next_due_at is NOT
+            // advanced past unprocessed work. "lease" → classified transient.
             log(`key-files commit aborted: lease lost (holder ${args.leaseHolderId})`);
-            return null;
+            throw new Error("Dream lease lost during key-files commit");
         }
         args.db.prepare("DELETE FROM project_key_files WHERE project_path = ?").run(projectPath);
         insertResolvedKeyFiles(
@@ -463,7 +470,10 @@ async function runKeyFilesLlm(args: {
     projectPath: string;
     prompt: string;
     deadline: number;
+    model?: string;
     fallbackModels?: readonly string[];
+    /** Aborts the in-flight LLM call when the dream lease is lost mid-run. */
+    signal?: AbortSignal;
 }): Promise<{ text: string; messages: unknown[]; agentSessionId: string }> {
     const createResponse = await args.client.session.create({
         body: {
@@ -491,13 +501,17 @@ async function runKeyFilesLlm(args: {
             body: {
                 agent: DREAMER_AGENT,
                 system: KEY_FILES_SYSTEM_PROMPT,
+                ...modelBodyField(args.model),
                 parts: [{ type: "text", text: args.prompt, synthetic: true }],
             },
         },
         {
-            timeoutMs: Math.min(Math.max(0, args.deadline - Date.now()), 5 * 60 * 1000),
+            // The executor owns the per-task deadline; honor the remaining budget
+            // rather than silently re-capping at 5 minutes (Oracle P1).
+            timeoutMs: Math.max(0, args.deadline - Date.now()),
             fallbackModels: args.fallbackModels,
             callContext: "dreamer:key-files-v6",
+            signal: args.signal,
         },
     );
     const messagesResponse = await args.client.session.messages({
@@ -519,8 +533,12 @@ export async function runKeyFilesTask(args: {
     projectPath: string;
     config: V6KeyFilesConfig;
     holderId: string;
+    /** Keyed lease this task holds (Dreamer v2: per-project key-files domain).
+     *  Defaults to the legacy single lease key for back-compat. */
+    leaseKey?: string;
     deadline: number;
     parentSessionId?: string;
+    model?: string;
     fallbackModels?: readonly string[];
 }): Promise<{ committedVersion: number | null; candidates: number; noChange: boolean }> {
     if (!args.config.enabled) return { committedVersion: null, candidates: 0, noChange: false };
@@ -572,13 +590,19 @@ export async function runKeyFilesTask(args: {
     // commit-time lease check (peekLeaseHolderAndExpiry) sees a live expiry.
     // Without this, key-files runs longer than the 2-minute lease TTL fail at
     // commit time with "lease lost" even though no other holder took over.
+    // Abort the in-flight LLM call when the lease is lost mid-run, so a
+    // stale holder stops burning compute and fails fast (vs running to the
+    // deadline then aborting at commit).
+    const abortController = new AbortController();
     const leaseInterval = setInterval(() => {
         try {
-            if (!renewLease(args.db, args.holderId)) {
-                log("[key-files] lease renewal failed during LLM call");
+            if (!renewLease(args.db, args.holderId, args.leaseKey)) {
+                log("[key-files] lease renewal failed during LLM call — aborting");
+                abortController.abort();
             }
         } catch (error) {
             log(`[key-files] lease renewal threw: ${getErrorMessage(error)}`);
+            abortController.abort();
         }
     }, 60_000);
     // Token telemetry for the key-files LLM call (dashboard "key files" row +
@@ -604,7 +628,9 @@ export async function runKeyFilesTask(args: {
             parentSessionId: args.parentSessionId,
             harness: getHarness(),
             subagent: "dreamer",
-            task: "key files",
+            // Canonical v2 task name — MUST match the dream_runs row name
+            // (config.task) so the dashboard's task GROUP BY join lines up.
+            task: "key-files",
             startedAt: llmStartedAt,
             status: params.status,
             messages: params.messages,
@@ -623,7 +649,9 @@ export async function runKeyFilesTask(args: {
                 projectPath,
                 prompt,
                 deadline: args.deadline,
+                model: args.model,
                 fallbackModels: args.fallbackModels,
+                signal: abortController.signal,
             });
             childSessionId = agentSessionId;
             // The LLM call completed (tokens spent) — record before validation,
@@ -649,10 +677,11 @@ export async function runKeyFilesTask(args: {
             projectPath,
             validated,
             configHash,
-            modelId: args.fallbackModels?.[0] ?? "dreamer",
+            modelId: args.model ?? args.fallbackModels?.[0] ?? "dreamer",
             leaseHolderId: args.holderId,
+            leaseKey: args.leaseKey,
         });
-        renewLease(args.db, args.holderId);
+        renewLease(args.db, args.holderId, args.leaseKey);
         taskCompleted = true;
         return { committedVersion, candidates: candidates.length, noChange: false };
     } finally {

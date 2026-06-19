@@ -406,13 +406,17 @@ pub struct SubagentTotals {
 
 // ── Dreamer types ──────────────────────────────────────────────
 
+/// Dreamer v2 per-task schedule state (one row per project+task). Replaces the
+/// retired project-level `dream_queue`. Read-only in the dashboard: manual runs
+/// happen via `/ctx-dream` in the harness; the dashboard only reflects state.
 #[derive(Debug, Serialize, Clone)]
-pub struct DreamQueueEntry {
-    pub id: i64,
+pub struct TaskScheduleEntry {
     pub project_path: String,
-    pub reason: String,
-    pub enqueued_at: i64,
-    pub started_at: Option<i64>,
+    pub task: String,
+    pub last_run_at: Option<i64>,
+    pub next_due_at: Option<i64>,
+    pub last_status: Option<String>,
+    pub last_error: Option<String>,
     pub retry_count: i64,
 }
 
@@ -435,6 +439,11 @@ pub struct DreamRun {
     pub smart_notes_surfaced: i64,
     pub smart_notes_pending: i64,
     pub memory_changes_json: Option<serde_json::Value>,
+    /// Dreamer child session that produced this run (Dreamer v2). Scopes the
+    /// token join so concurrent same-name cross-project runs don't cross-sum.
+    /// None for legacy rows written before the column existed.
+    #[serde(skip)]
+    pub parent_session_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -1720,7 +1729,7 @@ pub fn get_projects(conn: &Connection) -> Result<Vec<ProjectInfo>, rusqlite::Err
     let mut stmt = conn.prepare(
         "SELECT project_path FROM memories
          UNION
-         SELECT project_path FROM dream_queue
+         SELECT project_path FROM task_schedule_state
          UNION
          SELECT project_path FROM dream_runs
          ORDER BY project_path",
@@ -4144,19 +4153,22 @@ pub fn get_subagent_totals_by_subagent(
 
 // ── Dreamer queries ─────────────────────────────────────────
 
-pub fn get_dream_queue(conn: &Connection) -> Result<Vec<DreamQueueEntry>, rusqlite::Error> {
+pub fn get_task_schedule_state(
+    conn: &Connection,
+) -> Result<Vec<TaskScheduleEntry>, rusqlite::Error> {
     let mut stmt = conn.prepare(
-        "SELECT id, project_path, reason, enqueued_at, started_at, retry_count
-         FROM dream_queue ORDER BY enqueued_at DESC LIMIT 50",
+        "SELECT project_path, task, last_run_at, next_due_at, last_status, last_error, retry_count
+         FROM task_schedule_state ORDER BY project_path, task",
     )?;
     let rows = stmt.query_map([], |row| {
-        Ok(DreamQueueEntry {
-            id: row.get(0)?,
-            project_path: row.get(1)?,
-            reason: row.get(2)?,
-            enqueued_at: row.get(3)?,
-            started_at: row.get(4)?,
-            retry_count: row.get(5)?,
+        Ok(TaskScheduleEntry {
+            project_path: row.get(0)?,
+            task: row.get(1)?,
+            last_run_at: row.get(2)?,
+            next_due_at: row.get(3)?,
+            last_status: row.get(4)?,
+            last_error: row.get(5)?,
+            retry_count: row.get(6)?,
         })
     })?;
     rows.collect()
@@ -4205,7 +4217,21 @@ fn map_dream_run_row(row: &rusqlite::Row<'_>) -> Result<DreamRun, rusqlite::Erro
             .as_deref()
             .map(|value| parse_dream_run_json(value, 10))
             .transpose()?,
+        parent_session_id: row.get(11)?,
     })
+}
+
+type TokenRow = (String, i64, i64, i64, i64, i64);
+
+fn map_token_row(row: &rusqlite::Row<'_>) -> Result<TokenRow, rusqlite::Error> {
+    Ok((
+        row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+        row.get::<_, i64>(1)?,
+        row.get::<_, i64>(2)?,
+        row.get::<_, i64>(3)?,
+        row.get::<_, i64>(4)?,
+        row.get::<_, i64>(5)?,
+    ))
 }
 
 fn enrich_dream_run_tokens(conn: &Connection, run: &mut DreamRun) {
@@ -4213,30 +4239,51 @@ fn enrich_dream_run_tokens(conn: &Connection, run: &mut DreamRun) {
     else {
         return;
     };
-    let Ok(mut stmt) = conn.prepare(
-        "SELECT task, COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens), 0),
-                COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
-                COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(cache_write_tokens), 0)
-         FROM subagent_invocations
-         WHERE subagent = 'dreamer' AND started_at >= ?1 AND started_at <= ?2
-         GROUP BY task",
-    ) else {
-        return;
+    // Scope the token join to THIS run's parent (dreamer child) session when we
+    // have it (Dreamer v2): per-project leases let the same task name run
+    // concurrently across projects, so a pure time-window + task join would
+    // cross-sum overlapping runs' tokens. Legacy rows (parent_session_id NULL)
+    // fall back to the time-window join — still correct for them because v1 ran
+    // one project at a time so windows never overlapped.
+    let rows_result = if let Some(parent) = run.parent_session_id.as_deref() {
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT task, COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens), 0),
+                    COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+                    COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(cache_write_tokens), 0)
+             FROM subagent_invocations
+             WHERE subagent = 'dreamer' AND session_id = ?1
+               AND started_at >= ?2 AND started_at <= ?3
+             GROUP BY task",
+        ) else {
+            return;
+        };
+        stmt.query_map(
+            rusqlite::params![parent, run.started_at, run.finished_at],
+            map_token_row,
+        )
+        .map(|rows| rows.flatten().collect::<Vec<_>>())
+    } else {
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT task, COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens), 0),
+                    COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+                    COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(cache_write_tokens), 0)
+             FROM subagent_invocations
+             WHERE subagent = 'dreamer' AND started_at >= ?1 AND started_at <= ?2
+             GROUP BY task",
+        ) else {
+            return;
+        };
+        stmt.query_map(
+            rusqlite::params![run.started_at, run.finished_at],
+            map_token_row,
+        )
+        .map(|rows| rows.flatten().collect::<Vec<_>>())
     };
-    let Ok(rows) = stmt.query_map(rusqlite::params![run.started_at, run.finished_at], |row| {
-        Ok((
-            row.get::<_, Option<String>>(0)?.unwrap_or_default(),
-            row.get::<_, i64>(1)?,
-            row.get::<_, i64>(2)?,
-            row.get::<_, i64>(3)?,
-            row.get::<_, i64>(4)?,
-            row.get::<_, i64>(5)?,
-        ))
-    }) else {
+    let Ok(collected) = rows_result else {
         return;
     };
     let mut totals = std::collections::HashMap::new();
-    for row in rows.flatten() {
+    for row in collected {
         totals.insert(row.0.clone(), row);
     }
     for task in &mut tasks {
@@ -4374,7 +4421,7 @@ pub fn get_dream_runs(
         let placeholders = build_in_placeholders(paths.len(), 1);
         let limit_idx = paths.len() + 1;
         let sql = format!(
-            "SELECT id, project_path, started_at, finished_at, holder_id, tasks_json, tasks_succeeded, tasks_failed, smart_notes_surfaced, smart_notes_pending, memory_changes_json
+            "SELECT id, project_path, started_at, finished_at, holder_id, tasks_json, tasks_succeeded, tasks_failed, smart_notes_surfaced, smart_notes_pending, memory_changes_json, parent_session_id
              FROM dream_runs
              WHERE project_path IN ({placeholders})
              ORDER BY finished_at DESC
@@ -4394,7 +4441,7 @@ pub fn get_dream_runs(
     } else {
         let mut stmt = conn
             .prepare(
-                "SELECT id, project_path, started_at, finished_at, holder_id, tasks_json, tasks_succeeded, tasks_failed, smart_notes_surfaced, smart_notes_pending, memory_changes_json
+                "SELECT id, project_path, started_at, finished_at, holder_id, tasks_json, tasks_succeeded, tasks_failed, smart_notes_surfaced, smart_notes_pending, memory_changes_json, parent_session_id
                  FROM dream_runs
                  ORDER BY finished_at DESC
                  LIMIT ?1",
@@ -4415,57 +4462,11 @@ pub fn get_dream_runs(
     Ok(runs)
 }
 
-pub fn enqueue_dream(
-    conn: &mut Connection,
-    project_path: &str,
-    reason: &str,
-) -> Result<i64, rusqlite::Error> {
-    // Mirror the plugin's enqueueDream dedup: skip if this project already has ANY
-    // queue entry (queued or running). Without this, repeated dashboard "dream now"
-    // clicks pile up duplicate rows that a single identity-filtered host drains one
-    // at a time. project_path is the resolved identity (the UI passes git:/dir:),
-    // matching how hosts dequeue — a raw path would never be drained.
-    //
-    // The check + insert run under BEGIN IMMEDIATE: dream_queue has no UNIQUE on
-    // project_path, so a DEFERRED check-then-insert lets two concurrent clicks both
-    // pass the SELECT and insert duplicates. The writer lock serializes them.
-    let identity = normalize_stored_project_path(project_path);
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let existing: Option<i64> = tx
-        .query_row(
-            "SELECT id FROM dream_queue WHERE project_path = ?1 LIMIT 1",
-            rusqlite::params![identity],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if let Some(id) = existing {
-        tx.commit()?;
-        return Ok(id);
-    }
-    let now = chrono::Utc::now().timestamp_millis();
-    tx.execute(
-        "INSERT INTO dream_queue (project_path, reason, enqueued_at) VALUES (?1, ?2, ?3)",
-        rusqlite::params![identity, reason, now],
-    )?;
-    let id = tx.last_insert_rowid();
-    tx.commit()?;
-    Ok(id)
-}
-
-/// Delete a single dream-queue entry by id. Used to clear stale entries for
-/// projects with no active runner (e.g. a manual dashboard trigger for a project
-/// that is not currently loaded by any OpenCode/Pi host, so nothing ever
-/// dequeues it). Returns the number of rows removed (0 if the id was already
-/// gone — e.g. a runner picked it up between the list read and this call).
-pub fn delete_dream_queue_entry(conn: &mut Connection, id: i64) -> Result<usize, rusqlite::Error> {
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let removed = tx.execute(
-        "DELETE FROM dream_queue WHERE id = ?1",
-        rusqlite::params![id],
-    )?;
-    tx.commit()?;
-    Ok(removed)
-}
+// Dreamer v2 has no dashboard-writable queue: the per-task scheduler drains
+// directly off task_schedule_state + keyed leases inside the running host, and
+// the dashboard is DB-only (no live channel to trigger an in-process run).
+// Manual runs go through `/ctx-dream` in the harness. The dashboard reflects
+// schedule state read-only via get_task_schedule_state.
 
 // ── User Memory types ───────────────────────────────────────
 
@@ -4666,7 +4667,7 @@ pub fn get_db_health(db_path: &PathBuf) -> DbHealth {
                 "session_meta",
                 "tags",
                 "pending_ops",
-                "dream_queue",
+                "task_schedule_state",
                 "dream_state",
             ];
             for table in &tables {

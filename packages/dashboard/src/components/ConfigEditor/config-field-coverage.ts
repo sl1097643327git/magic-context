@@ -38,10 +38,11 @@ export const RENDERED_PREFIXES: readonly string[] = [
   "dreamer.model",
   "dreamer.fallback_models",
   "dreamer.disable",
-  "dreamer.schedule",
   "dreamer.inject_docs",
-  "dreamer.user_memories.enabled",
-  "dreamer.pin_key_files",
+  // Dreamer v2 per-task editor (DreamerTasksField) renders the whole tasks
+  // subtree: per-task schedule preset/custom, model override, and task-specific
+  // params (promotion_threshold, token_budget, min_reads).
+  "dreamer.tasks",
   // Sidekick (panel renders a curated subset)
   "sidekick.model",
   "sidekick.fallback_models",
@@ -77,10 +78,6 @@ export const OMITTED_BY_DESIGN: Readonly<Record<string, string>> = {
     "historian is core to magic-context; disabling it is an advanced raw-JSONC choice, not a form toggle",
   "historian.two_pass": "advanced historian tuning; raw JSONC",
   "historian.disallowed_tools": "advanced historian tuning; raw JSONC",
-  "dreamer.max_runtime_minutes": "advanced dreamer scheduling; raw JSONC",
-  "dreamer.tasks": "advanced dreamer task list; raw JSONC",
-  "dreamer.task_timeout_minutes": "advanced dreamer scheduling; raw JSONC",
-  "dreamer.user_memories.promotion_threshold": "advanced dreamer tuning; raw JSONC",
   "sidekick.system_prompt": "free-form prompt override; raw JSONC",
   "system_prompt_injection.skip_signatures":
     "free-form substring array; raw JSONC (no array widget in the form yet)",

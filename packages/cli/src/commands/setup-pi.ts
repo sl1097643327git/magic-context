@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
 import { writeFileAtomic } from "../lib/atomic-write";
+import { runDreamerSetup } from "../lib/dreamer-setup";
 import { pickModel } from "../lib/model-picker";
 import { getPiAgentConfigDir, getPiUserConfigPath, getPiUserExtensionsPath } from "../lib/paths";
 import {
@@ -129,6 +130,8 @@ export function writeMagicContextConfig(
         historianThinkingLevel?: string;
         dreamerEnabled: boolean;
         dreamerModel?: string;
+        /** Per-task schedule overrides (Dreamer v2); undefined keeps schema defaults. */
+        dreamerTasks?: Record<string, { schedule: string }>;
         sidekickEnabled: boolean;
         sidekickModel?: string;
         embedding: EmbeddingChoice;
@@ -154,6 +157,9 @@ export function writeMagicContextConfig(
         model: options.dreamerModel,
         disable: options.dreamerEnabled ? undefined : true,
         enabled: undefined,
+        // Dreamer v2 per-task schedules — only set when the user declined the
+        // recommended defaults; otherwise leave unset so schema defaults apply.
+        tasks: options.dreamerEnabled ? options.dreamerTasks : undefined,
     };
     config.dreamer = compactObject(dreamer);
 
@@ -311,12 +317,16 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
         "Enable dreamer for overnight memory maintenance?",
         true,
     );
-    // Only ask for a dreamer model when the dreamer is actually enabled — asking
-    // after the user declined (the prior behavior) was the #144 "still wanted a
-    // model after I said no" complaint.
-    const dreamerModel = dreamerEnabled
-        ? await pickModel(prompts, allModels, "dreamer")
-        : undefined;
+    // Only run the dreamer flow when enabled — asking after the user declined
+    // (the prior behavior) was the #144 "still wanted a model after I said no"
+    // complaint.
+    let dreamerModel: string | undefined;
+    let dreamerTasks: Record<string, { schedule: string }> | undefined;
+    if (dreamerEnabled) {
+        const result = await runDreamerSetup(prompts, allModels);
+        dreamerModel = result.model;
+        dreamerTasks = result.tasks;
+    }
     const sidekickEnabled = await prompts.confirm("Enable sidekick for /ctx-aug?", false);
     const sidekickModel = sidekickEnabled
         ? await pickModel(prompts, allModels, "sidekick")
@@ -331,6 +341,7 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
             historianThinkingLevel,
             dreamerEnabled,
             dreamerModel,
+            dreamerTasks,
             sidekickEnabled,
             sidekickModel,
             embedding,

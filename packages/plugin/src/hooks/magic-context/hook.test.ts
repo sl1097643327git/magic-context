@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, mock } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { writeTaskScheduleState } from "../../features/magic-context/dreamer/storage-task-schedule";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import { __resetMessageIndexAsyncForTests } from "../../features/magic-context/message-index-async";
 import type { Scheduler } from "../../features/magic-context/scheduler";
@@ -128,12 +129,6 @@ async function expectSentinel(promise: Promise<unknown>, sentinel: string): Prom
     } catch (error) {
         expect(String(error)).toContain(sentinel);
     }
-}
-
-function formatHm(date: Date): string {
-    const hours = String(date.getHours()).padStart(2, "0");
-    const minutes = String(date.getMinutes()).padStart(2, "0");
-    return `${hours}:${minutes}`;
 }
 
 function createOpenCodeDbForHook(
@@ -446,23 +441,30 @@ describe("magic-context hook", () => {
         process.env.XDG_DATA_HOME = makeTempDir("hook-dream-notification-");
         const promptMocks = createPromptMocks();
         const deps = createMockDeps(promptMocks);
+        // Dreamer v2 per-task shape. Force a single task via `/ctx-dream consolidate`
+        // so the run is deterministic (the forced path ignores the activity gate,
+        // so this doesn't depend on the test DB having memories).
         deps.config = {
             ...deps.config,
             dreamer: {
-                schedule: "02:00-06:00",
-                max_runtime_minutes: 60,
-                tasks: ["consolidate"],
-                task_timeout_minutes: 10,
                 inject_docs: true,
-                user_memories: { enabled: true, promotion_threshold: 3 },
-                pin_key_files: { enabled: false, token_budget: 10000, min_reads: 4 },
+                tasks: {
+                    consolidate: { schedule: "0 3 * * *", timeout_minutes: 10 },
+                    verify: { schedule: "", timeout_minutes: 10 },
+                    "archive-stale": { schedule: "", timeout_minutes: 10 },
+                    improve: { schedule: "", timeout_minutes: 10 },
+                    "maintain-docs": { schedule: "", timeout_minutes: 10 },
+                    "key-files": { schedule: "", timeout_minutes: 10 },
+                    "evaluate-smart-notes": { schedule: "", timeout_minutes: 10 },
+                    "review-user-memories": { schedule: "", timeout_minutes: 10 },
+                },
             },
         };
         const hook = requireHook(createMagicContextHook(deps));
 
         await expectSentinel(
             hook["command.execute.before"]!(
-                { command: "ctx-dream", sessionID: "ses-dream", arguments: "" },
+                { command: "ctx-dream", sessionID: "ses-dream", arguments: "consolidate" },
                 { parts: [{ type: "text", text: "" }] },
             ),
             "__CONTEXT_MANAGEMENT_CTX-DREAM_HANDLED__",
@@ -480,7 +482,7 @@ describe("magic-context hook", () => {
                 body: expect.objectContaining({
                     parts: [
                         expect.objectContaining({
-                            text: "Starting dream run...",
+                            text: 'Running dream task "consolidate"...',
                         }),
                     ],
                 }),
@@ -606,19 +608,20 @@ describe("magic-context hook", () => {
         const promptMocks = createPromptMocks();
         const deps = createMockDeps(promptMocks);
         deps.directory = "/repo/project";
-        const nowForSchedule = new Date();
-        const scheduleStart = new Date(nowForSchedule.getTime() - 60_000);
-        const scheduleEnd = new Date(nowForSchedule.getTime() + 60_000);
         deps.config = {
             ...deps.config,
             dreamer: {
-                schedule: `${formatHm(scheduleStart)}-${formatHm(scheduleEnd)}`,
-                max_runtime_minutes: 60,
-                tasks: ["consolidate"],
-                task_timeout_minutes: 10,
                 inject_docs: true,
-                user_memories: { enabled: true, promotion_threshold: 3 },
-                pin_key_files: { enabled: false, token_budget: 10000, min_reads: 4 },
+                tasks: {
+                    consolidate: { schedule: "0 3 * * *", timeout_minutes: 10 },
+                    verify: { schedule: "", timeout_minutes: 10 },
+                    "archive-stale": { schedule: "", timeout_minutes: 10 },
+                    improve: { schedule: "", timeout_minutes: 10 },
+                    "maintain-docs": { schedule: "", timeout_minutes: 10 },
+                    "key-files": { schedule: "", timeout_minutes: 10 },
+                    "evaluate-smart-notes": { schedule: "", timeout_minutes: 10 },
+                    "review-user-memories": { schedule: "", timeout_minutes: 10 },
+                },
             },
         };
         const originalDateNow = Date.now;
@@ -629,6 +632,19 @@ describe("magic-context hook", () => {
             const db = openDatabase();
             const projectPath = resolveProjectIdentity("/repo/project");
             const now = Date.now();
+            // Dreamer v2: a freshly-seeded task is NOT due until its next cron
+            // time. Pre-seed consolidate's schedule row as DUE (next_due_at in the
+            // past) so the background trigger actually runs it this pass.
+            writeTaskScheduleState(db, {
+                projectPath,
+                task: "consolidate",
+                lastRunAt: null,
+                nextDueAt: now - 1000,
+                schedule: "0 3 * * *",
+                lastStatus: null,
+                lastError: null,
+                retryCount: 0,
+            });
 
             db.prepare(
                 "INSERT INTO memories (project_path, category, content, normalized_hash, source_session_id, source_type, seen_count, retrieval_count, first_seen_at, created_at, updated_at, last_seen_at, last_retrieved_at, status, expires_at, verification_status, verified_at, superseded_by_memory_id, merged_from, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",

@@ -38,7 +38,7 @@ export function getSchemaFenceRejection(): {
     return lastSchemaFenceRejection;
 }
 
-export const LATEST_SUPPORTED_VERSION = 41;
+export const LATEST_SUPPORTED_VERSION = 42;
 
 // chmod is meaningless on Windows (POSIX modes are not honored), so all
 // permission tightening is skipped there. mkdir's `mode` is likewise ignored.
@@ -566,9 +566,23 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       tasks_failed INTEGER NOT NULL DEFAULT 0,
       smart_notes_surfaced INTEGER NOT NULL DEFAULT 0,
       smart_notes_pending INTEGER NOT NULL DEFAULT 0,
-      memory_changes_json TEXT
+      memory_changes_json TEXT,
+      parent_session_id TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_dream_runs_project ON dream_runs(project_path, finished_at DESC);
+
+    CREATE TABLE IF NOT EXISTS task_schedule_state (
+      project_path  TEXT    NOT NULL,
+      task          TEXT    NOT NULL,
+      last_run_at   INTEGER,
+      next_due_at   INTEGER,
+      schedule      TEXT,
+      last_status   TEXT,
+      last_error    TEXT,
+      retry_count   INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (project_path, task)
+    );
+    CREATE INDEX IF NOT EXISTS idx_task_schedule_due ON task_schedule_state(next_due_at);
 
     CREATE TABLE IF NOT EXISTS project_key_files (
       project_path           TEXT    NOT NULL,
@@ -1012,6 +1026,14 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     ensureColumn(db, "tags", "token_count", "INTEGER");
     ensureColumn(db, "tags", "input_token_count", "INTEGER");
     ensureColumn(db, "tags", "reasoning_token_count", "INTEGER");
+    // Dreamer v2: the cron string next_due_at was computed from, so the scheduler
+    // can detect a config schedule change and recompute (config-authoritative).
+    ensureColumn(db, "task_schedule_state", "schedule", "TEXT");
+    // Dreamer v2: parent (dreamer child) session that produced this run, so the
+    // dashboard token join can scope to THIS run's invocations instead of every
+    // dreamer invocation in the time window (concurrent same-name cross-project
+    // runs would otherwise cross-sum tokens).
+    ensureColumn(db, "dream_runs", "parent_session_id", "TEXT");
     ensureColumn(db, "session_meta", "system_prompt_tokens", "INTEGER DEFAULT 0");
     ensureColumn(db, "session_meta", "compaction_marker_state", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "compaction_marker_target_end_message_id", "TEXT");

@@ -3,7 +3,6 @@ import {
 	type DreamerConfig,
 	DreamerConfigSchema,
 } from "@magic-context/core/config/schema/magic-context";
-import { ensureDreamQueueTable } from "@magic-context/core/features/magic-context/dreamer";
 import { initializeDatabase } from "@magic-context/core/features/magic-context/storage-db";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
@@ -34,15 +33,13 @@ function requireCapturedClient(
 function createDb(): Database {
 	const database = new Database(":memory:");
 	initializeDatabase(database);
-	ensureDreamQueueTable(database);
 	return database;
 }
 
 function enabledConfig() {
 	return DreamerConfigSchema.parse({
-		schedule: "00:00-23:59",
 		model: "test/model",
-		tasks: ["consolidate"],
+		tasks: { consolidate: { schedule: "0 3 * * *" } },
 	});
 }
 

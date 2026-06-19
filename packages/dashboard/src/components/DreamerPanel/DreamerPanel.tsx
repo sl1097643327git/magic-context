@@ -1,23 +1,21 @@
 import { createMemo, createResource, createSignal, For, Show } from "solid-js";
 import {
-  deleteDreamQueueEntry,
-  enqueueDream,
   formatDateTime,
   formatRelativeTime,
-  getDreamQueue,
   getDreamRunMemoryChanges,
   getDreamRuns,
   getDreamState,
   getProjects,
+  getTaskScheduleState,
 } from "../../lib/api";
 import type {
   DreamMemoryChange,
-  DreamQueueEntry,
   DreamRun,
   DreamRunMemoryChanges,
   DreamRunMemoryDetail,
   DreamRunTask,
   ProjectInfo,
+  TaskScheduleEntry,
 } from "../../lib/types";
 
 type ProjectRunGroup = {
@@ -92,7 +90,7 @@ function hasMemoryChanges(changes: DreamRunMemoryChanges | null): changes is Dre
 }
 
 export default function DreamerPanel() {
-  const [queue, { refetch: refetchQueue }] = createResource(getDreamQueue);
+  const [schedules, { refetch: refetchSchedules }] = createResource(getTaskScheduleState);
   const [state, { refetch: refetchState }] = createResource(getDreamState);
   const [projects] = createResource(getProjects);
   const [runs, { refetch: refetchRuns }] = createResource(() => getDreamRuns(undefined, 50));
@@ -144,42 +142,8 @@ export default function DreamerPanel() {
     void loadRunDetail(runId);
   };
 
-  /** Extract project identities from dream state `last_dream_at:<identity>` keys. */
-  const knownProjectIds = () => {
-    const s = state() ?? [];
-    return s
-      .filter((e) => e.key.startsWith("last_dream_at:"))
-      .map((e) => e.key.replace("last_dream_at:", ""));
-  };
-
-  const handleRunNow = async () => {
-    let ids = knownProjectIds();
-    if (ids.length === 0) {
-      ids = (projects() ?? []).map((p) => p.identity);
-    }
-    if (ids.length === 0) return;
-    for (const id of ids) {
-      await enqueueDream(id, "Manual trigger from dashboard");
-    }
-    refetchQueue();
-  };
-
-  const [removingQueueId, setRemovingQueueId] = createSignal<number | null>(null);
-  const handleRemoveQueueEntry = async (id: number) => {
-    if (removingQueueId() === id) return;
-    setRemovingQueueId(id);
-    try {
-      await deleteDreamQueueEntry(id);
-      refetchQueue();
-    } catch (err) {
-      console.error("Failed to remove dream-queue entry:", err);
-    } finally {
-      setRemovingQueueId(null);
-    }
-  };
-
   const refreshAll = () => {
-    refetchQueue();
+    refetchSchedules();
     refetchState();
     refetchRuns();
   };
@@ -194,8 +158,11 @@ export default function DreamerPanel() {
     };
   };
 
-  const pendingQueue = () => (queue() ?? []).filter((e) => !e.started_at);
-  const completedQueue = () => (queue() ?? []).filter((e) => e.started_at);
+  // Upcoming = scheduled tasks (next_due_at set), soonest first.
+  const upcomingSchedules = () =>
+    (schedules() ?? [])
+      .filter((s) => s.next_due_at != null)
+      .sort((a, b) => (a.next_due_at ?? 0) - (b.next_due_at ?? 0));
   const latestRecordedRun = createMemo(() => {
     const allRuns = runs() ?? [];
     return allRuns.length > 0 ? allRuns[0] : null;
@@ -242,9 +209,6 @@ export default function DreamerPanel() {
       <div class="section-header">
         <h1 class="section-title">Dreamer</h1>
         <div class="section-actions">
-          <button type="button" class="btn primary sm" onClick={handleRunNow}>
-            ▶ Run Now
-          </button>
           <button type="button" class="btn sm" onClick={refreshAll}>
             ↻ Refresh
           </button>
@@ -285,8 +249,8 @@ export default function DreamerPanel() {
             </div>
           </Show>
           <div class="stat-item">
-            <span class="stat-label">Queue</span>
-            <span class="stat-value">{pendingQueue().length} pending</span>
+            <span class="stat-label">Scheduled</span>
+            <span class="stat-value">{upcomingSchedules().length} tasks</span>
           </div>
           <div class="stat-item">
             <span class="stat-label">Projects</span>
@@ -296,47 +260,57 @@ export default function DreamerPanel() {
       </div>
 
       <div class="scroll-area">
-        <Show when={pendingQueue().length > 0}>
+        <Show when={upcomingSchedules().length > 0}>
           <div class="category-header">
-            Queue <span class="category-count">({pendingQueue().length})</span>
+            Scheduled Tasks <span class="category-count">({upcomingSchedules().length})</span>
           </div>
           <div class="list-gap" style={{ "margin-bottom": "16px" }}>
-            <For each={pendingQueue()}>
-              {(entry: DreamQueueEntry) => (
-                <div class="card">
-                  <div
-                    class="card-title"
-                    style={{
-                      display: "flex",
-                      "justify-content": "space-between",
-                      "align-items": "center",
-                    }}
-                  >
-                    <span>
-                      <span class="pill amber">pending</span>
-                      <span style={{ "margin-left": "8px" }}>{entry.reason}</span>
-                    </span>
-                    <button
-                      type="button"
-                      class="btn sm"
-                      style={{ color: "var(--red)" }}
-                      disabled={removingQueueId() === entry.id}
-                      title="Remove this queued entry (use for stale entries whose project has no active runner)"
-                      onClick={() => handleRemoveQueueEntry(entry.id)}
+            <For each={upcomingSchedules()}>
+              {(entry: TaskScheduleEntry) => {
+                const project = (projects() ?? []).find((p) => p.identity === entry.project_path);
+                const due = entry.next_due_at ?? 0;
+                const overdue = due > 0 && due < Date.now();
+                return (
+                  <div class="card">
+                    <div
+                      class="card-title"
+                      style={{
+                        display: "flex",
+                        "justify-content": "space-between",
+                        "align-items": "center",
+                      }}
                     >
-                      {removingQueueId() === entry.id ? "Removing…" : "Remove"}
-                    </button>
-                  </div>
-                  <div class="card-meta">
-                    <span>Project: {entry.project_path}</span>
-                    <span>·</span>
-                    <span>Queued: {formatRelativeTime(entry.enqueued_at)}</span>
-                    <Show when={entry.retry_count > 0}>
-                      <span>· Retries: {entry.retry_count}</span>
+                      <span>
+                        <span class={`pill ${overdue ? "amber" : "blue"}`}>
+                          {overdue ? "due" : "scheduled"}
+                        </span>
+                        <span style={{ "margin-left": "8px" }}>{formatTaskLabel(entry.task)}</span>
+                      </span>
+                      <Show when={entry.last_status === "failed"}>
+                        <span class="pill red">last failed</span>
+                      </Show>
+                    </div>
+                    <div class="card-meta">
+                      <span>Project: {getProjectLabel(project, entry.project_path)}</span>
+                      <span>·</span>
+                      <span>
+                        {overdue ? "Due" : "Next"}: {formatRelativeTime(due)}
+                      </span>
+                      <Show when={entry.last_run_at != null}>
+                        <span>· Last run: {formatRelativeTime(entry.last_run_at ?? 0)}</span>
+                      </Show>
+                      <Show when={entry.retry_count > 0}>
+                        <span>· Retries: {entry.retry_count}</span>
+                      </Show>
+                    </div>
+                    <Show when={entry.last_error}>
+                      <div class="card-meta" style={{ color: "var(--red)" }}>
+                        {entry.last_error}
+                      </div>
                     </Show>
                   </div>
-                </div>
-              )}
+                );
+              }}
             </For>
           </div>
         </Show>
@@ -588,32 +562,9 @@ export default function DreamerPanel() {
           </Show>
         </Show>
 
-        <Show when={completedQueue().length > 0}>
-          <div class="category-header" style={{ "margin-top": "16px" }}>
-            Queue History <span class="category-count">({completedQueue().length})</span>
-          </div>
-          <div class="list-gap">
-            <For each={completedQueue()}>
-              {(entry: DreamQueueEntry) => (
-                <div class="card">
-                  <div class="card-title">
-                    <span class="pill green">completed</span>
-                    <span style={{ "margin-left": "8px" }}>{entry.reason}</span>
-                  </div>
-                  <div class="card-meta">
-                    <span>Project: {entry.project_path}</span>
-                    <span>·</span>
-                    <span>Started: {formatRelativeTime(entry.started_at ?? 0)}</span>
-                  </div>
-                </div>
-              )}
-            </For>
-          </div>
-        </Show>
-
         <Show
           when={
-            (queue() ?? []).length === 0 &&
+            (schedules() ?? []).length === 0 &&
             (state() ?? []).length === 0 &&
             (runs() ?? []).length === 0
           }
@@ -621,7 +572,9 @@ export default function DreamerPanel() {
           <div class="empty-state">
             <span class="empty-state-icon">🌙</span>
             <span>No dreamer activity</span>
-            <span style={{ "font-size": "11px" }}>Click "Run Now" to queue a dream task.</span>
+            <span style={{ "font-size": "11px" }}>
+              Enable the dreamer and schedule tasks, or run <code>/ctx-dream</code> in your session.
+            </span>
           </div>
         </Show>
       </div>

@@ -1,5 +1,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { enqueueDream } from "@magic-context/core/features/magic-context/dreamer/queue";
+import {
+	type DreamTaskName,
+	isCanonicalDreamTask,
+} from "@magic-context/core/features/magic-context/dreamer/task-registry";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { sessionLog } from "@magic-context/core/shared/logger";
 import { runPiDreamForProject } from "../dreamer";
@@ -20,13 +23,36 @@ export function registerCtxDreamCommand(
 	},
 ): void {
 	pi.registerCommand("ctx-dream", {
-		description: "Run a Magic Context dreamer cycle for this project now",
-		handler: async (_args, ctx) => {
+		description: "Run Magic Context dreamer tasks for this project now",
+		handler: async (args, ctx) => {
 			const project = deps.resolveProject?.(ctx) ?? {
 				projectDir: deps.projectDir,
 				projectIdentity: deps.projectIdentity,
 			};
 			deps.onProjectSeen?.(project.projectIdentity);
+
+			// Optional single-task arg: `/ctx-dream consolidate`.
+			const requested =
+				typeof args === "string" ? args.trim() : String(args ?? "").trim();
+			let task: DreamTaskName | undefined;
+			if (requested) {
+				if (!isCanonicalDreamTask(requested)) {
+					sendCtxStatusMessage(
+						pi,
+						{
+							title: "/ctx-dream",
+							text: `## /ctx-dream\n\nUnknown task "${requested}".`,
+							level: "info",
+						},
+						{
+							projectDir: project.projectDir,
+							projectIdentity: project.projectIdentity,
+						},
+					);
+					return;
+				}
+				task = requested;
+			}
 			if (deps.dreamerEnabled === false) {
 				sendCtxStatusMessage(
 					pi,
@@ -42,37 +68,7 @@ export function registerCtxDreamCommand(
 				);
 				return;
 			}
-			const enqueued = enqueueDream(
-				deps.db,
-				project.projectIdentity,
-				"manual",
-				true,
-			);
-			if (!enqueued) {
-				// Already queued or actively running. Mirrors OpenCode's
-				// behavior at command-handler.ts:230 — if enqueue returns
-				// null we don't kick off another cycle.
-				sendCtxStatusMessage(
-					pi,
-					{
-						title: "/ctx-dream",
-						text: [
-							"## /ctx-dream",
-							"",
-							`Dream already queued or running for ${project.projectIdentity}.`,
-						].join("\n"),
-						level: "info",
-					},
-					{
-						projectDir: project.projectDir,
-						projectIdentity: project.projectIdentity,
-						entry: null,
-					},
-				);
-				return;
-			}
-
-			// Tell the user we're starting a real run, not just queueing.
+			// Tell the user we're starting a real run.
 			sendCtxStatusMessage(
 				pi,
 				{
@@ -80,7 +76,9 @@ export function registerCtxDreamCommand(
 					text: [
 						"## /ctx-dream",
 						"",
-						`Starting dream run #${enqueued.id} for ${project.projectIdentity}…`,
+						task
+							? `Running dream task "${task}" for ${project.projectIdentity}…`
+							: `Starting dream run for ${project.projectIdentity}…`,
 						`Project directory: ${project.projectDir}`,
 					].join("\n"),
 					level: "info",
@@ -88,59 +86,42 @@ export function registerCtxDreamCommand(
 				{
 					projectDir: project.projectDir,
 					projectIdentity: project.projectIdentity,
-					entry: enqueued,
 				},
 			);
 
-			// OpenCode parity (command-handler.ts:236-246): immediately drain
-			// the dream queue from the same registered client/config the
-			// timer uses. Pi previously left this to the 15-min timer, so
-			// /ctx-dream felt broken.
+			// Dreamer v2: run due/forced tasks now via the per-task scheduler.
 			try {
-				const result = await runPiDreamForProject(project.projectIdentity);
-				let summary: string;
-				if (!result) {
-					summary =
-						"Dream queued, but another worker is already processing the queue.";
-				} else if (result.tasks.length === 0) {
-					summary =
-						"Dreamer is configured, but no dream tasks are enabled for this project.";
-				} else {
-					const taskLines = result.tasks
-						.map((task) => {
-							const status = task.error ? `error: ${task.error}` : "ok";
-							return `- ${task.name} (${(task.durationMs / 1000).toFixed(1)}s) — ${status}`;
-						})
-						.join("\n");
-					const failureCount = result.tasks.filter((t) => t.error).length;
-					summary = [
-						`Dream run complete in ${((result.finishedAt - result.startedAt) / 1000).toFixed(1)}s.`,
-						`- Tasks: ${result.tasks.length} (${failureCount} failed)`,
-						`- Smart notes surfaced: ${result.smartNotesSurfaced}, pending: ${result.smartNotesPending}`,
-						"",
-						taskLines,
-					].join("\n");
-				}
+				const result = await runPiDreamForProject(
+					project.projectIdentity,
+					task,
+				);
+				const lines: string[] = [];
+				if (result.ran.length > 0) lines.push(`Ran: ${result.ran.join(", ")}`);
+				if (result.failed.length > 0)
+					lines.push(`Failed: ${result.failed.join(", ")}`);
+				if (result.skippedNoWork.length > 0)
+					lines.push(`Skipped (no work): ${result.skippedNoWork.join(", ")}`);
+				if (result.deferredBusy.length > 0)
+					lines.push(
+						`Busy (already running): ${result.deferredBusy.join(", ")}`,
+					);
+				if (lines.length === 0) lines.push("No enabled dream tasks to run.");
 
 				sendCtxStatusMessage(
 					pi,
 					{
 						title: "/ctx-dream",
-						text: ["## /ctx-dream", "", summary].join("\n"),
-						level: result ? "success" : "info",
+						text: ["## /ctx-dream", "", ...lines].join("\n"),
+						level: result.ran.length > 0 ? "success" : "info",
 					},
 					{
 						projectDir: project.projectDir,
 						projectIdentity: project.projectIdentity,
-						entry: enqueued,
 					},
 				);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
-				sessionLog(
-					project.projectIdentity,
-					`/ctx-dream failed to drain queue: ${message}`,
-				);
+				sessionLog(project.projectIdentity, `/ctx-dream failed: ${message}`);
 				sendCtxStatusMessage(
 					pi,
 					{
@@ -149,14 +130,13 @@ export function registerCtxDreamCommand(
 							"## /ctx-dream",
 							"",
 							`Dream run failed: ${message}`,
-							"The queued entry remains; the registered timer will retry on its next tick.",
+							"The registered timer will retry due tasks on its next tick.",
 						].join("\n"),
 						level: "error",
 					},
 					{
 						projectDir: project.projectDir,
 						projectIdentity: project.projectIdentity,
-						entry: enqueued,
 					},
 				);
 			}

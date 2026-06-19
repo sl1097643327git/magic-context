@@ -64,3 +64,17 @@ export function parseProviderModel(spec: string): { providerID: string; modelID:
         modelID: spec.slice(slash + 1).trim(),
     };
 }
+
+/**
+ * Build the `{ model: { providerID, modelID } }` fragment for an OpenCode prompt
+ * body from a `provider/model` spec string, or `{}` when the spec is absent or
+ * unparseable (the session falls back to its default model). Spread into a
+ * `client.session.prompt` body.
+ */
+export function modelBodyField(spec: string | undefined): {
+    model?: { providerID: string; modelID: string };
+} {
+    if (!spec) return {};
+    const parsed = parseProviderModel(spec);
+    return parsed ? { model: parsed } : {};
+}

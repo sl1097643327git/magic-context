@@ -170,8 +170,11 @@ export async function text(
 type ClackOptionsArray = any;
 
 function toClackOption(opt: SelectOption): { label: string; value: string; hint?: string } {
+    // `recommended` renders as a label suffix ONLY. It must NOT also set the
+    // clack `hint`, or the active row shows "(recommended)" twice (label suffix +
+    // hint). `recommended` and `hint` are mutually exclusive (see SelectOption).
     const label = opt.recommended ? `${opt.label} (recommended)` : opt.label;
-    const hint = opt.recommended ? "recommended" : opt.hint;
+    const hint = opt.recommended ? undefined : opt.hint;
     return hint === undefined ? { label, value: opt.value } : { label, value: opt.value, hint };
 }
 

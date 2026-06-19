@@ -1,5 +1,8 @@
 import type { DreamerConfig } from "../config/schema/magic-context";
-import { checkScheduleAndEnqueue, processDreamQueue } from "../features/magic-context/dreamer";
+import { openOpenCodeDb } from "../features/magic-context/dreamer/open-opencode-db";
+import { buildDreamTaskRuntimeConfigs } from "../features/magic-context/dreamer/task-config";
+import { createDreamTaskExecutor } from "../features/magic-context/dreamer/task-executor";
+import { runDueTasksForProject } from "../features/magic-context/dreamer/task-scheduler";
 import {
     acquireGitSweepLease,
     embedUnembeddedCommits,
@@ -16,7 +19,6 @@ import {
 import { drainCommitBacklogForProject } from "../features/magic-context/project-embedding-registry";
 import { openDatabase, runSqliteOptimize } from "../features/magic-context/storage";
 import { log } from "../shared/logger";
-import { resolveFallbackChain } from "../shared/resolve-fallbacks";
 import type { Database } from "../shared/sqlite";
 import type { PluginContext } from "./types";
 
@@ -36,12 +38,6 @@ interface ProjectRegistration {
     projectIdentity: string;
     client: PluginContext["client"];
     dreamerConfig?: DreamerConfig;
-    experimentalUserMemories?: { enabled: boolean; promotionThreshold: number };
-    experimentalPinKeyFiles?: {
-        enabled: boolean;
-        token_budget: number;
-        min_reads: number;
-    };
     gitCommitIndexing?: {
         enabled: boolean;
         since_days: number;
@@ -93,11 +89,7 @@ export async function startDreamScheduleTimer(
     if (!db) return;
     await args.ensureRegistered(args.directory, db);
     const snapshot = getProjectEmbeddingSnapshot(args.projectIdentity);
-    const dreamingEnabled = Boolean(
-        args.dreamerConfig &&
-            args.dreamerConfig.disable !== true &&
-            args.dreamerConfig.schedule?.trim(),
-    );
+    const dreamingEnabled = Boolean(args.dreamerConfig && args.dreamerConfig.disable !== true);
     const embeddingSweepEnabled = snapshot?.enabled ?? false;
     const commitIndexingEnabled = snapshot?.gitCommitEnabled ?? false;
 
@@ -212,11 +204,8 @@ async function sweepProject(
     db: Database,
     gitCommitEnabled = getProjectEmbeddingSnapshot(reg.projectIdentity)?.gitCommitEnabled === true,
 ): Promise<void> {
-    const dreamingEnabled = Boolean(
-        reg.dreamerConfig &&
-            reg.dreamerConfig.disable !== true &&
-            reg.dreamerConfig.schedule?.trim(),
-    );
+    const dreamerConfig = reg.dreamerConfig;
+    const dreamingEnabled = Boolean(dreamerConfig && dreamerConfig.disable !== true);
     if (gitCommitEnabled && reg.gitCommitIndexing) {
         await sweepGitCommits({
             directory: reg.directory,
@@ -226,38 +215,33 @@ async function sweepProject(
         });
     }
 
-    if (!dreamingEnabled || !reg.dreamerConfig?.schedule?.trim()) {
+    if (!dreamingEnabled || !dreamerConfig) {
         return;
     }
 
     try {
-        log(
-            `[dreamer] timer tick (${origin}) ${reg.projectIdentity} — checking schedule window "${reg.dreamerConfig.schedule}"`,
-        );
-        // Resolve THIS registration's project identity. The shared `dream_queue`
-        // is process-global (any OpenCode/Pi instance can write to it), but
-        // each running host only owns its own registered project. We pass this
-        // identity to both `checkScheduleAndEnqueue` (so we don't enqueue work
-        // for projects this host doesn't own) and `processDreamQueue` (so we
-        // only drain entries that belong to us).
-        checkScheduleAndEnqueue(db, reg.dreamerConfig.schedule, reg.projectIdentity);
-
-        await processDreamQueue({
-            db,
+        // Dreamer v2: per-task cron scheduling. The scheduler seeds/reads
+        // task_schedule_state, evaluates each task's cron + activity gate, and
+        // runs due tasks grouped by conflict-domain under keyed leases. The
+        // executor runs in THIS registration's own checkout (not a sibling
+        // worktree the shared git:<sha> identity might resolve to).
+        const runtimeConfigs = buildDreamTaskRuntimeConfigs(dreamerConfig);
+        const executor = createDreamTaskExecutor({
             client: reg.client,
-            tasks: reg.dreamerConfig.tasks,
-            taskTimeoutMinutes: reg.dreamerConfig.task_timeout_minutes,
-            maxRuntimeMinutes: reg.dreamerConfig.max_runtime_minutes,
-            experimentalUserMemories: reg.experimentalUserMemories,
-            experimentalPinKeyFiles: reg.experimentalPinKeyFiles,
-            projectIdentity: reg.projectIdentity,
-            // Run in the checkout THIS registration owns, not whatever sibling
-            // worktree last registered the shared git:<sha> identity.
-            sessionDirectoryOverride: reg.directory,
-            fallbackModels: resolveFallbackChain(reg.dreamerConfig.fallback_models),
+            sessionDirectory: reg.directory,
+            openOpenCodeDb,
         });
+        const ran = await runDueTasksForProject({
+            db,
+            projectIdentity: reg.projectIdentity,
+            tasks: runtimeConfigs,
+            executor,
+        });
+        if (ran > 0) {
+            log(`[dreamer] timer tick (${origin}) ${reg.projectIdentity} — ran ${ran} task(s)`);
+        }
     } catch (error) {
-        log(`[dreamer] timer-triggered queue processing failed for ${reg.projectIdentity}:`, error);
+        log(`[dreamer] timer-triggered task scheduling failed for ${reg.projectIdentity}:`, error);
     }
 }
 

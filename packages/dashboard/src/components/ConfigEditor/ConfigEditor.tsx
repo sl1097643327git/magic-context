@@ -16,6 +16,8 @@ import {
   saveProjectConfig,
 } from "../../lib/api";
 import type { ProjectConfigEntry } from "../../lib/types";
+import type { DreamTaskConfig } from "./DreamerTasksField";
+import DreamerTasksField from "./DreamerTasksField";
 import ModelSelect from "./ModelSelect";
 import PerModelField from "./PerModelField";
 
@@ -1190,23 +1192,6 @@ function ConfigForm(props: {
 
                 <div class="config-field">
                   <div class="config-field-header">
-                    <span class="config-field-label">Schedule</span>
-                  </div>
-                  <span class="config-field-desc">
-                    Time window for automatic dreamer runs (e.g., 02:00-06:00). Empty disables
-                    automatic runs while keeping manual /ctx-dream available.
-                  </span>
-                  <input
-                    class="config-input"
-                    type="text"
-                    value={String(getNestedValue(formData(), "dreamer.schedule") ?? "")}
-                    placeholder="02:00-06:00"
-                    onInput={(e) => handleFieldChange("dreamer.schedule", e.currentTarget.value)}
-                  />
-                </div>
-
-                <div class="config-field">
-                  <div class="config-field-header">
                     <span class="config-field-label">Inject Docs</span>
                   </div>
                   <span class="config-field-desc">
@@ -1307,172 +1292,29 @@ function ConfigForm(props: {
               </div>
             </div>
 
-            {/* User Memories + Key File Pinning — graduated from experimental in v0.14.
-                These render as a sibling 2-col grid below the main 2-col grid. They were
-                previously nested inside the outer grid, which made them inherit a 3rd grid
-                cell (rendering in only the left half with the right half empty). */}
-            <div class="config-card-two-col">
-              <div class="config-card-content">
-                <div class="config-field">
-                  <div class="config-field-header">
-                    <span class="config-field-label">User Memories</span>
-                    <span class="config-field-key">dreamer.user_memories.enabled</span>
-                  </div>
-                  <span class="config-field-desc">
-                    Extract behavioral observations from historian runs, promote recurring patterns
-                    to stable user memories. Requires dreamer.
-                  </span>
-                  <label class="toggle-switch">
-                    <input
-                      type="checkbox"
-                      checked={
-                        (getNestedValue(formData(), "dreamer.user_memories.enabled") as boolean) ??
-                        true
-                      }
-                      onChange={(e) =>
-                        handleFieldChange("dreamer.user_memories.enabled", e.currentTarget.checked)
-                      }
-                    />
-                    <span class="toggle-slider" />
-                    <span class="toggle-label">
-                      {((getNestedValue(formData(), "dreamer.user_memories.enabled") as boolean) ??
-                      true)
-                        ? "Enabled"
-                        : "Disabled"}
-                    </span>
-                  </label>
-                </div>
-
-                <Show
-                  when={
-                    (getNestedValue(formData(), "dreamer.user_memories.enabled") as boolean) ?? true
-                  }
-                >
-                  <div class="config-field">
-                    <div class="config-field-header">
-                      <span class="config-field-label">Promotion Threshold</span>
-                      <span class="config-field-key">
-                        dreamer.user_memories.promotion_threshold
-                      </span>
-                    </div>
-                    <span class="config-field-desc">
-                      Minimum candidate observations before dreamer promotes to stable (2–20)
-                    </span>
-                    <input
-                      class="config-input"
-                      type="number"
-                      min={2}
-                      max={20}
-                      value={
-                        (getNestedValue(
-                          formData(),
-                          "dreamer.user_memories.promotion_threshold",
-                        ) as number) ?? 3
-                      }
-                      onInput={(e) =>
-                        handleFieldChange(
-                          "dreamer.user_memories.promotion_threshold",
-                          Number(e.currentTarget.value),
-                        )
-                      }
-                    />
-                  </div>
-                </Show>
+            {/* Dreamer v2 per-task schedules. Replaces the retired v1 single
+                schedule window + user_memories / pin_key_files blocks: each
+                canonical task has its own cron schedule, optional model override,
+                and task-specific params. */}
+            <div class="config-field">
+              <div class="config-field-header">
+                <span class="config-field-label">Task schedules</span>
+                <span class="config-field-key">dreamer.tasks</span>
               </div>
-
-              <div class="config-card-content">
-                <div class="config-field">
-                  <div class="config-field-header">
-                    <span class="config-field-label">Key File Pinning</span>
-                    <span class="config-field-key">dreamer.pin_key_files.enabled</span>
-                  </div>
-                  <span class="config-field-desc">
-                    Pin frequently-read files into the system prompt so the agent doesn't need to
-                    re-read them after drops. Requires dreamer.
-                  </span>
-                  <label class="toggle-switch">
-                    <input
-                      type="checkbox"
-                      checked={
-                        (getNestedValue(formData(), "dreamer.pin_key_files.enabled") as boolean) ??
-                        false
-                      }
-                      onChange={(e) =>
-                        handleFieldChange("dreamer.pin_key_files.enabled", e.currentTarget.checked)
-                      }
-                    />
-                    <span class="toggle-slider" />
-                    <span class="toggle-label">
-                      {((getNestedValue(formData(), "dreamer.pin_key_files.enabled") as boolean) ??
-                      false)
-                        ? "Enabled"
-                        : "Disabled"}
-                    </span>
-                  </label>
-                </div>
-
-                <Show
-                  when={
-                    (getNestedValue(formData(), "dreamer.pin_key_files.enabled") as boolean) ??
-                    false
-                  }
-                >
-                  <div class="config-field">
-                    <div class="config-field-header">
-                      <span class="config-field-label">Token Budget</span>
-                      <span class="config-field-key">dreamer.pin_key_files.token_budget</span>
-                    </div>
-                    <span class="config-field-desc">
-                      Total tokens for all pinned key files (2,000–30,000)
-                    </span>
-                    <input
-                      class="config-input"
-                      type="number"
-                      min={2000}
-                      max={30000}
-                      step={1000}
-                      value={
-                        (getNestedValue(
-                          formData(),
-                          "dreamer.pin_key_files.token_budget",
-                        ) as number) ?? 10000
-                      }
-                      onInput={(e) =>
-                        handleFieldChange(
-                          "dreamer.pin_key_files.token_budget",
-                          Number(e.currentTarget.value),
-                        )
-                      }
-                    />
-                  </div>
-
-                  <div class="config-field">
-                    <div class="config-field-header">
-                      <span class="config-field-label">Min Reads</span>
-                      <span class="config-field-key">dreamer.pin_key_files.min_reads</span>
-                    </div>
-                    <span class="config-field-desc">
-                      Minimum full-read count before a file is eligible for pinning (2–20)
-                    </span>
-                    <input
-                      class="config-input"
-                      type="number"
-                      min={2}
-                      max={20}
-                      value={
-                        (getNestedValue(formData(), "dreamer.pin_key_files.min_reads") as number) ??
-                        4
-                      }
-                      onInput={(e) =>
-                        handleFieldChange(
-                          "dreamer.pin_key_files.min_reads",
-                          Number(e.currentTarget.value),
-                        )
-                      }
-                    />
-                  </div>
-                </Show>
-              </div>
+              <span class="config-field-desc">
+                Each dreamer task runs on its own cron schedule. “Disabled” turns a task off while
+                keeping manual /ctx-dream available. Leave models empty to inherit the dreamer model
+                above.
+              </span>
+              <DreamerTasksField
+                value={
+                  getNestedValue(formData(), "dreamer.tasks") as
+                    | Record<string, DreamTaskConfig>
+                    | undefined
+                }
+                onChange={(tasks) => handleFieldChange("dreamer.tasks", tasks)}
+                models={models() ?? []}
+              />
             </div>
           </div>
 

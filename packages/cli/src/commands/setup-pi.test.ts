@@ -145,8 +145,8 @@ describe("runSetup", () => {
                 getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
             },
         };
-        // confirms: configurePi=true, dreamerEnabled=true, sidekickEnabled=false
-        const prompts = new MockPrompts({ confirms: [true, true, false] });
+        // confirms: configurePi=true, dreamerEnabled=true, useRecommendedSchedules=true, sidekickEnabled=false
+        const prompts = new MockPrompts({ confirms: [true, true, true, false] });
 
         const code = await runSetup({ prompts, env });
 
@@ -238,8 +238,8 @@ describe("runSetup", () => {
             },
         };
         // selectOne picks the recommended option ("medium" for thinking_level)
-        // confirms: configurePi=true, dreamerEnabled=true, sidekickEnabled=false
-        const prompts = new MockPrompts({ confirms: [true, true, false] });
+        // confirms: configurePi=true, dreamerEnabled=true, useRecommendedSchedules=true, sidekickEnabled=false
+        const prompts = new MockPrompts({ confirms: [true, true, true, false] });
 
         const code = await runSetup({ prompts, env });
         expect(code).toBe(0);
@@ -314,8 +314,8 @@ describe("runSetup", () => {
             },
         };
         // confirms: continue-anyway=true, configurePi=true,
-        //           dreamerEnabled=true, sidekickEnabled=false
-        const prompts = new MockPrompts({ confirms: [true, true, true, false] });
+        //           dreamerEnabled=true, useRecommendedSchedules=true, sidekickEnabled=false
+        const prompts = new MockPrompts({ confirms: [true, true, true, true, false] });
 
         const code = await runSetup({ prompts, env });
 

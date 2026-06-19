@@ -1,7 +1,6 @@
 /// <reference types="bun-types" />
 
 import { beforeEach, describe, expect, it, mock } from "bun:test";
-import { ensureDreamQueueTable } from "../../features/magic-context/dreamer/queue";
 import { Database } from "../../shared/sqlite";
 import { createMagicContextCommandHandler } from "./command-handler";
 
@@ -109,7 +108,6 @@ function createTestDb(): Database {
       consumed_at INTEGER
     );
   `);
-    ensureDreamQueueTable(db);
     return db;
 }
 
@@ -641,38 +639,23 @@ describe("createMagicContextCommandHandler", () => {
     });
 
     describe("ctx-dream", () => {
-        it("starts a dream run, sends summary, and throws the sentinel", async () => {
+        it("runs all enabled tasks, sends summary, and throws the sentinel", async () => {
             const sendNotification = mock(async () => {});
-            const executeDream = mock(async () => ({
-                startedAt: 1,
-                finishedAt: 2,
-                holderId: "dream-holder",
-                smartNotesSurfaced: 0,
-                smartNotesPending: 0,
-                tasks: [
-                    {
-                        name: "consolidate",
-                        durationMs: 500,
-                        result: "merged duplicates",
-                    },
-                ],
+            const runManual = mock(async () => ({
+                ran: ["consolidate"],
+                skippedNoWork: [],
+                deferredBusy: [],
+                failed: [],
             }));
             const handler = createMagicContextCommandHandler({
                 db,
                 protectedTags: 3,
                 sendNotification,
                 dreamer: {
-                    config: {
-                        schedule: "02:00-06:00",
-                        max_runtime_minutes: 60,
-                        tasks: ["consolidate"],
-                        task_timeout_minutes: 10,
-                        inject_docs: true,
-                    },
+                    // command handler only reads `config` for presence; runManual is the entry.
+                    config: {} as never,
                     projectPath: "/repo/project",
-                    client: {},
-                    directory: "/repo/project",
-                    executeDream,
+                    runManual,
                 },
             });
 
@@ -685,7 +668,8 @@ describe("createMagicContextCommandHandler", () => {
                 "__CONTEXT_MANAGEMENT_CTX-DREAM_HANDLED__",
             );
 
-            expect(executeDream).toHaveBeenCalledWith("ses-dream");
+            // No arg → run all enabled tasks (task is undefined).
+            expect(runManual).toHaveBeenCalledWith(undefined);
             expect(sendNotification).toHaveBeenNthCalledWith(
                 1,
                 "ses-dream",
@@ -695,58 +679,82 @@ describe("createMagicContextCommandHandler", () => {
             expect(sendNotification).toHaveBeenNthCalledWith(
                 2,
                 "ses-dream",
-                expect.stringContaining("### Tasks"),
+                expect.stringContaining("Ran: consolidate"),
                 { toastDurationMs: 5000 },
             );
         });
 
-        it("notifies when the project is already queued", async () => {
+        it("force-runs a single named task when given an argument", async () => {
             const sendNotification = mock(async () => {});
-            const executeDream = mock(async () => null);
+            const runManual = mock(async () => ({
+                ran: ["verify"],
+                skippedNoWork: [],
+                deferredBusy: [],
+                failed: [],
+            }));
             const handler = createMagicContextCommandHandler({
                 db,
                 protectedTags: 3,
                 sendNotification,
                 dreamer: {
-                    config: {
-                        schedule: "02:00-06:00",
-                        max_runtime_minutes: 60,
-                        tasks: ["consolidate"],
-                        task_timeout_minutes: 10,
-                        inject_docs: true,
-                    },
+                    config: {} as never,
                     projectPath: "/repo/project",
-                    client: {},
-                    directory: "/repo/project",
-                    executeDream,
+                    runManual,
                 },
             });
 
             await expectSentinel(
                 handler["command.execute.before"](
-                    { command: "ctx-dream", sessionID: "ses-dream", arguments: "" },
+                    { command: "ctx-dream", sessionID: "ses-dream", arguments: "verify" },
                     makeOutput(""),
                     {},
                 ),
                 "__CONTEXT_MANAGEMENT_CTX-DREAM_HANDLED__",
             );
+
+            expect(runManual).toHaveBeenCalledWith("verify");
+            expect(sendNotification).toHaveBeenNthCalledWith(
+                1,
+                "ses-dream",
+                'Running dream task "verify"...',
+                { toastDurationMs: 5000 },
+            );
+        });
+
+        it("rejects an unknown task name without running", async () => {
+            const sendNotification = mock(async () => {});
+            const runManual = mock(async () => ({
+                ran: [],
+                skippedNoWork: [],
+                deferredBusy: [],
+                failed: [],
+            }));
+            const handler = createMagicContextCommandHandler({
+                db,
+                protectedTags: 3,
+                sendNotification,
+                dreamer: {
+                    config: {} as never,
+                    projectPath: "/repo/project",
+                    runManual,
+                },
+            });
 
             await expectSentinel(
                 handler["command.execute.before"](
-                    { command: "ctx-dream", sessionID: "ses-dream", arguments: "" },
+                    { command: "ctx-dream", sessionID: "ses-dream", arguments: "bogus-task" },
                     makeOutput(""),
                     {},
                 ),
                 "__CONTEXT_MANAGEMENT_CTX-DREAM_HANDLED__",
             );
 
-            expect(sendNotification).toHaveBeenNthCalledWith(
-                3,
+            expect(runManual).not.toHaveBeenCalled();
+            expect(sendNotification).toHaveBeenCalledWith(
                 "ses-dream",
-                "Dream already queued for this project",
+                expect.stringContaining('Unknown task "bogus-task"'),
                 { toastDurationMs: 5000 },
             );
-            expect(executeDream).toHaveBeenCalledTimes(1);
         });
     });
 

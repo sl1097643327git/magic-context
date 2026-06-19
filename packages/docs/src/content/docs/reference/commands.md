@@ -67,11 +67,11 @@ Uses historian-model tokens; full recomp on long sessions can take a long time.
 
 ## /ctx-dream
 
-**What it does.** Enqueues and runs the **dreamer** task list for this project immediately (memory maintenance, smart notes, and other configured tasks).
+**What it does.** Runs **dreamer** tasks for this project immediately. `/ctx-dream` (no argument) runs every enabled task whose activity gate passes; `/ctx-dream <task>` force-runs one task (e.g. `/ctx-dream consolidate`), ignoring its gate and schedule.
 
-**When to use it.** Manual dreamer run instead of waiting for the schedule.
+**When to use it.** A manual run instead of waiting for a task's cron schedule, or to force a single task on demand.
 
-**What you'll see.** `Starting dream run...` then `## /ctx-dream` with per-task timings, or configuration/queue errors.
+**What you'll see.** `Starting dream run...` (or `Running dream task "<task>"...`), then `## /ctx-dream` with which tasks ran, were skipped (no work), failed, or were busy.
 
 ## /ctx-embed
 

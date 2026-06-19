@@ -3,7 +3,7 @@ title: Dashboard
 description: The Magic Context desktop app for memories, session history, cache diagnostics, dreamer, and config editing.
 ---
 
-The **Magic Context Dashboard** is a Tauri desktop app that reads and writes the same SQLite store and config files as the plugin. Use it when you want to browse or fix memories, inspect compartment history, debug provider cache behavior, manage the dreamer queue, or edit `magic-context.jsonc` without hand-editing JSON in an editor.
+The **Magic Context Dashboard** is a Tauri desktop app that reads and writes the same SQLite store and config files as the plugin. Use it when you want to browse or fix memories, inspect compartment history, debug provider cache behavior, inspect dreamer schedules and runs, or edit `magic-context.jsonc` without hand-editing JSON in an editor.
 
 ## Install and updates
 
@@ -61,13 +61,13 @@ Subagent sessions can be hidden to reduce noise.
 
 ## Dream (dreamer)
 
-Dreamer **queue**, global state, and recent **runs** grouped by project.
+Per-task **schedules**, global state, and recent **runs** grouped by project.
 
 **What you can do.**
 
-- Inspect queued entries and **remove** stuck or unwanted queue rows.
-- **Enqueue** a manual dream for a project (same intent as `/ctx-dream`).
+- See each task's next scheduled run (and overdue tasks), last run time, and last failure.
 - Expand a run for per-task duration, token usage, smart-note surfacing counts, and memory change breakdown (written/archived/merged).
+- Trigger runs from your session with `/ctx-dream` (the dashboard reflects schedule state read-only; it does not run the dreamer itself).
 
 <!-- screenshot: dreamer-panel -->
 

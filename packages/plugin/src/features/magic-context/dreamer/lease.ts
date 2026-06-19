@@ -1,13 +1,45 @@
 import type { Database } from "../../../shared/sqlite";
 import { deleteDreamState, getDreamState, setDreamState } from "./storage-dream-state";
 
-const LEASE_HOLDER_KEY = "dreaming_lease_holder";
-const LEASE_HEARTBEAT_KEY = "dreaming_lease_heartbeat";
-const LEASE_EXPIRY_KEY = "dreaming_lease_expiry";
 const LEASE_DURATION_MS = 2 * 60 * 1000; // 2 minutes — renewed periodically during task execution
 
-function getLeaseExpiry(db: Database): number | null {
-    const value = getDreamState(db, LEASE_EXPIRY_KEY);
+/**
+ * Dreamer v2 uses one lease PER CONFLICT-DOMAIN (memory:<project>,
+ * key-files:<project>, user-memories, …) so disjoint-state tasks don't block
+ * each other while the memory-mutating tasks still serialize. A lease is three
+ * `dream_state` rows under a key namespace.
+ *
+ * `DREAMING_LEASE_KEY` is the legacy single-lease key. It keeps the original
+ * `acquireLease(db, holderId)` signature working (the lease-key param defaults to
+ * it) for the still-suite-based runner until the per-task scheduler replaces it.
+ */
+export const DREAMING_LEASE_KEY = "dreaming";
+
+interface LeaseRowKeys {
+    holder: string;
+    heartbeat: string;
+    expiry: string;
+}
+
+function rowKeys(leaseKey: string): LeaseRowKeys {
+    // The legacy lease retains its historical un-namespaced row keys so an
+    // in-flight pre-upgrade lease isn't orphaned across the boundary.
+    if (leaseKey === DREAMING_LEASE_KEY) {
+        return {
+            holder: "dreaming_lease_holder",
+            heartbeat: "dreaming_lease_heartbeat",
+            expiry: "dreaming_lease_expiry",
+        };
+    }
+    return {
+        holder: `lease:${leaseKey}:holder`,
+        heartbeat: `lease:${leaseKey}:heartbeat`,
+        expiry: `lease:${leaseKey}:expiry`,
+    };
+}
+
+function getLeaseExpiry(db: Database, keys: LeaseRowKeys): number | null {
+    const value = getDreamState(db, keys.expiry);
     if (!value) {
         return null;
     }
@@ -16,19 +48,24 @@ function getLeaseExpiry(db: Database): number | null {
     return Number.isFinite(expiry) ? expiry : null;
 }
 
-export function isLeaseActive(db: Database): boolean {
-    const expiry = getLeaseExpiry(db);
+export function isLeaseActive(db: Database, leaseKey: string = DREAMING_LEASE_KEY): boolean {
+    const expiry = getLeaseExpiry(db, rowKeys(leaseKey));
     return expiry !== null && expiry > Date.now();
 }
 
-export function getLeaseHolder(db: Database): string | null {
-    return getDreamState(db, LEASE_HOLDER_KEY);
+export function getLeaseHolder(db: Database, leaseKey: string = DREAMING_LEASE_KEY): string | null {
+    return getDreamState(db, rowKeys(leaseKey).holder);
 }
 
-export function peekLeaseHolderAndExpiry(db: Database, expectedHolder: string): boolean {
-    const holder = getDreamState(db, LEASE_HOLDER_KEY);
+export function peekLeaseHolderAndExpiry(
+    db: Database,
+    expectedHolder: string,
+    leaseKey: string = DREAMING_LEASE_KEY,
+): boolean {
+    const keys = rowKeys(leaseKey);
+    const holder = getDreamState(db, keys.holder);
     if (holder !== expectedHolder) return false;
-    const expiryStr = getDreamState(db, LEASE_EXPIRY_KEY);
+    const expiryStr = getDreamState(db, keys.expiry);
     if (!expiryStr) return false;
     const expiry = Number(expiryStr);
     return Number.isFinite(expiry) && expiry >= Date.now();
@@ -62,44 +99,59 @@ function runImmediate<T>(db: Database, body: () => T): T {
     }
 }
 
-export function acquireLease(db: Database, holderId: string): boolean {
+export function acquireLease(
+    db: Database,
+    holderId: string,
+    leaseKey: string = DREAMING_LEASE_KEY,
+): boolean {
+    const keys = rowKeys(leaseKey);
     return runImmediate(db, () => {
-        if (isLeaseActive(db)) {
-            const existingHolder = getLeaseHolder(db);
+        if (isLeaseActive(db, leaseKey)) {
+            const existingHolder = getLeaseHolder(db, leaseKey);
             if (existingHolder && existingHolder !== holderId) {
                 return false;
             }
         }
 
         const now = Date.now();
-        setDreamState(db, LEASE_HOLDER_KEY, holderId);
-        setDreamState(db, LEASE_HEARTBEAT_KEY, String(now));
-        setDreamState(db, LEASE_EXPIRY_KEY, String(now + LEASE_DURATION_MS));
+        setDreamState(db, keys.holder, holderId);
+        setDreamState(db, keys.heartbeat, String(now));
+        setDreamState(db, keys.expiry, String(now + LEASE_DURATION_MS));
         return true;
     });
 }
 
-export function renewLease(db: Database, holderId: string): boolean {
+export function renewLease(
+    db: Database,
+    holderId: string,
+    leaseKey: string = DREAMING_LEASE_KEY,
+): boolean {
+    const keys = rowKeys(leaseKey);
     return runImmediate(db, () => {
-        if (getLeaseHolder(db) !== holderId || !isLeaseActive(db)) {
+        if (getLeaseHolder(db, leaseKey) !== holderId || !isLeaseActive(db, leaseKey)) {
             return false;
         }
 
         const now = Date.now();
-        setDreamState(db, LEASE_HEARTBEAT_KEY, String(now));
-        setDreamState(db, LEASE_EXPIRY_KEY, String(now + LEASE_DURATION_MS));
+        setDreamState(db, keys.heartbeat, String(now));
+        setDreamState(db, keys.expiry, String(now + LEASE_DURATION_MS));
         return true;
     });
 }
 
-export function releaseLease(db: Database, holderId: string): void {
+export function releaseLease(
+    db: Database,
+    holderId: string,
+    leaseKey: string = DREAMING_LEASE_KEY,
+): void {
+    const keys = rowKeys(leaseKey);
     runImmediate(db, () => {
-        if (getLeaseHolder(db) !== holderId) {
+        if (getLeaseHolder(db, leaseKey) !== holderId) {
             return;
         }
 
-        deleteDreamState(db, LEASE_HOLDER_KEY);
-        deleteDreamState(db, LEASE_HEARTBEAT_KEY);
-        deleteDreamState(db, LEASE_EXPIRY_KEY);
+        deleteDreamState(db, keys.holder);
+        deleteDreamState(db, keys.heartbeat);
+        deleteDreamState(db, keys.expiry);
     });
 }

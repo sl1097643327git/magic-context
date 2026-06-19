@@ -424,10 +424,12 @@ pub fn get_context_token_breakdown(
 // ── Dreamer commands ────────────────────────────────────────
 
 #[tauri::command(async)]
-pub fn get_dream_queue(state: State<'_, AppState>) -> Result<Vec<db::DreamQueueEntry>, String> {
+pub fn get_task_schedule_state(
+    state: State<'_, AppState>,
+) -> Result<Vec<db::TaskScheduleEntry>, String> {
     let path = state.get_db_path()?;
     let conn = db::open_readonly(&path).map_err(|e| e.to_string())?;
-    db::get_dream_queue(&conn).map_err(|e| e.to_string())
+    db::get_task_schedule_state(&conn).map_err(|e| e.to_string())
 }
 
 #[tauri::command(async)]
@@ -456,24 +458,6 @@ pub fn get_dream_run_memory_changes(
     let path = state.get_db_path()?;
     let conn = db::open_readonly(&path).map_err(|e| e.to_string())?;
     db::get_dream_run_memory_changes(&conn, run_id)
-}
-
-#[tauri::command(async)]
-pub fn enqueue_dream(
-    state: State<'_, AppState>,
-    project_path: String,
-    reason: String,
-) -> Result<i64, String> {
-    let path = state.get_db_path()?;
-    let mut conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
-    db::enqueue_dream(&mut conn, &project_path, &reason).map_err(|e| e.to_string())
-}
-
-#[tauri::command(async)]
-pub fn delete_dream_queue_entry(state: State<'_, AppState>, id: i64) -> Result<usize, String> {
-    let path = state.get_db_path()?;
-    let mut conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
-    db::delete_dream_queue_entry(&mut conn, id).map_err(|e| e.to_string())
 }
 
 // ── Log commands ────────────────────────────────────────────

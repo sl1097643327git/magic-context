@@ -272,12 +272,14 @@ export interface ContextTokenBreakdown {
   memory_count: number;
 }
 
-export interface DreamQueueEntry {
-  id: number;
+/** Dreamer v2 per-task schedule state (one row per project+task). */
+export interface TaskScheduleEntry {
   project_path: string;
-  reason: string;
-  enqueued_at: number;
-  started_at: number | null;
+  task: string;
+  last_run_at: number | null;
+  next_due_at: number | null;
+  last_status: "completed" | "failed" | "skipped" | null;
+  last_error: string | null;
   retry_count: number;
 }
 

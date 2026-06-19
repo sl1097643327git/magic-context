@@ -5,6 +5,7 @@ import { fixConflicts } from "@magic-context/core/shared/conflict-fixer";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
 import { isDevPathPluginEntry, matchesPluginEntry } from "../adapters/opencode";
 import { writeFileAtomic } from "../lib/atomic-write";
+import { runDreamerSetup } from "../lib/dreamer-setup";
 import { pickModel } from "../lib/model-picker";
 import {
     getAvailableModels,
@@ -155,6 +156,8 @@ function writeMagicContextConfig(
         historianModel: string | null;
         dreamerEnabled: boolean;
         dreamerModel: string | null;
+        /** Per-task schedule overrides (Dreamer v2); undefined keeps schema defaults. */
+        dreamerTasks?: Record<string, { schedule: string }>;
         sidekickEnabled: boolean;
         sidekickModel: string | null;
         claudeMax: boolean;
@@ -182,6 +185,12 @@ function writeMagicContextConfig(
         delete dreamer.disable;
         if (options.dreamerModel) {
             dreamer.model = options.dreamerModel;
+        }
+        // Dreamer v2 per-task schedules. Only written when the user declined the
+        // recommended defaults — otherwise we leave `tasks` unset so the schema
+        // defaults apply (and the config stays small).
+        if (options.dreamerTasks) {
+            dreamer.tasks = options.dreamerTasks;
         }
     } else {
         dreamer.disable = true;
@@ -320,9 +329,11 @@ export async function runSetup(dryRun = false): Promise<number> {
     // ─── Step 6: Dreamer ────────────────────────────────
     const dreamerEnabled = await confirm("Enable dreamer?", true);
     let dreamerModel: string | null = null;
+    let dreamerTasks: Record<string, { schedule: string }> | undefined;
     if (dreamerEnabled) {
-        dreamerModel = await pickModel(promptIO, allModels, "dreamer");
-        log.success(`Dreamer: ${dreamerModel}`);
+        const result = await runDreamerSetup(promptIO, allModels);
+        dreamerModel = result.model;
+        dreamerTasks = result.tasks;
     }
 
     // ─── Step 7: Sidekick ───────────────────────────────
@@ -356,6 +367,7 @@ export async function runSetup(dryRun = false): Promise<number> {
             historianModel,
             dreamerEnabled,
             dreamerModel,
+            dreamerTasks,
             sidekickEnabled,
             sidekickModel,
             claudeMax,

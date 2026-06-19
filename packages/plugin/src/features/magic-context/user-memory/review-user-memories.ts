@@ -5,8 +5,9 @@ import { extractLatestAssistantText } from "../../../shared/assistant-message-ex
 import { describeError, getErrorMessage } from "../../../shared/error-message";
 import { shouldKeepSubagents } from "../../../shared/keep-subagents";
 import { log } from "../../../shared/logger";
+import { modelBodyField } from "../../../shared/resolve-fallbacks";
 import type { Database } from "../../../shared/sqlite";
-import { renewLease } from "../dreamer/lease";
+import { peekLeaseHolderAndExpiry, renewLease } from "../dreamer/lease";
 import { DREAMER_SYSTEM_PROMPT } from "../dreamer/task-prompts";
 import { bumpProjectUserProfileVersion } from "../storage";
 import { recordChildInvocation } from "../subagent-token-capture";
@@ -25,8 +26,13 @@ interface ReviewUserMemoriesArgs {
     parentSessionId: string | undefined;
     sessionDirectory: string | undefined;
     holderId: string;
+    /** Keyed lease this task holds (Dreamer v2: global user-memories domain).
+     *  Defaults to the legacy single lease key for back-compat. */
+    leaseKey?: string;
     deadline: number;
     promotionThreshold: number;
+    /** Per-task model override (Dreamer v2). */
+    model?: string;
     /** Resolved dreamer fallback chain. */
     fallbackModels?: readonly string[];
 }
@@ -129,7 +135,9 @@ If no promotions are warranted, return empty arrays. Always consume reviewed can
             // The task name MUST match the phase name pushed by the dreamer
             // runner. Mirrors the smart-notes precedent.
             subagent: "dreamer",
-            task: "user memories",
+            // Canonical v2 task name — MUST match the dream_runs row name
+            // (config.task) so the dashboard's task GROUP BY join lines up.
+            task: "review-user-memories",
             startedAt,
             status: params.status,
             messages: params.messages,
@@ -139,7 +147,7 @@ If no promotions are warranted, return empty arrays. Always consume reviewed can
     const abortController = new AbortController();
     const leaseInterval = setInterval(() => {
         try {
-            if (!renewLease(args.db, args.holderId)) {
+            if (!renewLease(args.db, args.holderId, args.leaseKey)) {
                 log("[dreamer] user-memories: lease renewal failed — aborting");
                 abortController.abort();
             }
@@ -180,13 +188,16 @@ If no promotions are warranted, return empty arrays. Always consume reviewed can
                 body: {
                     agent: DREAMER_AGENT,
                     system: DREAMER_SYSTEM_PROMPT,
+                    ...modelBodyField(args.model),
                     // synthetic: true hides the user-memory review prompt from the TUI
                     // subagent pane while still delivering it to the model. See issue #50.
                     parts: [{ type: "text", text: prompt, synthetic: true }],
                 },
             },
             {
-                timeoutMs: Math.min(remainingMs, 5 * 60 * 1000),
+                // The executor owns the per-task deadline (config.timeoutMinutes);
+                // honor the remaining budget, do NOT silently re-cap at 5 minutes.
+                timeoutMs: remainingMs,
                 signal: abortController.signal,
                 fallbackModels: args.fallbackModels,
                 callContext: "dreamer:user-memories",
@@ -249,7 +260,21 @@ If no promotions are warranted, return empty arrays. Always consume reviewed can
         const dismissals = (parsed.dismiss_existing ?? []).filter((d) => Boolean(d.memory_id));
         const consumeCandidateIds = parsed.consume_candidate_ids ?? [];
 
+        // Lease-held-before-commit: if our lease expired mid-run (slow model) and
+        // another process took the global user-memories lease, we must NOT commit
+        // over its work on this shared cross-project pool. Throwing (not silently
+        // returning) is essential: a silent return would let the executor record
+        // "completed" and advance next_due_at, skipping the work until next cron.
+        // The thrown "lease" error is classified transient → hot-retry.
+        let leaseLostAtCommit = false;
         args.db.transaction(() => {
+            if (!peekLeaseHolderAndExpiry(args.db, args.holderId, args.leaseKey)) {
+                log(
+                    `[dreamer] user-memories: commit aborted — lease lost (holder ${args.holderId})`,
+                );
+                leaseLostAtCommit = true;
+                return;
+            }
             for (const promotion of promotions) {
                 insertUserMemory(args.db, promotion.content, promotion.candidateIds);
             }
@@ -270,6 +295,10 @@ If no promotions are warranted, return empty arrays. Always consume reviewed can
                 bumpProjectUserProfileVersion(args.db);
             }
         })();
+
+        if (leaseLostAtCommit) {
+            throw new Error("Dream lease lost during user-memory review commit");
+        }
 
         result.promoted = promotions.length;
         result.merged = updates.length;
@@ -299,7 +328,13 @@ If no promotions are warranted, return empty arrays. Always consume reviewed can
             `[dreamer] user-memories: review failed: ${errorDescription.brief}`,
             errorDescription.stackHead ? { stackHead: errorDescription.stackHead } : undefined,
         );
-        return result;
+        recordInvocation({ status: "failed", error });
+        // Rethrow so the executor records this run as failed and the scheduler
+        // does NOT advance next_due_at past unprocessed work. A prior silent
+        // `return result` reported a successful empty run, skipping the task until
+        // its next cron slot (Oracle P1). classifyFailure decides transient vs
+        // permanent (lease/timeout/network → hot-retry; parse/validation → wait).
+        throw error;
     } finally {
         clearInterval(leaseInterval);
         if (agentSessionId && !phaseFailed && !shouldKeepSubagents()) {

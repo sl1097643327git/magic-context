@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import { detectConfigFile, parseJsonc } from "../shared/jsonc-parser";
 import { migrateLegacyAgentEnabledInMemory } from "./agent-disable";
+import { migrateDreamerV2 } from "./migrate-dreamer-v2";
 import { migrateLegacyExperimental } from "./migrate-experimental";
 import {
     dropInheritedEmbeddingKeyOnRedirect,
@@ -223,7 +224,12 @@ function parsePluginConfig(
     // opt-in/out state survives upgrades even when they never run `doctor`.
     const preMigrationWarnings: string[] = [];
     const migratedExperimental = migrateLegacyExperimental(rawConfig, preMigrationWarnings);
-    const migrated = migrateLegacyAgentEnabledInMemory(migratedExperimental, preMigrationWarnings);
+    // Dreamer v2: convert the legacy v1 dreamer shape (window schedule, tasks
+    // array, user_memories/pin_key_files blocks) into the per-task `tasks` record.
+    // Runs AFTER migrate-experimental so experimental.user_memories (already
+    // relocated to dreamer.user_memories above) is folded into the v2 tasks here.
+    const migratedDreamer = migrateDreamerV2(migratedExperimental, preMigrationWarnings);
+    const migrated = migrateLegacyAgentEnabledInMemory(migratedDreamer, preMigrationWarnings);
     const parsed = MagicContextConfigSchema.safeParse(migrated);
     const disabledHooks = Array.isArray(rawConfig.disabled_hooks)
         ? rawConfig.disabled_hooks.filter((value): value is string => typeof value === "string")
@@ -343,8 +349,11 @@ function parsePluginConfig(
     }
 
     // Re-run migration on the field-recovered patched config so legacy
-    // experimental blocks still migrate on the recovery path.
-    const retryMigrated = migrateLegacyExperimental(patched, preMigrationWarnings);
+    // experimental + dreamer-v1 blocks still migrate on the recovery path.
+    const retryMigrated = migrateDreamerV2(
+        migrateLegacyExperimental(patched, preMigrationWarnings),
+        preMigrationWarnings,
+    );
     const retryParsed = MagicContextConfigSchema.safeParse(retryMigrated);
     if (retryParsed.success) {
         return {

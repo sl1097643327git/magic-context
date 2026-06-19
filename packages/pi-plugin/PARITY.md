@@ -507,6 +507,42 @@ mechanism (OpenCode: in-config step cap + server-side abort; Pi: subprocess-kill
 
 ---
 
+## 18. Dreamer v2 per-task model: delivered via the prompt body, applied differently
+
+Dreamer v2 lets each task carry its own `model` (falling back to the dreamer-level
+model). The scheduler's executor sets `body.model = { providerID, modelID }` on the
+child-session prompt for the resolved per-task model — this is the SAME mechanism
+on both harnesses (the executor is shared core). The application differs at the
+client boundary:
+
+- **OpenCode** passes `body.model` straight to `client.session.prompt`; the server
+  honors it per call, so per-task models work with no extra plumbing.
+
+- **Pi** has no server-side session model field on the prompt — the model is a
+  spawn argument to `PiSubagentRunner` (`pi --print --model …`). Pi's dreamer
+  client facade therefore READS `body.model` back out (`extractBodyModel`) and
+  threads it into the subprocess spawn, falling back to the dreamer-level model
+  when absent. Per-task `thinking_level` is currently NOT threaded per-task on Pi
+  (the facade uses the dreamer-level `thinking_level`); per-task thinking is a
+  deferred nicety, not a correctness gap.
+
+Same effective behavior (each task runs on its configured model), different
+application point (OpenCode: server honors `body.model`; Pi: facade reads it back
+into the subprocess spawn args).
+
+## 19. Dreamer v2 manual run: shared scheduler, harness-specific entry
+
+`/ctx-dream` runs the v2 per-task scheduler's `runManualDream` on both harnesses
+(shared core): no arg = run every enabled task whose gate passes; a task arg =
+force-run that one task ignoring its gate. The only divergence is the wiring: the
+OpenCode command handler calls `runManualDream` directly with a freshly-built
+executor; Pi routes through `runPiDreamForProject` → the registered project's
+`runManual`, reusing the same `PiSubagentRunner`-backed client facade the timer
+uses. The dashboard cannot trigger a run on either harness (DB-only, no live
+channel) — it reflects `task_schedule_state` read-only.
+
+---
+
 ## Maintenance
 
 Update this file whenever a deliberate Pi↔OpenCode divergence is introduced or

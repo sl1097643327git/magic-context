@@ -25,6 +25,7 @@ import { writeFileAtomic } from "../lib/atomic-write";
 import { collectDiagnostics } from "../lib/diagnostics-opencode";
 import { checkLocalEmbeddingRuntime } from "../lib/embedding-runtime";
 import { bundleIssueReport } from "../lib/logs-opencode";
+import { migrateDreamerV2ForDoctor } from "../lib/migrate-dreamer-v2-doctor";
 import { migrateExperimentalPinKeyFilesForDoctor } from "../lib/migrate-experimental-doctor";
 import { isOpenCodeInstalled } from "../lib/opencode-helpers";
 import { detectConfigPaths, getMagicContextLogPath } from "../lib/paths";
@@ -859,6 +860,18 @@ export async function runDoctor(
                     delete mcConfig.experimental;
                     mcChanged = true;
                 }
+            }
+
+            // Dreamer v2: convert the legacy v1 dreamer shape (window schedule,
+            // tasks array, user_memories/pin_key_files blocks) into the per-task
+            // `tasks` record. Runs AFTER the experimental migrations above so a
+            // relocated dreamer.user_memories/pin_key_files is folded into tasks.
+            if (migrateDreamerV2ForDoctor(mcConfig)) {
+                mcChanged = true;
+                log.success(
+                    "Migrated legacy dreamer scheduling → per-task dreamer.tasks (window→cron, blocks→tasks)",
+                );
+                fixed++;
             }
 
             // Remove `compartment_token_budget` — replaced by auto-derivation from

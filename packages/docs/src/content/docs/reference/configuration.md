@@ -139,19 +139,73 @@ Off-hours maintenance (Dreamer) and on-demand prompt augmentation (Sidekick).
 | `dreamer.maxTokens` | number | — | Maximum output tokens |
 | `dreamer.variant` | string | — | OpenCode reasoning variant (e.g. for extended thinking) |
 | `dreamer.fallback_models` | string \\| string[] | — | Fallback model IDs if primary is unavailable |
-| `dreamer.schedule` | string | `"02:00-06:00"` | Scheduled window for overnight dreaming (e.g. '02:00-06:00') |
-| `dreamer.max_runtime_minutes` | number (10–) | `120` | Maximum runtime per dream session in minutes |
-| `dreamer.tasks` | `"consolidate"` \\| `"verify"` \\| `"archive-stale"` \\| `"improve"` \\| `"maintain-docs"`[] | `["consolidate","verify","archive-stale","improve"]` | Tasks to run during dreaming, in order |
-| `dreamer.task_timeout_minutes` | number (5–) | `20` | Minutes allocated per task before moving to next |
+| `dreamer.tasks` | object | — | Per-task scheduling + model config. Each task has its own cron schedule and may override the dreamer-level model. |
+| `dreamer.tasks.consolidate.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |
+| `dreamer.tasks.consolidate.model` | string | — | Per-task model override (inherits dreamer.model) |
+| `dreamer.tasks.consolidate.fallback_models` | string \\| string[] | — | Per-task fallback chain (inherits dreamer.fallback_models) |
+| `dreamer.tasks.consolidate.thinking_level` | `"off"` \\| `"minimal"` \\| `"low"` \\| `"medium"` \\| `"high"` \\| `"xhigh"` | — | Pi only: per-task thinking level |
+| `dreamer.tasks.consolidate.timeout_minutes` | number (5–) | `20` | Minutes allowed for this task before it is aborted |
+| `dreamer.tasks.consolidate.promotion_threshold` | number (2–20) | — | review-user-memories: min candidate observations before promotion is considered (default: 3) |
+| `dreamer.tasks.consolidate.token_budget` | number (2000–30000) | — | key-files: total token budget for pinned files (default: 10000) |
+| `dreamer.tasks.consolidate.min_reads` | number (2–20) | — | key-files: min full-read count before a file is pinned (default: 4) |
+| `dreamer.tasks.verify.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |
+| `dreamer.tasks.verify.model` | string | — | Per-task model override (inherits dreamer.model) |
+| `dreamer.tasks.verify.fallback_models` | string \\| string[] | — | Per-task fallback chain (inherits dreamer.fallback_models) |
+| `dreamer.tasks.verify.thinking_level` | `"off"` \\| `"minimal"` \\| `"low"` \\| `"medium"` \\| `"high"` \\| `"xhigh"` | — | Pi only: per-task thinking level |
+| `dreamer.tasks.verify.timeout_minutes` | number (5–) | `20` | Minutes allowed for this task before it is aborted |
+| `dreamer.tasks.verify.promotion_threshold` | number (2–20) | — | review-user-memories: min candidate observations before promotion is considered (default: 3) |
+| `dreamer.tasks.verify.token_budget` | number (2000–30000) | — | key-files: total token budget for pinned files (default: 10000) |
+| `dreamer.tasks.verify.min_reads` | number (2–20) | — | key-files: min full-read count before a file is pinned (default: 4) |
+| `dreamer.tasks.archive-stale.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |
+| `dreamer.tasks.archive-stale.model` | string | — | Per-task model override (inherits dreamer.model) |
+| `dreamer.tasks.archive-stale.fallback_models` | string \\| string[] | — | Per-task fallback chain (inherits dreamer.fallback_models) |
+| `dreamer.tasks.archive-stale.thinking_level` | `"off"` \\| `"minimal"` \\| `"low"` \\| `"medium"` \\| `"high"` \\| `"xhigh"` | — | Pi only: per-task thinking level |
+| `dreamer.tasks.archive-stale.timeout_minutes` | number (5–) | `20` | Minutes allowed for this task before it is aborted |
+| `dreamer.tasks.archive-stale.promotion_threshold` | number (2–20) | — | review-user-memories: min candidate observations before promotion is considered (default: 3) |
+| `dreamer.tasks.archive-stale.token_budget` | number (2000–30000) | — | key-files: total token budget for pinned files (default: 10000) |
+| `dreamer.tasks.archive-stale.min_reads` | number (2–20) | — | key-files: min full-read count before a file is pinned (default: 4) |
+| `dreamer.tasks.improve.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |
+| `dreamer.tasks.improve.model` | string | — | Per-task model override (inherits dreamer.model) |
+| `dreamer.tasks.improve.fallback_models` | string \\| string[] | — | Per-task fallback chain (inherits dreamer.fallback_models) |
+| `dreamer.tasks.improve.thinking_level` | `"off"` \\| `"minimal"` \\| `"low"` \\| `"medium"` \\| `"high"` \\| `"xhigh"` | — | Pi only: per-task thinking level |
+| `dreamer.tasks.improve.timeout_minutes` | number (5–) | `20` | Minutes allowed for this task before it is aborted |
+| `dreamer.tasks.improve.promotion_threshold` | number (2–20) | — | review-user-memories: min candidate observations before promotion is considered (default: 3) |
+| `dreamer.tasks.improve.token_budget` | number (2000–30000) | — | key-files: total token budget for pinned files (default: 10000) |
+| `dreamer.tasks.improve.min_reads` | number (2–20) | — | key-files: min full-read count before a file is pinned (default: 4) |
+| `dreamer.tasks.maintain-docs.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |
+| `dreamer.tasks.maintain-docs.model` | string | — | Per-task model override (inherits dreamer.model) |
+| `dreamer.tasks.maintain-docs.fallback_models` | string \\| string[] | — | Per-task fallback chain (inherits dreamer.fallback_models) |
+| `dreamer.tasks.maintain-docs.thinking_level` | `"off"` \\| `"minimal"` \\| `"low"` \\| `"medium"` \\| `"high"` \\| `"xhigh"` | — | Pi only: per-task thinking level |
+| `dreamer.tasks.maintain-docs.timeout_minutes` | number (5–) | `20` | Minutes allowed for this task before it is aborted |
+| `dreamer.tasks.maintain-docs.promotion_threshold` | number (2–20) | — | review-user-memories: min candidate observations before promotion is considered (default: 3) |
+| `dreamer.tasks.maintain-docs.token_budget` | number (2000–30000) | — | key-files: total token budget for pinned files (default: 10000) |
+| `dreamer.tasks.maintain-docs.min_reads` | number (2–20) | — | key-files: min full-read count before a file is pinned (default: 4) |
+| `dreamer.tasks.key-files.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |
+| `dreamer.tasks.key-files.model` | string | — | Per-task model override (inherits dreamer.model) |
+| `dreamer.tasks.key-files.fallback_models` | string \\| string[] | — | Per-task fallback chain (inherits dreamer.fallback_models) |
+| `dreamer.tasks.key-files.thinking_level` | `"off"` \\| `"minimal"` \\| `"low"` \\| `"medium"` \\| `"high"` \\| `"xhigh"` | — | Pi only: per-task thinking level |
+| `dreamer.tasks.key-files.timeout_minutes` | number (5–) | `20` | Minutes allowed for this task before it is aborted |
+| `dreamer.tasks.key-files.promotion_threshold` | number (2–20) | — | review-user-memories: min candidate observations before promotion is considered (default: 3) |
+| `dreamer.tasks.key-files.token_budget` | number (2000–30000) | — | key-files: total token budget for pinned files (default: 10000) |
+| `dreamer.tasks.key-files.min_reads` | number (2–20) | — | key-files: min full-read count before a file is pinned (default: 4) |
+| `dreamer.tasks.evaluate-smart-notes.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |
+| `dreamer.tasks.evaluate-smart-notes.model` | string | — | Per-task model override (inherits dreamer.model) |
+| `dreamer.tasks.evaluate-smart-notes.fallback_models` | string \\| string[] | — | Per-task fallback chain (inherits dreamer.fallback_models) |
+| `dreamer.tasks.evaluate-smart-notes.thinking_level` | `"off"` \\| `"minimal"` \\| `"low"` \\| `"medium"` \\| `"high"` \\| `"xhigh"` | — | Pi only: per-task thinking level |
+| `dreamer.tasks.evaluate-smart-notes.timeout_minutes` | number (5–) | `20` | Minutes allowed for this task before it is aborted |
+| `dreamer.tasks.evaluate-smart-notes.promotion_threshold` | number (2–20) | — | review-user-memories: min candidate observations before promotion is considered (default: 3) |
+| `dreamer.tasks.evaluate-smart-notes.token_budget` | number (2000–30000) | — | key-files: total token budget for pinned files (default: 10000) |
+| `dreamer.tasks.evaluate-smart-notes.min_reads` | number (2–20) | — | key-files: min full-read count before a file is pinned (default: 4) |
+| `dreamer.tasks.review-user-memories.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |
+| `dreamer.tasks.review-user-memories.model` | string | — | Per-task model override (inherits dreamer.model) |
+| `dreamer.tasks.review-user-memories.fallback_models` | string \\| string[] | — | Per-task fallback chain (inherits dreamer.fallback_models) |
+| `dreamer.tasks.review-user-memories.thinking_level` | `"off"` \\| `"minimal"` \\| `"low"` \\| `"medium"` \\| `"high"` \\| `"xhigh"` | — | Pi only: per-task thinking level |
+| `dreamer.tasks.review-user-memories.timeout_minutes` | number (5–) | `20` | Minutes allowed for this task before it is aborted |
+| `dreamer.tasks.review-user-memories.promotion_threshold` | number (2–20) | — | review-user-memories: min candidate observations before promotion is considered (default: 3) |
+| `dreamer.tasks.review-user-memories.token_budget` | number (2000–30000) | — | key-files: total token budget for pinned files (default: 10000) |
+| `dreamer.tasks.review-user-memories.min_reads` | number (2–20) | — | key-files: min full-read count before a file is pinned (default: 4) |
 | `dreamer.inject_docs` | boolean | `true` | Inject ARCHITECTURE.md and STRUCTURE.md into system prompt |
-| `dreamer.user_memories` | object | — | User memory pipeline: historian extracts behavior observations from each compartment run; dreamer reviews recurring patterns and promotes them to stable user memories injected into all sessions as <user-profile>. Requires dreamer to not be disabled for promotion to actually happen. Graduated from experimental in v0.14. Default: enabled. |
-| `dreamer.user_memories.enabled` | boolean | `true` | Enable user memory extraction and promotion (default: true) |
-| `dreamer.user_memories.promotion_threshold` | number (2–20) | `3` | Minimum candidate observations before dreamer considers promotion (default: 3) |
-| `dreamer.pin_key_files` | object | — | Pin frequently-read key files into the system prompt so the agent doesn't need to re-read them after context drops. Dreamer identifies key files per session based on read patterns. Requires dreamer to not be disabled for selection to happen. Graduated from experimental in v0.14. Default: disabled. |
-| `dreamer.pin_key_files.enabled` | boolean | `false` | Enable key file pinning (default: false) |
-| `dreamer.pin_key_files.token_budget` | number (2000–30000) | `10000` | Total token budget for all pinned key files (min: 2000, max: 30000, default: 10000) |
-| `dreamer.pin_key_files.min_reads` | number (2–20) | `4` | Minimum full-read count before a file is considered for pinning (min: 2, default: 4) |
-| `dreamer.thinking_level` | `"off"` \\| `"minimal"` \\| `"low"` \\| `"medium"` \\| `"high"` \\| `"xhigh"` | — | Pi only: explicit thinking level for dreamer subagent invocations. See historian.thinking_level. |
+| `dreamer.thinking_level` | `"off"` \\| `"minimal"` \\| `"low"` \\| `"medium"` \\| `"high"` \\| `"xhigh"` | — | Pi only: default thinking level for dreamer subagent invocations. See historian.thinking_level. |
 | `sidekick` | object | — | Optional sidekick agent configuration for session-start memory retrieval |
 | `sidekick.model` | string | — | Primary model ID (e.g. 'claude-sonnet-4-6') |
 | `sidekick.temperature` | number (0–2) | — | Sampling temperature (0-2) |

@@ -2,14 +2,16 @@ import type {
 	DreamerConfig,
 	EmbeddingConfig,
 } from "@magic-context/core/config/schema/magic-context";
+import { openOpenCodeDb } from "@magic-context/core/features/magic-context/dreamer/open-opencode-db";
+import { buildDreamTaskRuntimeConfigs } from "@magic-context/core/features/magic-context/dreamer/task-config";
+import { createDreamTaskExecutor } from "@magic-context/core/features/magic-context/dreamer/task-executor";
+import type { DreamTaskName } from "@magic-context/core/features/magic-context/dreamer/task-registry";
 import {
-	processDreamQueue,
-	registerDreamProjectDirectory,
-} from "@magic-context/core/features/magic-context/dreamer";
-import type { DreamRunResult } from "@magic-context/core/features/magic-context/dreamer/runner";
+	type ManualRunResult,
+	runManualDream,
+} from "@magic-context/core/features/magic-context/dreamer/task-scheduler";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { startDreamScheduleTimer as defaultStartDreamScheduleTimer } from "@magic-context/core/plugin/dream-timer";
-import { resolveFallbackChain } from "@magic-context/core/shared/resolve-fallbacks";
 import { ensureProjectRegisteredFromPiDirectory } from "../embedding-bootstrap";
 import { PiSubagentRunner } from "../subagent-runner";
 
@@ -73,10 +75,10 @@ type SessionDeleteArgs = SessionMessagesArgs;
 
 interface ProjectRegistration {
 	cleanup: () => void;
-	/** Run one dream cycle for this project IMMEDIATELY (mirrors OpenCode's
-	 *  `command-handler.ts:236-246` `processDreamQueue` invocation). The
-	 *  registered dreamer timer also calls this on its own schedule. */
-	runOnce: () => Promise<DreamRunResult | null>;
+	/** Run dream tasks for this project IMMEDIATELY (Dreamer v2 manual path).
+	 *  `task` forces one task ignoring its gate; omitted runs all enabled. The
+	 *  registered dreamer timer also runs due tasks on its own schedule. */
+	runManual: (task?: DreamTaskName) => Promise<ManualRunResult>;
 	/** The directory this registration was built for. `resolveProjectIdentity`
 	 *  is intentionally identical across worktrees/clones of one repo, so a
 	 *  `/cd` into a different checkout of the SAME repo keeps the same identity
@@ -128,26 +130,10 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 		registeredProjects.delete(opts.projectIdentity);
 	}
 
-	registerDreamProjectDirectory(opts.projectIdentity, opts.projectDir);
-
 	// Build the dreamer client ONCE so both the timer and the immediate
 	// /ctx-dream path share the same `inFlightDreams` accounting + the
 	// same module-private `sessionsById` table.
 	const client = createPiDreamerClient(opts);
-
-	const experimentalUserMemories = opts.config.user_memories.enabled
-		? {
-				enabled: true,
-				promotionThreshold: opts.config.user_memories.promotion_threshold,
-			}
-		: undefined;
-	const experimentalPinKeyFiles = opts.config.pin_key_files.enabled
-		? {
-				enabled: true,
-				token_budget: opts.config.pin_key_files.token_budget,
-				min_reads: opts.config.pin_key_files.min_reads,
-			}
-		: undefined;
 
 	let cleanup: (() => void) | undefined;
 	let cancelled = false;
@@ -156,8 +142,6 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 		projectIdentity: opts.projectIdentity,
 		client,
 		dreamerConfig: opts.config,
-		experimentalUserMemories,
-		experimentalPinKeyFiles,
 		gitCommitIndexing: opts.gitCommitIndexing,
 		ensureRegistered: ensureProjectRegisteredFromPiDirectory,
 	}).then((timerCleanup) => {
@@ -170,32 +154,22 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 		cleanup = timerCleanup;
 	});
 
-	// Pi parity for OpenCode `command-handler.ts:236-246` (`/ctx-dream`):
-	// after enqueueing, OpenCode immediately drains the queue via
-	// `processDreamQueue`. Pi previously relied on the 15-min timer tick,
-	// which made `/ctx-dream` feel broken (the user typed it but nothing
-	// observable happened). Capture the same per-project args so a single
-	// callback can run one cycle on demand.
-	const runOnce = async (): Promise<DreamRunResult | null> =>
-		processDreamQueue({
+	// Manual /ctx-dream (Dreamer v2): run dream tasks NOW via the per-task
+	// scheduler, using the same DreamTimerClient facade the timer uses (cast at
+	// the boundary — it implements the session.{create,prompt,messages,delete}
+	// surface the executor consumes; TS can't see structural compatibility
+	// through the wrapper). Project-scoped: only this project's tasks run.
+	const runManual = async (task?: DreamTaskName): Promise<ManualRunResult> =>
+		runManualDream({
 			db: opts.db,
-			// processDreamQueue's PluginContext['client'] type comes from
-			// OpenCode's @opencode-ai/sdk. The DreamTimerClient we pass
-			// implements the same `session.{create,prompt,messages,delete}`
-			// surface processDreamQueue actually consumes — but TS can't
-			// see structural compatibility through the wrapper. Cast at the
-			// boundary; the runtime contract is the same one the timer uses.
-			client: client as never,
-			tasks: opts.config.tasks,
-			taskTimeoutMinutes: opts.config.task_timeout_minutes,
-			maxRuntimeMinutes: opts.config.max_runtime_minutes,
-			experimentalUserMemories,
-			experimentalPinKeyFiles,
-			// Pi /ctx-dream is project-scoped: only drain THIS project's
-			// queue entry, not whatever happens to be at the queue head
-			// (which could belong to an OpenCode-only project Pi can't
-			// possibly dream).
 			projectIdentity: opts.projectIdentity,
+			tasks: buildDreamTaskRuntimeConfigs(opts.config),
+			executor: createDreamTaskExecutor({
+				client: client as never,
+				sessionDirectory: opts.projectDir,
+				openOpenCodeDb,
+			}),
+			task,
 		});
 
 	registeredProjects.set(opts.projectIdentity, {
@@ -203,7 +177,7 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 			cancelled = true;
 			cleanup?.();
 		},
-		runOnce,
+		runManual,
 		projectDir: opts.projectDir,
 	});
 }
@@ -223,14 +197,15 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
  */
 export async function runPiDreamForProject(
 	projectIdentity: string,
-): Promise<DreamRunResult | null> {
+	task?: DreamTaskName,
+): Promise<ManualRunResult> {
 	const registration = registeredProjects.get(projectIdentity);
 	if (!registration) {
 		throw new Error(
 			`Pi dreamer not registered for project ${projectIdentity}; call registerPiDreamerProject() first`,
 		);
 	}
-	return registration.runOnce();
+	return registration.runManual(task);
 }
 
 /** Cleanup hook — call from session_shutdown to deregister this project. */
@@ -260,9 +235,6 @@ export async function awaitInFlightDreamers(): Promise<void> {
 function createPiDreamerClient(opts: PiDreamerOptions): DreamTimerClient {
 	const runner = piSubagentRunnerFactory();
 	const model = opts.config.model;
-	// User-configured fallback_models only (shared policy with OpenCode) — no
-	// builtin chain. With none configured, the dreamer just retries its primary.
-	const fallbackModels = resolveFallbackChain(opts.config.fallback_models);
 
 	const session = {
 		create: async (args: SessionCreateArgs) => {
@@ -285,13 +257,24 @@ function createPiDreamerClient(opts: PiDreamerOptions): DreamTimerClient {
 
 			const userMessage = extractUserMessage(args);
 			const systemPrompt = extractSystemPrompt(args);
+			// Per-task model override (Dreamer v2): the SHARED executor
+			// (promptSyncWithValidatedOutputRetry) owns fallback iteration — it
+			// rewrites body.model to each candidate (per-task model, then the
+			// per-task fallback chain) and calls this facade once per attempt. So
+			// we use body.model as the current attempt's model and pass
+			// fallbackModels: undefined; passing the dreamer-level chain here would
+			// double-iterate and override a task's own (possibly empty) chain.
+			const perTaskModel = extractBodyModel(args) ?? model;
 			const runPromise = runner.run({
 				agent: "magic-context-dreamer",
 				systemPrompt,
 				userMessage,
-				model,
-				fallbackModels,
-				timeoutMs: opts.config.task_timeout_minutes * 60 * 1000,
+				model: perTaskModel,
+				fallbackModels: undefined,
+				// The executor enforces the per-task timeout via its abort signal;
+				// give the subprocess a generous ceiling so the signal is the
+				// authority (not a second, conflicting wall-clock here).
+				timeoutMs: 30 * 60 * 1000,
 				cwd: dreamSession.directory,
 				signal: args.signal ?? undefined,
 				thinkingLevel: opts.config.thinking_level,
@@ -387,6 +370,21 @@ function extractSystemPrompt(args: { body?: unknown }): string {
 
 	const system = (body as { system?: unknown }).system;
 	return typeof system === "string" ? system : "";
+}
+
+/** Read the per-task `body.model` ({ providerID, modelID }) the executor sets,
+ *  back into a "provider/model" spec the PiSubagentRunner expects. */
+function extractBodyModel(args: { body?: unknown }): string | undefined {
+	const body = args.body;
+	if (typeof body !== "object" || body === null) return undefined;
+	const model = (body as { model?: unknown }).model;
+	if (typeof model !== "object" || model === null) return undefined;
+	const providerID = (model as { providerID?: unknown }).providerID;
+	const modelID = (model as { modelID?: unknown }).modelID;
+	if (typeof providerID === "string" && typeof modelID === "string") {
+		return `${providerID}/${modelID}`;
+	}
+	return undefined;
 }
 
 function makeMessage(

@@ -223,22 +223,6 @@ const plugin: Plugin = async (ctx) => {
             dreamerConfig: dreamerRunnable ? pluginConfig.dreamer : undefined,
             embeddingConfig: pluginConfig.embedding,
             memoryEnabled: pluginConfig.memory?.enabled === true,
-            experimentalUserMemories:
-                dreamerRunnable && pluginConfig.dreamer?.user_memories?.enabled
-                    ? {
-                          enabled: true,
-                          promotionThreshold:
-                              pluginConfig.dreamer.user_memories.promotion_threshold,
-                      }
-                    : undefined,
-            experimentalPinKeyFiles:
-                dreamerRunnable && pluginConfig.dreamer?.pin_key_files?.enabled
-                    ? {
-                          enabled: true,
-                          token_budget: pluginConfig.dreamer.pin_key_files.token_budget,
-                          min_reads: pluginConfig.dreamer.pin_key_files.min_reads,
-                      }
-                    : undefined,
             gitCommitIndexing: pluginConfig.memory.git_commit_indexing?.enabled
                 ? {
                       enabled: true,
@@ -532,10 +516,8 @@ const plugin: Plugin = async (ctx) => {
             const dreamerAgentOverrides = pluginConfig.dreamer
                 ? (() => {
                       const {
-                          schedule: _schedule,
-                          max_runtime_minutes: _max,
                           tasks: _tasks,
-                          task_timeout_minutes: _tto,
+                          inject_docs: _injectDocs,
                           thinking_level: _thinkingLevel,
                           ...agentOverrides
                       } = pluginConfig.dreamer;

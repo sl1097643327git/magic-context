@@ -1,6 +1,10 @@
 import { z } from "zod";
-
 import { DEFAULT_PROTECTED_TAGS } from "../../features/magic-context/defaults";
+import { isValidCron } from "../../features/magic-context/dreamer/cron";
+import {
+    AGENTIC_DREAM_TASKS,
+    type DreamTaskName,
+} from "../../features/magic-context/dreamer/task-registry";
 import { AgentOverrideConfigSchema } from "./agent-overrides";
 
 export const DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE = 65;
@@ -16,23 +20,13 @@ export const DEFAULT_HISTORIAN_TIMEOUT_MS = 300_000;
 export const DEFAULT_HISTORY_BUDGET_PERCENTAGE = 0.15;
 export const DEFAULT_LOCAL_EMBEDDING_MODEL = "Xenova/all-MiniLM-L6-v2";
 
-export const DREAMER_TASKS = [
-    "consolidate",
-    "verify",
-    "archive-stale",
-    "improve",
-    "maintain-docs",
-] as const;
-
-export const DreamingTaskSchema = z.enum(DREAMER_TASKS);
-export type DreamingTask = z.infer<typeof DreamingTaskSchema>;
-
-export const DEFAULT_DREAMER_TASKS: DreamingTask[] = [
-    "consolidate",
-    "verify",
-    "archive-stale",
-    "improve",
-];
+// Re-exported from the (DB-free) task registry so the schema and the runtime
+// scheduler share ONE source of truth for task names. DreamingTask remains the
+// 5 "agentic" tasks (those driven by buildDreamTaskPrompt); CANONICAL_DREAM_TASKS
+// is the full 8-task set used for per-task scheduling config.
+export const DREAMER_TASKS = AGENTIC_DREAM_TASKS;
+export const DreamingTaskSchema = z.enum(AGENTIC_DREAM_TASKS);
+export type DreamingTask = (typeof AGENTIC_DREAM_TASKS)[number];
 
 /** Valid thinking levels for Pi subagents. Maps to Pi's --thinking CLI flag.
  *  Off: disable reasoning. Minimal/low/medium/high/xhigh: increasing reasoning depth.
@@ -42,79 +36,115 @@ export const PiThinkingLevelSchema = z
     .optional();
 export type PiThinkingLevel = z.infer<typeof PiThinkingLevelSchema>;
 
-/** Combined dreamer agent + scheduling configuration */
+/** A 5-field cron expression, or "" to disable the task. */
+const CronScheduleSchema = z
+    .string()
+    .refine((s) => s.trim() === "" || isValidCron(s), {
+        message:
+            'Invalid schedule: use a 5-field cron expression (e.g. "0 3 * * *" for 3am daily, "0 3 * * 0" for Sunday 3am, "0 */6 * * *" every 6h) or "" to disable.',
+    })
+    .describe('5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task.');
+
+/** Per-task scheduling + model config. Model/fallback/thinking inherit the
+ *  dreamer-level defaults when omitted. Task-specific params (promotion_threshold,
+ *  token_budget, min_reads) are optional and only meaningful for their owning
+ *  task. */
+export const DreamTaskConfigSchema = z.object({
+    schedule: CronScheduleSchema.default(""),
+    model: z.string().optional().describe("Per-task model override (inherits dreamer.model)"),
+    fallback_models: z
+        .union([z.string(), z.array(z.string())])
+        .optional()
+        .describe("Per-task fallback chain (inherits dreamer.fallback_models)"),
+    thinking_level: PiThinkingLevelSchema.describe("Pi only: per-task thinking level"),
+    timeout_minutes: z
+        .number()
+        .min(5)
+        .default(20)
+        .describe("Minutes allowed for this task before it is aborted"),
+    // review-user-memories
+    promotion_threshold: z
+        .number()
+        .min(2)
+        .max(20)
+        .optional()
+        .describe(
+            "review-user-memories: min candidate observations before promotion is considered (default: 3)",
+        ),
+    // key-files
+    token_budget: z
+        .number()
+        .min(2000)
+        .max(30000)
+        .optional()
+        .describe("key-files: total token budget for pinned files (default: 10000)"),
+    min_reads: z
+        .number()
+        .min(2)
+        .max(20)
+        .optional()
+        .describe("key-files: min full-read count before a file is pinned (default: 4)"),
+});
+export type DreamTaskConfig = z.infer<typeof DreamTaskConfigSchema>;
+
+/** Default schedule per task. Preserves v1 behavior: the 4 v1-default tasks run
+ *  nightly; maintain-docs + key-files default OFF (maintain-docs was not in the
+ *  v1 default list; key-files' pin_key_files.enabled defaulted false); the two
+ *  promoted post-phases run nightly and are gated (candidates / pending notes). */
+const DEFAULT_TASK_SCHEDULES: Record<DreamTaskName, string> = {
+    consolidate: "0 3 * * *",
+    verify: "0 3 * * *",
+    "archive-stale": "0 3 * * *",
+    improve: "0 3 * * *",
+    "maintain-docs": "",
+    "key-files": "",
+    "evaluate-smart-notes": "0 3 * * *",
+    "review-user-memories": "0 3 * * *",
+};
+
+function defaultTaskConfig(task: DreamTaskName): z.input<typeof DreamTaskConfigSchema> {
+    const base: z.input<typeof DreamTaskConfigSchema> = { schedule: DEFAULT_TASK_SCHEDULES[task] };
+    if (task === "review-user-memories") base.promotion_threshold = 3;
+    if (task === "key-files") {
+        base.token_budget = 10000;
+        base.min_reads = 4;
+    }
+    return base;
+}
+
+// `.default()` in Zod 4 wants the OUTPUT shape; the function form lets us derive
+// it by parsing the (partial) input default so timeout_minutes etc. fill in.
+const TaskField = (task: DreamTaskName) =>
+    DreamTaskConfigSchema.default(() => DreamTaskConfigSchema.parse(defaultTaskConfig(task)));
+
+/** The `tasks` record: one entry per canonical task, each defaulting to its
+ *  v1-behavior-preserving schedule. Written explicitly (not via fromEntries) so
+ *  the inferred type stays a precise per-key object. */
+export const DreamTasksSchema = z
+    .object({
+        consolidate: TaskField("consolidate"),
+        verify: TaskField("verify"),
+        "archive-stale": TaskField("archive-stale"),
+        improve: TaskField("improve"),
+        "maintain-docs": TaskField("maintain-docs"),
+        "key-files": TaskField("key-files"),
+        "evaluate-smart-notes": TaskField("evaluate-smart-notes"),
+        "review-user-memories": TaskField("review-user-memories"),
+    })
+    .describe(
+        "Per-task scheduling + model config. Each task has its own cron schedule and may override the dreamer-level model.",
+    );
+
+/** Combined dreamer agent + per-task scheduling configuration (Dreamer v2). */
 export const DreamerConfigSchema = AgentOverrideConfigSchema.merge(
     z.object({
-        schedule: z
-            .string()
-            .default("02:00-06:00")
-            .describe("Scheduled window for overnight dreaming (e.g. '02:00-06:00')"),
-        max_runtime_minutes: z
-            .number()
-            .min(10)
-            .default(120)
-            .describe("Maximum runtime per dream session in minutes"),
-        tasks: z
-            .array(DreamingTaskSchema)
-            .default(DEFAULT_DREAMER_TASKS)
-            .describe("Tasks to run during dreaming, in order"),
-        task_timeout_minutes: z
-            .number()
-            .min(5)
-            .default(20)
-            .describe("Minutes allocated per task before moving to next"),
+        tasks: DreamTasksSchema.default(() => DreamTasksSchema.parse({})),
         inject_docs: z
             .boolean()
             .default(true)
             .describe("Inject ARCHITECTURE.md and STRUCTURE.md into system prompt"),
-        user_memories: z
-            .object({
-                enabled: z
-                    .boolean()
-                    .default(true)
-                    .describe("Enable user memory extraction and promotion (default: true)"),
-                promotion_threshold: z
-                    .number()
-                    .min(2)
-                    .max(20)
-                    .default(3)
-                    .describe(
-                        "Minimum candidate observations before dreamer considers promotion (default: 3)",
-                    ),
-            })
-            .default({ enabled: true, promotion_threshold: 3 })
-            .describe(
-                "User memory pipeline: historian extracts behavior observations from each compartment run; dreamer reviews recurring patterns and promotes them to stable user memories injected into all sessions as <user-profile>. Requires dreamer to not be disabled for promotion to actually happen. Graduated from experimental in v0.14. Default: enabled.",
-            ),
-        pin_key_files: z
-            .object({
-                enabled: z
-                    .boolean()
-                    .default(false)
-                    .describe("Enable key file pinning (default: false)"),
-                token_budget: z
-                    .number()
-                    .min(2000)
-                    .max(30000)
-                    .default(10000)
-                    .describe(
-                        "Total token budget for all pinned key files (min: 2000, max: 30000, default: 10000)",
-                    ),
-                min_reads: z
-                    .number()
-                    .min(2)
-                    .max(20)
-                    .default(4)
-                    .describe(
-                        "Minimum full-read count before a file is considered for pinning (min: 2, default: 4)",
-                    ),
-            })
-            .default({ enabled: false, token_budget: 10000, min_reads: 4 })
-            .describe(
-                "Pin frequently-read key files into the system prompt so the agent doesn't need to re-read them after context drops. Dreamer identifies key files per session based on read patterns. Requires dreamer to not be disabled for selection to happen. Graduated from experimental in v0.14. Default: disabled.",
-            ),
         thinking_level: PiThinkingLevelSchema.describe(
-            "Pi only: explicit thinking level for dreamer subagent invocations. See historian.thinking_level.",
+            "Pi only: default thinking level for dreamer subagent invocations. See historian.thinking_level.",
         ),
     }),
 );

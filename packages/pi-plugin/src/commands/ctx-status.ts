@@ -31,7 +31,7 @@ export interface RegisterCtxStatusDeps {
 		default?: number;
 		[modelKey: string]: number | undefined;
 	};
-	dreamer?: { runnable?: boolean; schedule?: string };
+	dreamer?: { runnable?: boolean; scheduleSummary?: string };
 }
 
 export interface CtxStatusDetails {
@@ -48,7 +48,7 @@ export interface CtxStatusDetails {
 	noteCount: number;
 	dreamer: {
 		enabled: boolean;
-		schedule: string | null;
+		scheduleSummary: string | null;
 		lastRunAt: number | null;
 	};
 	historian: {
@@ -153,7 +153,7 @@ function buildStatusDetails(
 			}).length,
 		dreamer: {
 			enabled: deps.dreamer?.runnable === true,
-			schedule: deps.dreamer?.schedule ?? null,
+			scheduleSummary: deps.dreamer?.scheduleSummary ?? null,
 			lastRunAt: readNumberState(
 				deps.db,
 				`last_dream_at:${deps.projectIdentity}`,
@@ -210,7 +210,7 @@ export function formatCtxStatusSummary(details: CtxStatusDetails): string {
 		`**Compartments:** ${details.compartmentCount}${details.lastCompartmentRange ? ` (last ${details.lastCompartmentRange})` : ""}`,
 		`**Memories:** ${details.memoryCount}`,
 		`**Notes:** ${details.noteCount}`,
-		`**Dreamer:** ${details.dreamer.enabled ? `enabled (${details.dreamer.schedule?.trim() ? details.dreamer.schedule : "manual-only"})` : "disabled"}`,
+		`**Dreamer:** ${details.dreamer.enabled ? `enabled (${details.dreamer.scheduleSummary?.trim() ? details.dreamer.scheduleSummary : "manual-only"})` : "disabled"}`,
 		`**Historian:** ${details.historian.inProgress ? "running" : "idle"}, failures=${details.historian.failureCount}`,
 	].join("\n");
 }

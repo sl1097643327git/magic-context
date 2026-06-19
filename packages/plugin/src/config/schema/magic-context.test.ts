@@ -125,8 +125,12 @@ describe("MagicContextConfigSchema", () => {
                 dreamer: {
                     disable: true,
                     enabled: true,
-                    user_memories: { enabled: false },
-                    pin_key_files: { enabled: true },
+                    // Dreamer v2: per-task config. review-user-memories disabled,
+                    // key-files scheduled.
+                    tasks: {
+                        "review-user-memories": { schedule: "" },
+                        "key-files": { schedule: "0 * * * *" },
+                    },
                 },
                 sidekick: { disable: true, enabled: true },
             });
@@ -136,8 +140,8 @@ describe("MagicContextConfigSchema", () => {
             expect(result.sidekick?.disable).toBe(true);
             expect("enabled" in (result.dreamer as Record<string, unknown>)).toBe(false);
             expect("enabled" in (result.sidekick as Record<string, unknown>)).toBe(false);
-            expect(result.dreamer?.user_memories.enabled).toBe(false);
-            expect(result.dreamer?.pin_key_files.enabled).toBe(true);
+            expect(result.dreamer?.tasks["review-user-memories"].schedule).toBe("");
+            expect(result.dreamer?.tasks["key-files"].schedule).toBe("0 * * * *");
         });
 
         it("accepts optional auto_update user preference", () => {

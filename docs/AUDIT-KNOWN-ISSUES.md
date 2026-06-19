@@ -720,3 +720,26 @@ message hits from crowding memories (note #235); retaining full IDF magnitude
 post-fusion is a finer tuning. Parked deliberately: the lexical ctx_search
 ranking is being replaced by compartment/message embedding recall, which changes
 this surface wholesale — re-tuning the RRF band now is wasted churn.
+
+### A47. Dreamer agentic memory tasks can commit a `ctx_memory` write in the ≤60s window between a lost lease and the abort (pre-existing, not a v2 regression)
+
+The four agentic memory tasks (consolidate/verify/archive-stale/improve) mutate
+memories by driving the dreamer child session, which calls the `ctx_memory` tool.
+Those tool writes commit DURING the child run. The agentic path guards the lease
+with a 60s `renewLease` tick that, on failure, aborts the child and then throws
+`"Dream lease lost during task"` after the run — but a lease lost between ticks
+leaves a window (≤60s) where a `ctx_memory` write can commit before the abort
+lands. The three SPECIALIZED runners (review-user-memories, key-files,
+evaluate-smart-notes) do NOT have this gap: they do their own
+`peekLeaseHolderAndExpiry` check inside the commit transaction (lease-held-before-
+commit).
+
+This is a **pre-existing property carried verbatim from v1** (v1's agentic tasks
+used the same renew-tick + post-run-throw shape under a single serial lease), NOT
+introduced or worsened by the v2 A+B cutover: v2's per-domain `memory:<project>`
+lease keeps the four memory tasks serial within a project exactly as v1's single
+global drain did. Closing it properly requires threading the dreamer lease
+context (`holderId`/`leaseKey`) into the child session's `ctx_memory` tool calls
+so each memory mutation re-verifies the lease at its own write site — a
+tool-surface change that applies equally to shipped v1 and is out of scope for
+this cutover. Tracked as Dreamer-v2 post-ship hardening.

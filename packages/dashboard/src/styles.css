@@ -1603,6 +1603,56 @@ select.config-input {
   cursor: pointer;
 }
 
+.config-input-invalid {
+  border-color: var(--danger, #e5484d);
+}
+
+/* Dreamer v2 per-task schedule editor */
+.dreamer-tasks {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.dreamer-task-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.dreamer-task-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.dreamer-task-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.dreamer-task-controls .config-input {
+  max-width: 200px;
+}
+
+.dreamer-task-param {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.dreamer-task-param .config-input {
+  max-width: 120px;
+}
+
 /* Toggle switch */
 .toggle-switch {
   display: flex;

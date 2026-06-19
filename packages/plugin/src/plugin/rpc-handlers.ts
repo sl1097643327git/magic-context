@@ -807,6 +807,9 @@ export function registerRpcHandlers(
             "../hooks/magic-context/derive-budgets"
         );
         const { resolveFallbackChain } = await import("../shared/resolve-fallbacks");
+        const { userMemoryCollectionEnabled } = await import(
+            "../features/magic-context/dreamer/task-config"
+        );
         const DEFAULT_HISTORIAN_TIMEOUT_MS = 10 * 60 * 1000;
         return {
             client: args.client as ManagedRecompContext["client"],
@@ -821,7 +824,7 @@ export function registerRpcHandlers(
             autoPromote: config.memory?.auto_promote ?? true,
             fallbackModels: resolveFallbackChain(config.historian?.fallback_models),
             runMigration: config.memory?.enabled !== false && !!config.historian?.model,
-            userMemoriesEnabled: config.dreamer?.user_memories?.enabled === true,
+            userMemoriesEnabled: userMemoryCollectionEnabled(config.dreamer),
             historianTwoPass: config.historian?.two_pass === true,
             getNotificationParams,
         };

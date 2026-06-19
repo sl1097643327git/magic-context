@@ -29,6 +29,12 @@ import type {
 	MagicContextConfig,
 	SidekickConfig,
 } from "@magic-context/core/config/schema/magic-context";
+import {
+	keyFilesEnabled,
+	keyFilesTokenBudget,
+	summarizeDreamSchedule,
+	userMemoryCollectionEnabled,
+} from "@magic-context/core/features/magic-context/dreamer/task-config";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import { scheduleIncrementalIndex } from "@magic-context/core/features/magic-context/message-index-async";
 import { detectOverflow } from "@magic-context/core/features/magic-context/overflow-detection";
@@ -391,7 +397,7 @@ export function resolveHistorianFromConfig(
 		historyBudgetPercentage: config.history_budget_percentage,
 		memoryEnabled: config.memory.enabled,
 		autoPromote: config.memory.auto_promote,
-		userMemoriesEnabled: config.dreamer?.user_memories?.enabled === true,
+		userMemoriesEnabled: userMemoryCollectionEnabled(config.dreamer),
 	};
 }
 
@@ -612,8 +618,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			memoryEnabled: cfg.memory.enabled,
 			injectionBudgetTokens: cfg.memory.injection_budget_tokens,
 			temporalAwareness: cfg.temporal_awareness === true,
-			keyFilesEnabled: cfg.dreamer?.pin_key_files?.enabled ?? false,
-			keyFilesTokenBudget: cfg.dreamer?.pin_key_files?.token_budget ?? 10_000,
+			keyFilesEnabled: keyFilesEnabled(cfg.dreamer),
+			keyFilesTokenBudget: keyFilesTokenBudget(cfg.dreamer),
 		},
 		scheduler: {
 			executeThresholdPercentage: cfg.execute_threshold_percentage,
@@ -721,7 +727,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		executeThresholdTokens: config.execute_threshold_tokens,
 		dreamer: {
 			runnable: isDreamerRunnable(config),
-			schedule: config.dreamer?.schedule,
+			scheduleSummary: summarizeDreamSchedule(config.dreamer),
 		},
 	});
 	info("registered /ctx-status");
@@ -764,7 +770,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		historianThinkingLevel: historianConfig?.thinkingLevel,
 		memoryEnabled: config.memory.enabled,
 		autoPromote: config.memory.auto_promote,
-		userMemoriesEnabled: config.dreamer?.user_memories?.enabled === true,
+		userMemoriesEnabled: userMemoryCollectionEnabled(config.dreamer),
 	});
 	info("registered /ctx-session-upgrade");
 
@@ -807,9 +813,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			gitCommitIndexing: config.memory.git_commit_indexing,
 			onAdjunctsRefreshNeeded: signalPiSystemPromptRefreshForProject,
 		});
-		info(
-			`registered dreamer (schedule=${dreamerConfig.schedule || "manual-only"}, tasks=[${dreamerConfig.tasks.join(",")}])`,
-		);
+		info(`registered dreamer (${summarizeDreamSchedule(dreamerConfig)})`);
 	} else {
 		info(
 			isDreamerRunnable(config)
@@ -1058,13 +1062,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				// promotes recurring observations into this set, then the
 				// system prompt surfaces them across all sessions in the
 				// project. Gated on dreamer.user_memories.enabled.
-				userMemoriesEnabled: config.dreamer?.user_memories?.enabled ?? false,
+				userMemoriesEnabled: userMemoryCollectionEnabled(config.dreamer),
 				// Pinned key files rendered as <key-files> — dreamer selects
 				// frequently-read files per session, then we read them off
 				// disk with path-traversal + token-budget guards.
-				pinKeyFilesEnabled: config.dreamer?.pin_key_files?.enabled ?? false,
-				pinKeyFilesTokenBudget:
-					config.dreamer?.pin_key_files?.token_budget ?? 10_000,
+				pinKeyFilesEnabled: keyFilesEnabled(config.dreamer),
+				pinKeyFilesTokenBudget: keyFilesTokenBudget(config.dreamer),
 				isCacheBusting,
 				existingSystemPrompt: event.systemPrompt,
 			});

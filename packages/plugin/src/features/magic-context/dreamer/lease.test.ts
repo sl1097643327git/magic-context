@@ -9,7 +9,14 @@ import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
-import { acquireLease, getLeaseHolder, isLeaseActive, releaseLease, renewLease } from "./lease";
+import {
+    acquireLease,
+    DREAMING_LEASE_KEY,
+    getLeaseHolder,
+    isLeaseActive,
+    releaseLease,
+    renewLease,
+} from "./lease";
 
 function makeDb(path = ":memory:"): Database {
     const db = new Database(path);
@@ -36,6 +43,43 @@ describe("dreamer lease (atomic CAS)", () => {
         expect(acquireLease(db, "holder-a")).toBe(true);
         expect(acquireLease(db, "holder-b")).toBe(false);
         expect(getLeaseHolder(db)).toBe("holder-a");
+        closeQuietly(db);
+    });
+
+    it("keyed leases for different domains do NOT block each other", () => {
+        const db = makeDb();
+        // memory domain held — key-files and global user-memories stay free.
+        expect(acquireLease(db, "h-mem", "memory:git:abc")).toBe(true);
+        expect(acquireLease(db, "h-kf", "key-files:git:abc")).toBe(true);
+        expect(acquireLease(db, "h-um", "user-memories")).toBe(true);
+        // Same memory domain, second holder → blocked.
+        expect(acquireLease(db, "h-mem2", "memory:git:abc")).toBe(false);
+        // Same domain but DIFFERENT project → independent, free.
+        expect(acquireLease(db, "h-mem3", "memory:git:other")).toBe(true);
+        expect(getLeaseHolder(db, "memory:git:abc")).toBe("h-mem");
+        expect(getLeaseHolder(db, "key-files:git:abc")).toBe("h-kf");
+        expect(isLeaseActive(db, "user-memories")).toBe(true);
+        closeQuietly(db);
+    });
+
+    it("releasing one keyed lease leaves siblings untouched", () => {
+        const db = makeDb();
+        expect(acquireLease(db, "h-mem", "memory:git:abc")).toBe(true);
+        expect(acquireLease(db, "h-kf", "key-files:git:abc")).toBe(true);
+        releaseLease(db, "h-mem", "memory:git:abc");
+        expect(isLeaseActive(db, "memory:git:abc")).toBe(false);
+        expect(isLeaseActive(db, "key-files:git:abc")).toBe(true);
+        expect(getLeaseHolder(db, "key-files:git:abc")).toBe("h-kf");
+        closeQuietly(db);
+    });
+
+    it("legacy default key is isolated from new keyed leases", () => {
+        const db = makeDb();
+        expect(acquireLease(db, "legacy-holder")).toBe(true); // default = DREAMING_LEASE_KEY
+        expect(isLeaseActive(db, DREAMING_LEASE_KEY)).toBe(true);
+        // A keyed domain lease is unaffected by the legacy lease being held.
+        expect(acquireLease(db, "h-mem", "memory:git:abc")).toBe(true);
+        expect(isLeaseActive(db)).toBe(true); // legacy still held
         closeQuietly(db);
     });
 

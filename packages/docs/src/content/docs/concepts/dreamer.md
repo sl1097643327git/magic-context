@@ -3,43 +3,52 @@ title: Dreamer
 description: The off-hours maintenance agent that consolidates memory, verifies facts against code, and keeps project documentation current.
 ---
 
-The dreamer is an optional background agent that runs during idle time to maintain memory quality and project documentation. It spins up ephemeral child sessions, each focused on one maintenance task, and works through them in sequence.
+The dreamer is an optional background agent that runs during idle time to maintain memory quality and project documentation. It spins up ephemeral child sessions, each focused on one maintenance task.
 
 ## When it runs
 
-The dreamer runs on a configurable schedule, defaulting to a window between 2:00 AM and 6:00 AM. A 12-hour cooldown per project prevents re-enqueuing within the same schedule window. You can also trigger a run manually at any time with `/ctx-dream`.
+Each dreamer task runs on its **own cron schedule** — there is no single dreamer "run." A process-wide timer checks every task's schedule and runs the ones that are due. You can also trigger a run manually at any time with `/ctx-dream` (all enabled tasks) or `/ctx-dream <task>` (one specific task, run immediately).
+
+Schedules are standard 5-field cron expressions, or `""` to disable a task:
+
+| Cron | Meaning |
+|------|---------|
+| `0 3 * * *` | Every day at 3:00 AM (the default for memory tasks) |
+| `0 3 * * 0` | Every Sunday at 3:00 AM |
+| `0 */6 * * *` | Every 6 hours |
+| `0 * * * *` | Every hour |
+| `""` | Disabled (still runnable manually via `/ctx-dream <task>`) |
 
 :::tip
 The dreamer pairs well with local or inexpensive models. Nobody is waiting — it runs while you sleep or work on something else.
 :::
 
-## The task suite
+## The tasks
 
-The dreamer runs up to five tasks per session, in order:
+The dreamer has eight tasks, each independently scheduled:
 
-| Task | What it does |
-|------|-------------|
-| **Consolidate** | Find semantically duplicate memories and merge each cluster into one canonical entry. |
-| **Verify** | Check memories against the current codebase — paths, configs, patterns — and update or archive stale ones. |
-| **Archive stale** | Retire memories about removed features, old paths, or low-signal facts that waste the injection budget. |
-| **Improve** | Rewrite verbose or narrative memories into terse, operational form. |
-| **Maintain docs** | Keep `ARCHITECTURE.md` and `STRUCTURE.md` at the project root synchronized with codebase changes. |
+| Task | Default | What it does |
+|------|---------|-------------|
+| **consolidate** | nightly | Find semantically duplicate memories and merge each cluster into one canonical entry. |
+| **verify** | nightly | Check memories against the current codebase — paths, configs, patterns — and update or archive stale ones. |
+| **archive-stale** | nightly | Retire memories about removed features, old paths, or low-signal facts that waste the injection budget. |
+| **improve** | nightly | Rewrite verbose or narrative memories into terse, operational form. |
+| **maintain-docs** | off | Keep `ARCHITECTURE.md` and `STRUCTURE.md` at the project root synchronized with codebase changes. |
+| **review-user-memories** | nightly | Promote recurring behavioral observations into your `<user-profile>` (privacy-sensitive — see below). |
+| **key-files** | off | Pin frequently-read project files into a `<key-files>` block injected into the conversation. |
+| **evaluate-smart-notes** | nightly | Check whether any smart-note conditions (`ctx_note` with a surface condition) have come true and surface the ready ones. |
 
-The default task list includes the first four. Add `"maintain-docs"` to your `dreamer.tasks` config to enable documentation maintenance. Each task has a configurable timeout (default: 20 minutes).
+Each task has its own schedule, an optional per-task model override (falling back to the dreamer-level model), and a timeout (default: 20 minutes). The four memory-mutating tasks (consolidate, verify, archive-stale, improve) share a per-project lease so they never run concurrently against the same memory store; the others run independently.
 
-## Optional phases
+Configure all of this under `dreamer.tasks` in `magic-context.jsonc`, or visually in the dashboard config editor.
 
-After the main task suite, the dreamer can run additional phases:
+## Privacy: user-memory review
 
-**User-memory review.** When `dreamer.user_memories.enabled` is true (the default), the historian extracts behavioral observations about how you work — communication style, review focus, working patterns. The dreamer reviews these candidates with a multi-session recurrence gate and promotes recurring patterns to stable user memories. These inject into every session as a `<user-profile>` block.
+The **review-user-memories** task is privacy-sensitive. When scheduled, the historian extracts behavioral observations about how you work — communication style, review focus, working patterns — and this task reviews those candidates with a multi-session recurrence gate, promoting recurring patterns to stable user memories that inject into every session as a `<user-profile>` block.
 
 :::caution
-User memories are a privacy-sensitive feature. They capture observations about your behavior. The pipeline is gated behind an explicit enable flag and only runs when the dreamer is active.
+This task captures observations about your behavior. It only runs when you explicitly schedule it (set its schedule to `""` to turn it off, which is honored across upgrades).
 :::
-
-**Smart-note evaluation.** If you've created smart notes (notes with open-ended surface conditions via `ctx_note`), the dreamer evaluates whether their conditions have come true and surfaces the ready ones.
-
-**Key-file identification.** When `dreamer.pin_key_files.enabled` is true (off by default), the dreamer identifies frequently-read project files and pins them into a `<key-files>` block that injects into the conversation. This gives the agent instant access to files it reads repeatedly.
 
 ## Documentation maintenance
 
@@ -52,9 +61,9 @@ When `dreamer.inject_docs` is true (the default), these files inject into the co
 
 ## Cost and model selection
 
-The dreamer uses your configured dreamer model (and any `fallback_models` you set, then your session model as a last resort) and reads your codebase during verification and doc maintenance. Each task spawns a child session with its own context window. Budget accordingly — a full dream run with all five tasks can be several API calls.
+The dreamer uses your configured dreamer model (and any `fallback_models` you set) and reads your codebase during verification and doc maintenance. Each task spawns a child session with its own context window. Budget accordingly — when several tasks come due together, each is a separate run.
 
-Because it runs during idle time, the dreamer is a good fit for local models, even slow ones. Configure the model in `magic-context.jsonc` under `dreamer.model`.
+Because it runs during idle time, the dreamer is a good fit for local models, even slow ones. Configure the default model in `magic-context.jsonc` under `dreamer.model`, or override it per task with `dreamer.tasks.<task>.model`.
 
 ## Circuit breaker
 

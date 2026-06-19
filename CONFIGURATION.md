@@ -320,58 +320,77 @@ Configures the background historian agent that compresses session history into c
 
 Configures the dreamer agent — both the model it uses and the maintenance tasks it runs. Dreamer creates ephemeral child sessions inside OpenCode for each task.
 
+Each dreamer task is **independently scheduled** with its own cron expression. There is no single dreamer "run" or time window — a process-wide timer runs whichever tasks are due.
+
 ```jsonc
 {
   "dreamer": {
-    "enabled": true,
     "model": "github-copilot/gpt-5.4",
     "fallback_models": ["anthropic/claude-sonnet-4-6"],
-    "schedule": "02:00-06:00",
-    "tasks": ["consolidate", "verify", "archive-stale", "improve", "maintain-docs"]
+    "tasks": {
+      "consolidate": { "schedule": "0 3 * * *" },
+      "verify": { "schedule": "0 3 * * *" },
+      "archive-stale": { "schedule": "0 3 * * *" },
+      "improve": { "schedule": "0 3 * * *" },
+      "maintain-docs": { "schedule": "" },
+      "key-files": { "schedule": "", "token_budget": 10000, "min_reads": 4 },
+      "evaluate-smart-notes": { "schedule": "0 3 * * *" },
+      "review-user-memories": { "schedule": "0 3 * * *", "promotion_threshold": 3 }
+    }
   }
 }
 ```
+
+To disable the dreamer entirely, set `dreamer.disable: true`. To disable a single task, set its `schedule` to `""` (it can still be run on demand via `/ctx-dream <task>`).
 
 ### Agent fields
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `model` | `string` | Primary model. |
-| `fallback_models` | `string` or `string[]` | Fallback models. |
+| `model` | `string` | Default model for all tasks (each task may override). |
+| `fallback_models` | `string` or `string[]` | Default fallback chain (each task may override). |
 | `temperature` | `number` (0–2) | Sampling temperature. |
 | `variant` | `string` | **OpenCode only.** Agent variant — selects a thinking/reasoning preset. Pi uses `thinking_level` instead. |
 | `thinking_level` | `string` | **Pi only.** Explicit reasoning level (`off`/`low`/`medium`/`high`) passed to Pi for dreamer subagent runs. See `historian.thinking_level`. |
 | `prompt` | `string` | Custom system prompt override. |
+| `disable` | `boolean` | Set `true` to disable the dreamer agent entirely. |
+| `inject_docs` | `boolean` (default `true`) | Inject ARCHITECTURE.md and STRUCTURE.md into the agent system prompt. Cached per-session and refreshed on cache-busting passes. |
 
-### Operational fields
+### Per-task fields (`dreamer.tasks.<task>`)
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | `boolean` | `false` | Enable scheduled dreaming. |
-| `schedule` | `string` | `"02:00-06:00"` | Time window for overnight runs (24h, supports overnight like `"23:00-05:00"`). |
-| `max_runtime_minutes` | `number` | `120` | Max total runtime per dream session. |
-| `task_timeout_minutes` | `number` | `20` | Minutes allocated per individual task. |
-| `tasks` | `string[]` | `["consolidate", "verify", "archive-stale", "improve"]` | Tasks to run, in order. |
-| `inject_docs` | `boolean` | `true` | Inject ARCHITECTURE.md and STRUCTURE.md into the agent system prompt. Content is cached per-session and refreshed on cache-busting passes. |
+| `schedule` | `string` | per task (below) | 5-field cron expression, or `""` to disable. |
+| `model` | `string` | inherits `dreamer.model` | Per-task model override. |
+| `fallback_models` | `string` or `string[]` | inherits `dreamer.fallback_models` | Per-task fallback chain. |
+| `timeout_minutes` | `number` | `20` | Minutes allowed before the task is aborted. |
+| `promotion_threshold` | `number` (2–20) | `3` | **review-user-memories only.** Min candidate observations before promotion. |
+| `token_budget` | `number` (2k–30k) | `10000` | **key-files only.** Total token budget for pinned files. |
+| `min_reads` | `number` (2–20) | `4` | **key-files only.** Min full-read count before a file is pinned. |
 
-### Available tasks
+### The tasks
 
-| Task | What it does |
-|------|-------------|
-| `consolidate` | Find semantically duplicate memories and merge each cluster into one canonical fact. |
-| `verify` | Check CONFIG_DEFAULTS, ARCHITECTURE_DECISIONS, and ENVIRONMENT memories against actual code. |
-| `archive-stale` | Archive memories that reference removed features, old paths, or discontinued workflows. |
-| `improve` | Rewrite verbose or narrative memories into terse operational statements. |
-| `maintain-docs` | Keep `ARCHITECTURE.md` and `STRUCTURE.md` at project root synchronized with the codebase. |
+| Task | Default schedule | What it does |
+|------|------------------|-------------|
+| `consolidate` | `0 3 * * *` | Find semantically duplicate memories and merge each cluster into one canonical fact. |
+| `verify` | `0 3 * * *` | Check memories against actual code (paths, configs, patterns) and update or archive stale ones. |
+| `archive-stale` | `0 3 * * *` | Archive memories that reference removed features, old paths, or discontinued workflows. |
+| `improve` | `0 3 * * *` | Rewrite verbose or narrative memories into terse operational statements. |
+| `maintain-docs` | `""` (off) | Keep `ARCHITECTURE.md` and `STRUCTURE.md` at project root synchronized with the codebase. |
+| `key-files` | `""` (off) | Pin frequently-read project files into a `<key-files>` block. Requires AFT (see above). |
+| `evaluate-smart-notes` | `0 3 * * *` | Surface smart notes whose `ctx_note` conditions have come true. |
+| `review-user-memories` | `0 3 * * *` | Promote recurring behavioral observations into the `<user-profile>` block (privacy-sensitive). |
 
 ### How scheduling works
 
-An independent 15-minute timer checks the schedule regardless of user activity, so overnight dreaming triggers even when the user isn't chatting. When the current time falls inside the configured window:
+A process-wide 15-minute timer checks every task's `next_due_at` regardless of user activity, so scheduled tasks trigger even when you aren't chatting:
 
-1. The scheduler scans the memory store for projects with activity since the last dream.
-2. Eligible projects are enqueued into a SQLite-backed dream queue.
-3. The queue consumer processes one project at a time, creating a child session per task.
-4. `/ctx-dream` also uses the same queue — it enqueues the current project and immediately processes.
+1. The timer evaluates each task's cron schedule and collects the tasks that are due.
+2. Due tasks pass their activity gate (e.g. consolidate only runs when there are memories to consolidate), then run grouped by lease domain — the four memory-mutating tasks (consolidate/verify/archive-stale/improve) share a per-project lease and run sequentially; the rest run independently.
+3. Each task runs in its own ephemeral child session and advances its own `next_due_at`.
+4. `/ctx-dream` runs every enabled task now (honoring gates); `/ctx-dream <task>` force-runs one task immediately, ignoring its gate.
+
+A freshly-configured task first runs at its next scheduled time, not immediately on startup.
 
 ---
 
@@ -464,35 +483,10 @@ It is useful when starting a new session. It's better to choose a fast and cheap
 
 ## Dreamer Sub-Features
 
-Two sub-features used to live under `experimental` and graduated to `dreamer.*` in v0.14. The `doctor` command migrates existing configs automatically and preserves any user-set `enabled` state.
+In Dreamer v2 the former `user_memories` and `pin_key_files` sub-feature blocks became first-class scheduled tasks: **`review-user-memories`** and **`key-files`** (see the `dreamer.tasks` table above). The `doctor` command migrates a legacy `dreamer.user_memories` / `dreamer.pin_key_files` config to the equivalent task entries automatically, preserving your enable/disable state and tuning values.
 
-### `dreamer.user_memories`
-
-| Key | Type | Default |
-|-----|------|---------|
-| `dreamer.user_memories.enabled` | `boolean` | `true` |
-| `dreamer.user_memories.promotion_threshold` | `number` | `3` |
-
-When enabled, historian extracts behavioral observations about the user alongside compartments. These are stored as candidates and reviewed by dreamer during scheduled runs. Recurring patterns that appear across multiple historian runs are promoted to stable user memories, injected into all sessions via `<user-profile>` in the system prompt.
-
-**Requires dreamer to be enabled.** Without dreamer, candidates accumulate but are never promoted to stable memories. The `doctor` command warns about this misconfiguration.
-
-- `promotion_threshold`: minimum number of semantically similar candidate observations before dreamer considers promoting to a stable memory (2–20, default 3).
-
-### `dreamer.pin_key_files`
-
-| Key | Type | Default |
-|-----|------|---------|
-| `dreamer.pin_key_files.enabled` | `boolean` | `false` |
-| `dreamer.pin_key_files.token_budget` | `number` | `10000` |
-| `dreamer.pin_key_files.min_reads` | `number` | `4` |
-
-When enabled, dreamer analyzes which files each session's agent reads most frequently (full reads only, not partial line ranges). Core orientation files — architecture, config, types — that are repeatedly re-read after context drops are pinned into the system prompt as a `<key-files>` block. Files are read fresh from disk on each cache-busting pass.
-
-**Requires dreamer to be enabled.** Without dreamer, no key files are identified. The dreamer runs the analysis as a post-task step, inspecting all active non-subagent sessions for the project.
-
-- `token_budget`: maximum total tokens for all pinned files combined (2000–30000, default 10000). Files are selected by a knapsack solver to fit within this budget.
-- `min_reads`: minimum number of full-file reads before a file is considered for pinning (2–20, default 4). Lower values are more aggressive but risk pinning task-specific files.
+- **`review-user-memories`** (was `user_memories`): set its `schedule` to enable, `""` to disable. Carries `promotion_threshold` (2–20, default 3). When scheduled, the historian extracts behavioral observations and this task promotes recurring patterns to stable user memories injected via `<user-profile>`. Privacy-sensitive — only runs when scheduled.
+- **`key-files`** (was `pin_key_files`): set its `schedule` to enable (default off). Carries `token_budget` (2k–30k, default 10000) and `min_reads` (2–20, default 4). Requires AFT (see the Key files note at the top). Pins frequently-read files into a `<key-files>` block.
 
 ## History & Recall Features
 
