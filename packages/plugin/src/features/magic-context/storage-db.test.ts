@@ -1,12 +1,17 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
-import { closeDatabase, isDatabasePersisted, openDatabase } from "./storage-db";
+import {
+    closeDatabase,
+    isDatabasePersisted,
+    openDatabase,
+    resolveDatabasePath,
+} from "./storage-db";
 import { clearSession } from "./storage-meta-session";
 
 const tempDirs: string[] = [];
@@ -300,6 +305,61 @@ describe("storage-db", () => {
 
         it("#when called without prior open #then does not throw", () => {
             expect(() => closeDatabase()).not.toThrow();
+        });
+    });
+
+    // Regression guard for the 2026-06-01 (v26) / 2026-06-19 (v41) incidents:
+    // a `bun test` run from a CWD whose bunfig lacks `[test] preload` ran the
+    // package suites with NO isolation, so a bare openDatabase() migrated the
+    // user's REAL shared DB. The NODE_ENV=test backstop in resolveDatabasePath
+    // makes that structurally impossible from ANY CWD.
+    describe("#given the test-isolation backstop", () => {
+        const realStorageRoot = join(homedir(), ".local", "share", "cortexkit");
+
+        it("#when NODE_ENV=test and XDG_DATA_HOME unset #then never resolves to the real shared DB", () => {
+            // Simulate an UNISOLATED run: no preload-set vars at all.
+            const savedXdg = process.env.XDG_DATA_HOME;
+            const savedTestDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+            process.env.NODE_ENV = "test";
+            // biome-ignore lint/performance/noDelete: must be UNSET, not "".
+            delete process.env.XDG_DATA_HOME;
+            // biome-ignore lint/performance/noDelete: must be UNSET, not "".
+            delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+            try {
+                const { dbPath } = resolveDatabasePath();
+                expect(dbPath.startsWith(realStorageRoot)).toBe(false);
+                expect(dbPath.includes("mc-test-db-backstop-")).toBe(true);
+            } finally {
+                if (savedXdg !== undefined) process.env.XDG_DATA_HOME = savedXdg;
+                if (savedTestDir !== undefined)
+                    process.env.MAGIC_CONTEXT_TEST_DATA_DIR = savedTestDir;
+            }
+        });
+
+        it("#when a test sets its own XDG_DATA_HOME #then that controlled dir is honored", () => {
+            const dataHome = useTempDataHome("storage-db-backstop-xdg-");
+            const { dbPath } = resolveDatabasePath();
+            expect(dbPath).toBe(resolveDbPath(dataHome));
+        });
+
+        it("#then every test package wires the isolation preload (root + plugin + pi-plugin + cli)", () => {
+            // Structural guard: a new test package that forgets its bunfig
+            // `[test] preload` is the exact hole that caused both incidents.
+            const repoRoot = join(__dirname, "..", "..", "..", "..", "..");
+            const bunfigs = [
+                "bunfig.toml",
+                "packages/plugin/bunfig.toml",
+                "packages/pi-plugin/bunfig.toml",
+                "packages/cli/bunfig.toml",
+            ];
+            for (const rel of bunfigs) {
+                const full = join(repoRoot, rel);
+                expect(existsSync(full)).toBe(true);
+                const body = readFileSync(full, "utf8");
+                expect(body.includes("[test]")).toBe(true);
+                expect(body.includes("preload")).toBe(true);
+                expect(body.includes("test-preload.ts")).toBe(true);
+            }
         });
     });
 });

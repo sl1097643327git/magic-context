@@ -1,4 +1,5 @@
-import { copyFileSync, cpSync, existsSync, mkdirSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
     getLegacyOpenCodeMagicContextStorageDir,
@@ -44,7 +45,9 @@ export interface OpenDatabaseOptions {
     latestSupportedVersion?: number;
 }
 
-function resolveDatabasePath(dbPathOverride?: string): { dbDir: string; dbPath: string } {
+// Exported for the test-isolation guard test. Returns a PATH only — opens no DB —
+// so a regression assertion is safe even if the resolution is wrong.
+export function resolveDatabasePath(dbPathOverride?: string): { dbDir: string; dbPath: string } {
     if (dbPathOverride) {
         return { dbDir: dirname(dbPathOverride), dbPath: dbPathOverride };
     }
@@ -67,8 +70,58 @@ function resolveDatabasePath(dbPathOverride?: string): { dbDir: string; dbPath: 
         const dbDir = join(testDataDir, "cortexkit", "magic-context");
         return { dbDir, dbPath: join(dbDir, "context.db") };
     }
+    // CWD-INDEPENDENT TEST BACKSTOP. The MAGIC_CONTEXT_TEST_DATA_DIR / XDG guard
+    // above only fires when the bunfig `[test] preload` ran — which depends on
+    // `bun test`'s CWD having a bunfig with `[test] preload`. A `bun test` from a
+    // dir WITHOUT that wiring (monorepo root, a package missing its bunfig, or a
+    // brand-new package) recursively runs every *.test.ts with NO preload, so a
+    // bare openDatabase() would resolve to the user's REAL shared DB and run
+    // migrations on it. That is exactly how the live DB was migrated to v41 by a
+    // worktree whose LATEST was 41 (a re-run of the 2026-06-01 v26 incident).
+    //
+    // Bun sets NODE_ENV=test for EVERY `bun test` regardless of CWD/bunfig (and
+    // it is never "test" in the plugin runtime — production never sets it). So if
+    // we are under the test runner with neither the test data dir nor an explicit
+    // override, we MUST NOT touch real storage: redirect into a throwaway temp dir
+    // so the live DB is physically unreachable. This makes it structurally
+    // impossible for ANY test, from ANY CWD, to read or migrate production data.
+    // Fire ONLY when XDG_DATA_HOME is unset: that is the dangerous window where
+    // getMagicContextStorageDir() below would otherwise resolve to the REAL
+    // ~/.local/share shared DB. When a test sets its own XDG_DATA_HOME (a
+    // per-test temp dir, e.g. to exercise path fallbacks or share a DB across
+    // helper calls), getMagicContextStorageDir() already points inside that
+    // controlled dir — honor it, do not override.
+    if (process.env.NODE_ENV === "test" && !process.env.XDG_DATA_HOME) {
+        // Memoized per-process so repeated openDatabase() calls in the same
+        // unisolated test resolve to the SAME path (openDatabase caches by path;
+        // a fresh temp dir per call would defeat the cache and hand back
+        // different DB handles).
+        const dbDir = getTestBackstopDbDir();
+        if (!testBackstopWarned) {
+            testBackstopWarned = true;
+            log(
+                "[magic-context] TEST BACKSTOP: NODE_ENV=test with no MAGIC_CONTEXT_TEST_DATA_DIR " +
+                    `— redirecting DB to a throwaway temp dir (${dbDir}) so no test can touch the ` +
+                    "user's real shared database. Wire `[test] preload` in this package's bunfig.toml.",
+            );
+        }
+        return { dbDir, dbPath: join(dbDir, "context.db") };
+    }
     const dbDir = getMagicContextStorageDir();
     return { dbDir, dbPath: join(dbDir, "context.db") };
+}
+
+let testBackstopDbDir: string | null = null;
+let testBackstopWarned = false;
+function getTestBackstopDbDir(): string {
+    if (!testBackstopDbDir) {
+        testBackstopDbDir = join(
+            mkdtempSync(join(tmpdir(), "mc-test-db-backstop-")),
+            "cortexkit",
+            "magic-context",
+        );
+    }
+    return testBackstopDbDir;
 }
 
 export function getDatabasePath(db: Database): string | null {
