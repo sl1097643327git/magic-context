@@ -475,8 +475,11 @@ export function updateTagInputTokenCount(
 export function tagTokenCountIsNull(db: Database, sessionId: string, tagNumber: number): boolean {
     const row = db
         .prepare("SELECT token_count FROM tags WHERE session_id = ? AND tag_number = ?")
-        .get(sessionId, tagNumber) as { token_count: number | null } | undefined;
-    return row !== undefined && row.token_count === null;
+        .get(sessionId, tagNumber) as { token_count: number | null } | undefined | null;
+    // `!= null` guards a no-row result (`.get()` yields null, not the JS undefined
+    // sentinel) — `row !== undefined` alone would let that null through to
+    // `null.token_count` and crash.
+    return row != null && row.token_count === null;
 }
 
 /**
@@ -1077,7 +1080,12 @@ export function hasPiFallbackToolOwnerTags(db: Database, sessionId: string): boo
              LIMIT 1`,
         )
         .get(sessionId);
-    return row !== undefined;
+    // `.get()` returns NULL for a no-row result (empirically true under bun:sqlite;
+    // node:sqlite likewise never returns the JS `undefined` sentinel) — so
+    // `row !== undefined` is TRUE for an EMPTY result, which would defeat this cheap
+    // pre-gate and run the per-pass tool-owner branch-walk for EVERY session. Use
+    // `!= null` to treat both null and undefined as "no row".
+    return row != null;
 }
 
 export function findPiFallbackToolOwnerTags(

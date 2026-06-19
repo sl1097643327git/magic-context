@@ -18,6 +18,7 @@ import {
 	getPendingOps,
 	getPendingPiCompactionMarkerState,
 	getTagsBySession,
+	hasPiFallbackToolOwnerTags,
 	incrementHistorianFailure,
 	insertTag,
 	queuePendingOp,
@@ -708,6 +709,119 @@ describe("Pi fallback tag adoption", () => {
 			);
 
 			expect(JSON.stringify(getTagsBySession(db, sessionId))).toBe(before);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("retargets a duplicate-only pending op onto a survivor that lacks it", () => {
+		const db = createTestDb();
+		try {
+			const sessionId = "ses-pi-tool-owner-pending-only-dup";
+			const tagger = createTagger();
+			const callId = "call-pending-only";
+			const piOwner = "pi-msg-0-90-assistant";
+			const realOwner = "entry-tool-pending-only";
+			// Survivor (synthetic) has NO pending op; the duplicate (real re-read) does.
+			insertTag(db, sessionId, callId, "tool", 10, 90, 0, "Read", 0, piOwner);
+			insertTag(db, sessionId, callId, "tool", 20, 91, 0, "Read", 0, realOwner);
+			queuePendingOp(db, sessionId, 91, "drop", 110);
+			tagger.bindToolTag(sessionId, callId, piOwner, 90);
+			tagger.bindToolTag(sessionId, callId, realOwner, 91);
+
+			contextHandlerInternals.adoptPiFallbackTags(
+				db,
+				sessionId,
+				tagger,
+				new Map(),
+				{
+					messages: [assistantToolCall(callId, "Read", {}, 90)],
+					resolveStableId: () => realOwner,
+				},
+			);
+
+			// The duplicate is gone and its pending op moved onto the survivor (90),
+			// which had none — proving retarget, not silent loss.
+			expect(readTagRow(db, sessionId, 91)).toBeUndefined();
+			expect(readTagRow(db, sessionId, 90)?.status).toBe("active");
+			expect(getPendingOps(db, sessionId).map((op) => op.tagId)).toEqual([90]);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("skips a no-timestamp fallback owner instead of rekeying it", () => {
+		const db = createTestDb();
+		try {
+			const sessionId = "ses-pi-tool-owner-no-ts";
+			const tagger = createTagger();
+			const callId = "call-no-ts";
+			// No-timestamp synthetic owner form: pi-msg-${index}-${role} (no ts segment).
+			const piOwner = "pi-msg-0-assistant";
+			insertTag(db, sessionId, callId, "tool", 10, 95, 0, "Read", 0, piOwner);
+			tagger.bindToolTag(sessionId, callId, piOwner, 95);
+
+			contextHandlerInternals.adoptPiFallbackTags(
+				db,
+				sessionId,
+				tagger,
+				new Map(),
+				{
+					messages: [assistantToolCall(callId, "Read", {}, 90)],
+					resolveStableId: () => "entry-no-ts",
+				},
+			);
+
+			// Unmatchable by (ts,callID) → left as-is, never wrong-rekeyed.
+			expect(readTagRow(db, sessionId, 95)?.toolOwnerMessageId).toBe(piOwner);
+			expect(
+				tagger.getToolTag(sessionId, callId, "entry-no-ts"),
+			).toBeUndefined();
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("cheap-gate: does not build the owner map when no pi-msg tool owners exist", () => {
+		const db = createTestDb();
+		try {
+			const sessionId = "ses-pi-tool-owner-cheap-gate";
+			const tagger = createTagger();
+			// Only a real-owner tool tag exists — no pi-msg-* owners to migrate.
+			insertTag(
+				db,
+				sessionId,
+				"call-real",
+				"tool",
+				10,
+				96,
+				0,
+				"Read",
+				0,
+				"entry-real",
+			);
+			// Split a gate hole from a wrong test premise: the tool-owner gate MUST
+			// be false here (no pi-msg-* owners), so the branch-walk never runs.
+			expect(hasPiFallbackToolOwnerTags(db, sessionId)).toBe(false);
+
+			let resolverCalls = 0;
+			contextHandlerInternals.adoptPiFallbackTags(
+				db,
+				sessionId,
+				tagger,
+				new Map(),
+				{
+					messages: [assistantToolCall("call-real", "Read", {}, 90)],
+					resolveStableId: () => {
+						resolverCalls += 1;
+						return "entry-real";
+					},
+				},
+			);
+
+			// The cheap hasPiFallbackToolOwnerTags gate short-circuits before any
+			// branch walk, so the resolver is never consulted.
+			expect(resolverCalls).toBe(0);
 		} finally {
 			closeQuietly(db);
 		}
