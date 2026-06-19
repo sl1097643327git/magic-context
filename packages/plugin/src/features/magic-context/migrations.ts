@@ -29,11 +29,6 @@ function tableExists(db: Database, name: string): boolean {
     );
 }
 
-function columnExists(db: Database, table: string, column: string): boolean {
-    const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name?: string }>;
-    return rows.some((row) => row.name === column);
-}
-
 const MIGRATIONS: Migration[] = [
     {
         version: 1,
@@ -1494,6 +1489,32 @@ const MIGRATIONS: Migration[] = [
                 );
                 CREATE INDEX IF NOT EXISTS idx_transform_decisions_session_harness
                     ON transform_decisions(session_id, harness);
+            `);
+        },
+    },
+    {
+        version: 39,
+        description: "persist compaction marker target end message id",
+        up: (db: Database) => {
+            const hasSessionMeta = db
+                .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_meta'")
+                .get();
+            if (!hasSessionMeta) return;
+
+            ensureColumn(db, "session_meta", "compaction_marker_state", "TEXT DEFAULT ''");
+            ensureColumn(db, "session_meta", "compaction_marker_target_end_message_id", "TEXT");
+
+            // Null-safe backfill for any state written by an intermediate build
+            // that serialized targetEndMessageId in the JSON before this column
+            // existed. Legacy production rows simply keep NULL and are repaired
+            // the next time their marker is moved/re-injected.
+            db.exec(`
+                UPDATE session_meta
+                SET compaction_marker_target_end_message_id = json_extract(compaction_marker_state, '$.targetEndMessageId')
+                WHERE compaction_marker_target_end_message_id IS NULL
+                  AND COALESCE(compaction_marker_state, '') != ''
+                  AND json_valid(compaction_marker_state)
+                  AND typeof(json_extract(compaction_marker_state, '$.targetEndMessageId')) = 'text'
             `);
         },
     },

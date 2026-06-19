@@ -97,6 +97,7 @@ describe("checkCompactionMarkerConsistency", () => {
             compactionPartId: "prt-compaction",
             summaryPartId: "prt-summary-text",
             boundaryOrdinal: 42,
+            targetEndMessageId: "msg-boundary",
         });
 
         checkCompactionMarkerConsistency(db);
@@ -126,6 +127,7 @@ describe("checkCompactionMarkerConsistency", () => {
             compactionPartId: "prt-compaction",
             summaryPartId: "prt-summary-text",
             boundaryOrdinal: 42,
+            targetEndMessageId: "msg-boundary",
         });
 
         checkCompactionMarkerConsistency(db);
@@ -159,6 +161,7 @@ describe("checkCompactionMarkerConsistency", () => {
             compactionPartId: "prt-compaction-1",
             summaryPartId: "prt-summary-text-1",
             boundaryOrdinal: 10,
+            targetEndMessageId: "msg-boundary-1",
         });
         setPersistedCompactionMarkerState(db, "ses-2", {
             boundaryMessageId: "msg-boundary-2",
@@ -166,6 +169,7 @@ describe("checkCompactionMarkerConsistency", () => {
             compactionPartId: "prt-compaction-2",
             summaryPartId: "prt-summary-text-2",
             boundaryOrdinal: 20,
+            targetEndMessageId: "msg-boundary-2",
         });
 
         checkCompactionMarkerConsistency(db);
@@ -198,6 +202,7 @@ describe("checkCompactionMarkerConsistency", () => {
             compactionPartId: "prt-compaction",
             summaryPartId: "prt-summary-text",
             boundaryOrdinal: 42,
+            targetEndMessageId: "msg-boundary",
         });
 
         checkCompactionMarkerConsistency(db);

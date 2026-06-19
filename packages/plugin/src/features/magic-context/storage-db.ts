@@ -37,7 +37,7 @@ export function getSchemaFenceRejection(): {
     return lastSchemaFenceRejection;
 }
 
-export const LATEST_SUPPORTED_VERSION = 38;
+export const LATEST_SUPPORTED_VERSION = 39;
 
 export interface OpenDatabaseOptions {
     dbPath?: string;
@@ -648,6 +648,9 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       -- Excluded from healNullTextColumns. Readers filter IS NOT NULL AND
       -- != empty-string defensively. Plan v6 section 3.
       pending_compaction_marker_state TEXT,
+      -- Target OpenCode message id used to inject the current compaction marker.
+      -- Nullable for legacy persisted markers; repaired on the next marker move.
+      compaction_marker_target_end_message_id TEXT,
       -- pending_pi_compaction_marker_state: intentionally NULLABLE without a
       -- default. Absence of a deferred Pi-native marker is SQL NULL; presence
       -- is a valid JSON blob written via setPendingPiCompactionMarkerState.
@@ -906,6 +909,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     ensureColumn(db, "tags", "reasoning_token_count", "INTEGER");
     ensureColumn(db, "session_meta", "system_prompt_tokens", "INTEGER DEFAULT 0");
     ensureColumn(db, "session_meta", "compaction_marker_state", "TEXT DEFAULT ''");
+    ensureColumn(db, "session_meta", "compaction_marker_target_end_message_id", "TEXT");
     ensureColumn(db, "session_meta", "key_files", "TEXT DEFAULT ''");
     // Token estimate of output.messages[] after transform manipulation. Used by
     // the sidebar / dashboard to split inputTokens into Conversation vs Tools

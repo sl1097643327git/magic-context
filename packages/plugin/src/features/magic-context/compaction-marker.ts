@@ -183,13 +183,40 @@ export function closeCompactionMarkerDb(): void {
 
 // ── Boundary User Message Resolution ─────────────────────────────
 
-interface BoundaryUserMessage {
+export interface BoundaryUserMessage {
     id: string;
     timeCreated: number;
 }
 
+interface NonSummaryMessageSortKey {
+    id: string;
+    timeCreated: number;
+}
+
+function getNonSummaryMessageSortKey(
+    sessionId: string,
+    messageId: string,
+): NonSummaryMessageSortKey | null {
+    const db = getWritableOpenCodeDb();
+    const row = db
+        .prepare(
+            `SELECT time_created, id
+             FROM message
+             WHERE session_id = ?
+               AND id = ?
+               AND NOT (COALESCE(json_extract(data, '$.summary'), 0) = 1
+                        AND COALESCE(json_extract(data, '$.finish'), '') = 'stop')
+             LIMIT 1`,
+        )
+        .get(sessionId, messageId) as { time_created?: unknown; id?: unknown } | undefined;
+    if (typeof row?.time_created !== "number" || typeof row.id !== "string") {
+        return null;
+    }
+    return { id: row.id, timeCreated: row.time_created };
+}
+
 /**
- * Find the nearest user message at or before the given raw ordinal.
+ * Find the nearest user message at or before the given end message id.
  * The boundary must be a user message for filterCompacted to work.
  *
  * Filters out compaction summary messages (summary=true, finish="stop")
@@ -197,39 +224,58 @@ interface BoundaryUserMessage {
  */
 export function findBoundaryUserMessage(
     sessionId: string,
-    endOrdinal: number,
+    endMessageId: string,
 ): BoundaryUserMessage | null {
     const db = getWritableOpenCodeDb();
 
-    // Filter out our own injected summary messages (summary=true AND finish="stop")
-    // in SQL using json_extract — matches readRawSessionMessagesFromDb's filter so
-    // ordinals stay parity-correct. Avoids O(N) JSON.parse in JS for sessions with
-    // thousands of messages. COALESCE handles rows missing the fields.
-    const rows = db
+    // Resolve the target's canonical sort key first, using the same summary
+    // exclusion as readRawSessionMessagesFromDb. If the stored endMessageId is
+    // gone (or is itself one of our injected summaries), the pending/direct
+    // marker update is stale and must not move the boundary.
+    const target = getNonSummaryMessageSortKey(sessionId, endMessageId);
+    if (!target) return null;
+
+    // Match the raw-message reader's canonical ASC order
+    // (time_created ASC, id ASC). "At or before target" is therefore
+    // time_created < target.time_created OR the same timestamp with id <= target.id.
+    // Push role='user' into SQL so a long assistant/tool span before the target
+    // cannot exhaust a JS scan window and miss the prior user.
+    const boundary = db
         .prepare(
             `SELECT id, time_created, data
              FROM message
              WHERE session_id = ?
                AND NOT (COALESCE(json_extract(data, '$.summary'), 0) = 1
                         AND COALESCE(json_extract(data, '$.finish'), '') = 'stop')
-             ORDER BY time_created ASC, id ASC
-             LIMIT ?`,
+               AND COALESCE(json_extract(data, '$.role'), '') = 'user'
+               AND (time_created < ? OR (time_created = ? AND id <= ?))
+             ORDER BY time_created DESC, id DESC
+             LIMIT 1`,
         )
-        .all(sessionId, endOrdinal) as Array<{ id: string; time_created: number; data: string }>;
+        .get(sessionId, target.timeCreated, target.timeCreated, target.id) as
+        | { id?: unknown; time_created?: unknown; data?: unknown }
+        | undefined;
 
-    let bestMatch: BoundaryUserMessage | null = null;
-    for (const row of rows) {
-        try {
-            const info = JSON.parse(row.data);
-            if (info.role === "user") {
-                bestMatch = { id: row.id, timeCreated: row.time_created };
-            }
-        } catch {
-            // skip corrupt rows
-        }
+    if (typeof boundary?.id !== "string" || typeof boundary.time_created !== "number") {
+        return null;
     }
 
-    return bestMatch;
+    return { id: boundary.id, timeCreated: boundary.time_created };
+}
+
+export function compareOpenCodeMessagesByCanonicalOrder(
+    sessionId: string,
+    leftMessageId: string,
+    rightMessageId: string,
+): number | null {
+    const left = getNonSummaryMessageSortKey(sessionId, leftMessageId);
+    const right = getNonSummaryMessageSortKey(sessionId, rightMessageId);
+    if (!left || !right) return null;
+    if (left.timeCreated < right.timeCreated) return -1;
+    if (left.timeCreated > right.timeCreated) return 1;
+    if (left.id < right.id) return -1;
+    if (left.id > right.id) return 1;
+    return 0;
 }
 
 /**
@@ -276,10 +322,14 @@ export interface InjectCompactionMarkerArgs {
     sessionId: string;
     /** Raw ordinal of the last compartmentalized message */
     endOrdinal: number;
+    /** OpenCode message id of the last compartmentalized message */
+    endMessageId: string;
     /** Summary text for the compaction summary message (static placeholder) */
     summaryText: string;
     /** Working directory for the session */
     directory: string;
+    /** Boundary resolved before removing the old marker (prevents null-boundary cache busts). */
+    resolvedBoundary?: BoundaryUserMessage;
 }
 
 /**
@@ -298,10 +348,11 @@ export function injectCompactionMarker(
         return null;
     }
 
-    const boundary = findBoundaryUserMessage(args.sessionId, args.endOrdinal);
+    const boundary =
+        args.resolvedBoundary ?? findBoundaryUserMessage(args.sessionId, args.endMessageId);
     if (!boundary) {
         log(
-            `[magic-context] compaction-marker: no user message found at or before ordinal ${args.endOrdinal}`,
+            `[magic-context] compaction-marker: no user message found at or before endMessageId ${args.endMessageId} (ordinal ${args.endOrdinal})`,
         );
         return null;
     }

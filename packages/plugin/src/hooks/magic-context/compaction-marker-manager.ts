@@ -15,6 +15,8 @@
 import { join } from "node:path";
 import {
     closeCompactionMarkerDb,
+    compareOpenCodeMessagesByCanonicalOrder,
+    findBoundaryUserMessage,
     getOpenCodeMessageById,
     injectCompactionMarker,
     removeCompactionMarker,
@@ -114,6 +116,71 @@ function validatePendingTarget(
     return "ok";
 }
 
+function getCompartmentEndMessageIdForOrdinal(
+    db: Database,
+    sessionId: string,
+    endOrdinal: number,
+): string | null {
+    const row = db
+        .prepare(
+            `SELECT end_message_id
+             FROM compartments
+             WHERE session_id = ? AND end_message = ?
+             ORDER BY sequence DESC
+             LIMIT 1`,
+        )
+        .get(sessionId, endOrdinal) as { end_message_id?: unknown } | undefined;
+    return typeof row?.end_message_id === "string" && row.end_message_id.length > 0
+        ? row.end_message_id
+        : null;
+}
+
+function existingMarkerAlreadyCoversTarget(
+    sessionId: string,
+    existing: NonNullable<ReturnType<typeof getPersistedCompactionMarkerState>>,
+    targetOrdinal: number,
+    targetEndMessageId: string,
+): boolean {
+    if (existing.boundaryOrdinal < targetOrdinal) {
+        return false;
+    }
+
+    if (existing.boundaryOrdinal === targetOrdinal) {
+        const boundaryCompare = compareOpenCodeMessagesByCanonicalOrder(
+            sessionId,
+            existing.boundaryMessageId,
+            targetEndMessageId,
+        );
+        if (boundaryCompare === null || boundaryCompare > 0) {
+            return false;
+        }
+        if (
+            existing.targetEndMessageId !== null &&
+            existing.targetEndMessageId !== targetEndMessageId
+        ) {
+            return false;
+        }
+        return true;
+    }
+
+    // A strictly higher ordinal normally means a newer direct/recomp publish has
+    // already advanced the marker. If the new target id column proves the stored
+    // target is not actually after this pending/direct target, the state is
+    // inconsistent and should be repaired rather than preserved.
+    if (existing.targetEndMessageId !== null) {
+        const targetCompare = compareOpenCodeMessagesByCanonicalOrder(
+            sessionId,
+            existing.targetEndMessageId,
+            targetEndMessageId,
+        );
+        if (targetCompare !== null && targetCompare <= 0) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 /**
  * Apply a deferred compaction-marker mutation owned by a specific pending
  * blob. Called from the transform postprocess drain — see
@@ -153,10 +220,31 @@ export function applyDeferredCompactionMarker(
         }
 
         const existing = getPersistedCompactionMarkerState(db, sessionId);
-        if (existing && existing.boundaryOrdinal >= pending.ordinal) {
+        if (
+            existing &&
+            existingMarkerAlreadyCoversTarget(
+                sessionId,
+                existing,
+                pending.ordinal,
+                pending.endMessageId,
+            )
+        ) {
             // Marker already at this boundary (or further). Nothing to do.
-            // Includes the equal case — placeholder text never changes.
             return { kind: "already-current" };
+        }
+
+        // Resolve the replacement boundary BEFORE removing the existing marker.
+        // If the target no longer maps to a user boundary (e.g. raw rows changed
+        // under us), leave the old marker intact so OpenCode keeps its current
+        // cache boundary instead of seeing a needless no-marker/full-history pass.
+        const boundary = findBoundaryUserMessage(sessionId, pending.endMessageId);
+        if (!boundary) {
+            return {
+                kind: "retryable-failure",
+                error: new Error(
+                    `no user boundary found at or before endMessageId ${pending.endMessageId} (ordinal ${pending.ordinal}); preserving existing marker`,
+                ),
+            };
         }
 
         // Remove old marker if present. `removeCompactionMarker` returns false
@@ -181,19 +269,16 @@ export function applyDeferredCompactionMarker(
             );
         }
 
-        // Inject new marker. injectCompactionMarker's internal transaction is
-        // atomic — null return means the transaction rolled back cleanly, so
-        // state is CONSISTENT (no half-write). The OLD marker is gone (if it
-        // was present), so OpenCode briefly sees no marker between old-remove
-        // and next-retry-inject. That window is acceptable: filterCompacted
-        // simply falls back to full-history, the transform sees more raw
-        // messages on those passes, and the next consuming pass either
-        // succeeds the inject or another publish overwrites pending.
+        // Inject new marker. The boundary was pre-resolved above, so a null
+        // return here means the INSERT transaction failed and rolled back
+        // cleanly (no half-write); retrying is safe.
         const result = injectCompactionMarker({
             sessionId,
             endOrdinal: pending.ordinal,
+            endMessageId: pending.endMessageId,
             summaryText: MARKER_SUMMARY_TEXT,
             directory: directory ?? process.cwd(),
+            resolvedBoundary: boundary,
         });
         if (!result) {
             return {
@@ -207,6 +292,7 @@ export function applyDeferredCompactionMarker(
         setPersistedCompactionMarkerState(db, sessionId, {
             ...result,
             boundaryOrdinal: pending.ordinal,
+            targetEndMessageId: pending.endMessageId,
         });
         sessionLog(
             sessionId,
@@ -219,9 +305,9 @@ export function applyDeferredCompactionMarker(
         //   - getOpenCodeMessageById() raw SELECT failure
         //   - getCompartmentsByEndMessageId() local SELECT failure
         //   - setPersistedCompactionMarkerState() UPDATE failure
-        // All retryable. Note: findBoundaryUserMessage() returning null flows
-        // through injectCompactionMarker() returning null (handled above),
-        // NOT through this catch.
+        // All retryable. Note: findBoundaryUserMessage() returning null is
+        // handled before any old-marker removal and does NOT flow through this
+        // catch unless the OpenCode DB query itself throws.
         const error = err instanceof Error ? err : new Error(String(err));
         sessionLog(
             sessionId,
@@ -247,15 +333,49 @@ export function updateCompactionMarkerAfterPublication(
     lastCompartmentEnd: number,
     directory?: string,
 ): boolean {
+    const targetEndMessageId = getCompartmentEndMessageIdForOrdinal(
+        db,
+        sessionId,
+        lastCompartmentEnd,
+    );
+    if (!targetEndMessageId) {
+        sessionLog(
+            sessionId,
+            `compaction-marker: no compartment endMessageId for ordinal ${lastCompartmentEnd}; preserving existing marker`,
+        );
+        return false;
+    }
+
     const existing = getPersistedCompactionMarkerState(db, sessionId);
 
     if (existing) {
-        if (existing.boundaryOrdinal === lastCompartmentEnd) {
-            // Same boundary — nothing to do (placeholder text never changes).
+        if (
+            existingMarkerAlreadyCoversTarget(
+                sessionId,
+                existing,
+                lastCompartmentEnd,
+                targetEndMessageId,
+            )
+        ) {
+            // Same/newer boundary — nothing to do (placeholder text never changes).
             // Already current = success.
             return true;
         }
+    }
 
+    // Resolve the new boundary before mutating the existing marker. If the
+    // target is stale or no user exists at/before it, leave the old marker in
+    // place to avoid needless cache churn and history-boundary loss.
+    const boundary = findBoundaryUserMessage(sessionId, targetEndMessageId);
+    if (!boundary) {
+        sessionLog(
+            sessionId,
+            `compaction-marker: no user boundary found at or before endMessageId ${targetEndMessageId} (ordinal ${lastCompartmentEnd}); preserving existing marker`,
+        );
+        return false;
+    }
+
+    if (existing) {
         // Boundary moved forward — remove old marker and inject new one.
         // removeCompactionMarker returns false on failure (it does NOT throw),
         // so honor the boolean: only clear persisted state after a SUCCESSFUL
@@ -281,14 +401,17 @@ export function updateCompactionMarkerAfterPublication(
     const result = injectCompactionMarker({
         sessionId,
         endOrdinal: lastCompartmentEnd,
+        endMessageId: targetEndMessageId,
         summaryText: MARKER_SUMMARY_TEXT,
         directory: directory ?? process.cwd(),
+        resolvedBoundary: boundary,
     });
 
     if (result) {
         setPersistedCompactionMarkerState(db, sessionId, {
             ...result,
             boundaryOrdinal: lastCompartmentEnd,
+            targetEndMessageId,
         });
         sessionLog(
             sessionId,
@@ -296,9 +419,8 @@ export function updateCompactionMarkerAfterPublication(
         );
         return true;
     }
-    // Injection failed (e.g. boundary message not found). The old marker was
-    // already removed (if any); there's nothing persisted to retry against, so
-    // report failure so callers don't treat the boundary as advanced.
+    // Injection failed after boundary preflight (e.g. OpenCode DB write error).
+    // Report failure so callers preserve any pending retry state.
     return false;
 }
 

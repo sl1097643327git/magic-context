@@ -16,6 +16,7 @@ import {
     getProcessedImageStrippedIds,
     getStaleReduceStrippedIds,
     getStrippedPlaceholderIds,
+    type PendingCompactionMarker,
     peekDeferredExecutePending,
     pruneAutoSearchHintDecisions,
     pruneNoteNudgeAnchors,
@@ -77,6 +78,38 @@ const degradedCacheCountBySession = new BoundedSessionMap<number>(100);
 
 export function resetDegradedCacheCount(sessionId: string): void {
     degradedCacheCountBySession.delete(sessionId);
+}
+
+export type DeferredCompactionMarkerClearOutcome =
+    | "cleared"
+    | "cas-lost-newer-pending"
+    | "cas-lost-already-cleared";
+
+export function clearPendingCompactionMarkerAfterSuccessfulDrain(args: {
+    db: ContextDatabase;
+    sessionId: string;
+    pending: PendingCompactionMarker;
+    deferredHistoryRefreshSessions: Set<string>;
+}): DeferredCompactionMarkerClearOutcome {
+    if (clearPendingCompactionMarkerStateIf(args.db, args.sessionId, args.pending)) {
+        return "cleared";
+    }
+
+    const latestPending = getPendingCompactionMarkerState(args.db, args.sessionId);
+    if (latestPending) {
+        args.deferredHistoryRefreshSessions.add(args.sessionId);
+        sessionLog(
+            args.sessionId,
+            "compaction-marker drain: CAS-clear failed because a newer pending blob exists; preserving deferred history refresh signal",
+        );
+        return "cas-lost-newer-pending";
+    }
+
+    sessionLog(
+        args.sessionId,
+        "compaction-marker drain: CAS-clear failed but no pending blob remains; another drain already cleared it",
+    );
+    return "cas-lost-already-cleared";
 }
 
 interface RunPostTransformPhaseArgs {
@@ -1109,8 +1142,18 @@ export async function runPostTransformPhase(
                 case "applied":
                 case "already-current":
                 case "stale-skip":
-                    clearPendingCompactionMarkerStateIf(args.db, args.sessionId, pending);
-                    // v12 drain proceeds normally below.
+                    if (
+                        clearPendingCompactionMarkerAfterSuccessfulDrain({
+                            db: args.db,
+                            sessionId: args.sessionId,
+                            pending,
+                            deferredHistoryRefreshSessions: args.deferredHistoryRefreshSessions,
+                        }) === "cas-lost-newer-pending"
+                    ) {
+                        suppressV12HistoryDrain = true;
+                    }
+                    // v12 drain proceeds below unless CAS lost to a newer blob,
+                    // in which case the signal must survive for that blob's pass.
                     break;
                 case "retryable-failure":
                     sessionLog(

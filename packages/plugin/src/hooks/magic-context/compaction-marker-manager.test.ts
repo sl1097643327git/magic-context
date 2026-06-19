@@ -29,11 +29,16 @@ import { closeDatabase, openDatabase } from "../../features/magic-context/storag
 import {
     getPersistedCompactionMarkerState,
     type PendingCompactionMarker,
+    type PersistedCompactionMarkerState,
     setPersistedCompactionMarkerState,
 } from "../../features/magic-context/storage-meta-persisted";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
-import { applyDeferredCompactionMarker } from "./compaction-marker-manager";
+import {
+    applyDeferredCompactionMarker,
+    closeCompactionMarkerConnection,
+    updateCompactionMarkerAfterPublication,
+} from "./compaction-marker-manager";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
@@ -61,9 +66,19 @@ function createOpenCodeDb(dataHome: string): Database {
 }
 
 function insertUserMessage(db: Database, id: string, sessionId: string, timeCreated: number): void {
+    insertMessage(db, id, sessionId, timeCreated, "user");
+}
+
+function insertMessage(
+    db: Database,
+    id: string,
+    sessionId: string,
+    timeCreated: number,
+    role: string,
+): void {
     db.prepare(
         "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
-    ).run(id, sessionId, timeCreated, timeCreated, JSON.stringify({ role: "user" }));
+    ).run(id, sessionId, timeCreated, timeCreated, JSON.stringify({ role }));
 }
 
 function makePending(overrides: Partial<PendingCompactionMarker> = {}): PendingCompactionMarker {
@@ -94,7 +109,28 @@ function insertCompartment(
     ]);
 }
 
+function insertMarkerRows(
+    db: Database,
+    sessionId: string,
+    state: PersistedCompactionMarkerState,
+): void {
+    db.prepare(
+        "INSERT OR IGNORE INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, 1, 1, ?)",
+    ).run(
+        state.summaryMessageId,
+        sessionId,
+        JSON.stringify({ role: "assistant", summary: true, finish: "stop" }),
+    );
+    db.prepare(
+        "INSERT OR IGNORE INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, 1, 1, ?)",
+    ).run(state.compactionPartId, state.boundaryMessageId, sessionId, '{"type":"compaction"}');
+    db.prepare(
+        "INSERT OR IGNORE INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, 1, 1, ?)",
+    ).run(state.summaryPartId, state.summaryMessageId, sessionId, '{"type":"text","text":"old"}');
+}
+
 afterEach(() => {
+    closeCompactionMarkerConnection();
     closeDatabase();
     process.env.XDG_DATA_HOME = originalXdgDataHome;
     for (const dir of tempDirs) {
@@ -142,11 +178,12 @@ describe("applyDeferredCompactionMarker — outcomes", () => {
         db.prepare("INSERT INTO session_meta (session_id) VALUES (?)").run("ses-1");
         // Persist an existing marker AT the pending ordinal.
         setPersistedCompactionMarkerState(db, "ses-1", {
-            boundaryMessageId: "msg-other",
+            boundaryMessageId: "msg-boundary",
             summaryMessageId: "msg-summary",
             compactionPartId: "prt-comp",
             summaryPartId: "prt-summary",
             boundaryOrdinal: 10,
+            targetEndMessageId: "msg-boundary",
         });
 
         const outcome = applyDeferredCompactionMarker(
@@ -159,7 +196,7 @@ describe("applyDeferredCompactionMarker — outcomes", () => {
         expect(outcome.kind).toBe("already-current");
         // Persisted state untouched (no remove/re-inject)
         const persisted = getPersistedCompactionMarkerState(db, "ses-1");
-        expect(persisted?.boundaryMessageId).toBe("msg-other");
+        expect(persisted?.boundaryMessageId).toBe("msg-boundary");
     });
 
     it("returns `stale-skip / compartment-removed` when raw OpenCode message is gone", () => {
@@ -281,5 +318,93 @@ describe("applyDeferredCompactionMarker — outcomes", () => {
         const outcome = applyDeferredCompactionMarker(db, "ses-1", makePending(), dataHome);
 
         expect(outcome.kind).toBe("retryable-failure");
+    });
+
+    it("preserves an existing marker when the new target has no user boundary", () => {
+        const dataHome = useTempDataHome("apply-deferred-no-boundary-preserve-");
+        const opencodeDb = createOpenCodeDb(dataHome);
+        insertMessage(opencodeDb, "msg-boundary", "ses-1", 1_000, "assistant");
+        const oldState: PersistedCompactionMarkerState = {
+            boundaryMessageId: "msg-old-missing-boundary",
+            summaryMessageId: "msg-old-summary",
+            compactionPartId: "prt-old-compaction",
+            summaryPartId: "prt-old-summary",
+            boundaryOrdinal: 5,
+            targetEndMessageId: "msg-old-target",
+        };
+        insertMarkerRows(opencodeDb, "ses-1", oldState);
+        closeQuietly(opencodeDb);
+
+        const db = openDatabase();
+        insertCompartment(db, "ses-1", 10, "msg-boundary");
+        setPersistedCompactionMarkerState(db, "ses-1", oldState);
+
+        const outcome = applyDeferredCompactionMarker(db, "ses-1", makePending(), dataHome);
+
+        expect(outcome.kind).toBe("retryable-failure");
+        expect(getPersistedCompactionMarkerState(db, "ses-1")?.summaryMessageId).toBe(
+            "msg-old-summary",
+        );
+    });
+
+    it("repairs an equal-ordinal marker whose boundary is after the target endMessageId", () => {
+        const dataHome = useTempDataHome("apply-deferred-repair-overextended-");
+        const opencodeDb = createOpenCodeDb(dataHome);
+        insertUserMessage(opencodeDb, "msg_009_prior_user", "ses-1", 900);
+        insertMessage(opencodeDb, "msg_010_target", "ses-1", 1_000, "assistant");
+        insertUserMessage(opencodeDb, "msg_020_after_user", "ses-1", 2_000);
+        const corruptState: PersistedCompactionMarkerState = {
+            boundaryMessageId: "msg_020_after_user",
+            summaryMessageId: "msg-corrupt-summary",
+            compactionPartId: "prt-corrupt-compaction",
+            summaryPartId: "prt-corrupt-summary",
+            boundaryOrdinal: 10,
+            targetEndMessageId: null,
+        };
+        insertMarkerRows(opencodeDb, "ses-1", corruptState);
+        closeQuietly(opencodeDb);
+
+        const db = openDatabase();
+        insertCompartment(db, "ses-1", 10, "msg_010_target");
+        setPersistedCompactionMarkerState(db, "ses-1", corruptState);
+
+        const outcome = applyDeferredCompactionMarker(
+            db,
+            "ses-1",
+            makePending({ endMessageId: "msg_010_target" }),
+            dataHome,
+        );
+
+        expect(outcome.kind).toBe("applied");
+        const repaired = getPersistedCompactionMarkerState(db, "ses-1");
+        expect(repaired?.boundaryMessageId).toBe("msg_009_prior_user");
+        expect(repaired?.targetEndMessageId).toBe("msg_010_target");
+    });
+
+    it("direct publication path resolves the compartment endMessageId instead of ordinal", () => {
+        const dataHome = useTempDataHome("direct-marker-end-id-");
+        const opencodeDb = createOpenCodeDb(dataHome);
+        insertUserMessage(opencodeDb, "msg_001_deleted_user", "ses-1", 100);
+        insertMessage(opencodeDb, "msg_002_deleted_assistant", "ses-1", 200, "assistant");
+        insertUserMessage(opencodeDb, "msg_003_prior_user", "ses-1", 300);
+        insertMessage(opencodeDb, "msg_004_target", "ses-1", 400, "assistant");
+        insertUserMessage(opencodeDb, "msg_005_after_user", "ses-1", 500);
+        opencodeDb
+            .prepare(
+                "DELETE FROM message WHERE id IN ('msg_001_deleted_user', 'msg_002_deleted_assistant')",
+            )
+            .run();
+        closeQuietly(opencodeDb);
+
+        const db = openDatabase();
+        insertCompartment(db, "ses-1", 4, "msg_004_target");
+        db.prepare("INSERT INTO session_meta (session_id) VALUES (?)").run("ses-1");
+
+        expect(updateCompactionMarkerAfterPublication(db, "ses-1", 4, dataHome)).toBe(true);
+
+        const persisted = getPersistedCompactionMarkerState(db, "ses-1");
+        expect(persisted?.boundaryMessageId).toBe("msg_003_prior_user");
+        expect(persisted?.boundaryOrdinal).toBe(4);
+        expect(persisted?.targetEndMessageId).toBe("msg_004_target");
     });
 });

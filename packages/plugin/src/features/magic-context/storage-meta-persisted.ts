@@ -1436,6 +1436,8 @@ export interface PersistedCompactionMarkerState {
     summaryPartId: string;
     /** The raw ordinal at which the boundary was set */
     boundaryOrdinal: number;
+    /** OpenCode message id of the compartment target used to resolve this marker. */
+    targetEndMessageId: string | null;
 }
 
 export function getPersistedCompactionMarkerState(
@@ -1443,8 +1445,13 @@ export function getPersistedCompactionMarkerState(
     sessionId: string,
 ): PersistedCompactionMarkerState | null {
     const row = db
-        .prepare("SELECT compaction_marker_state FROM session_meta WHERE session_id = ?")
-        .get(sessionId) as { compaction_marker_state?: string } | null;
+        .prepare(
+            "SELECT compaction_marker_state, compaction_marker_target_end_message_id FROM session_meta WHERE session_id = ?",
+        )
+        .get(sessionId) as {
+        compaction_marker_state?: string;
+        compaction_marker_target_end_message_id?: string | null;
+    } | null;
     const raw = row?.compaction_marker_state;
     if (!raw || raw.length === 0) return null;
     try {
@@ -1458,7 +1465,18 @@ export function getPersistedCompactionMarkerState(
             typeof parsed.summaryPartId === "string" &&
             typeof parsed.boundaryOrdinal === "number"
         ) {
-            return parsed as PersistedCompactionMarkerState;
+            const targetEndMessageId =
+                typeof row?.compaction_marker_target_end_message_id === "string" &&
+                row.compaction_marker_target_end_message_id.length > 0
+                    ? row.compaction_marker_target_end_message_id
+                    : typeof parsed.targetEndMessageId === "string" &&
+                        parsed.targetEndMessageId.length > 0
+                      ? parsed.targetEndMessageId
+                      : null;
+            return {
+                ...(parsed as Omit<PersistedCompactionMarkerState, "targetEndMessageId">),
+                targetEndMessageId,
+            };
         }
     } catch {
         // Intentional: corrupt JSON → treat as empty
@@ -1473,10 +1491,9 @@ export function setPersistedCompactionMarkerState(
 ): void {
     ensureSessionMetaRow(db, sessionId);
     const json = state ? JSON.stringify(state) : "";
-    db.prepare("UPDATE session_meta SET compaction_marker_state = ? WHERE session_id = ?").run(
-        json,
-        sessionId,
-    );
+    db.prepare(
+        "UPDATE session_meta SET compaction_marker_state = ?, compaction_marker_target_end_message_id = ? WHERE session_id = ?",
+    ).run(json, state?.targetEndMessageId ?? null, sessionId);
 }
 
 // ── Stripped placeholder message IDs ──
@@ -1715,7 +1732,7 @@ export function addProcessedImageStrippedIds(
 export interface PendingCompactionMarker {
     /** Raw ordinal at which the marker should land. */
     ordinal: number;
-    /** OpenCode message ID at the boundary (the user message just before the marker). */
+    /** OpenCode message ID at the end of the compartment target. */
     endMessageId: string;
     /** Unix ms of publication. Diagnostic only; used by doctor stale-pending checks. */
     publishedAt: number;

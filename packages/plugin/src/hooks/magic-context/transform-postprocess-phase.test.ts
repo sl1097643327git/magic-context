@@ -11,6 +11,7 @@ import {
     insertTag,
     queueM0Mutation,
     queuePendingOp,
+    setPendingCompactionMarkerState,
 } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { Database } from "../../shared/sqlite";
@@ -19,6 +20,7 @@ import { injectM0M1, type M0HardSignals } from "./inject-compartments";
 import type { MessageLike, TagTarget } from "./tag-messages";
 import {
     checkM0MutationDriftAndSignal,
+    clearPendingCompactionMarkerAfterSuccessfulDrain,
     runPostTransformPhase,
 } from "./transform-postprocess-phase";
 
@@ -161,6 +163,46 @@ function basePostTransformArgs(
         ...overrides,
     };
 }
+
+describe("deferred compaction marker CAS drain", () => {
+    it("preserves the deferred-history signal when a newer pending blob exists", () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-marker-cas-newer";
+        const expected = { ordinal: 10, endMessageId: "msg-old", publishedAt: 1 };
+        const newer = { ordinal: 11, endMessageId: "msg-new", publishedAt: 2 };
+        setPendingCompactionMarkerState(db, sessionId, newer);
+        const deferredHistoryRefreshSessions = new Set<string>();
+
+        const outcome = clearPendingCompactionMarkerAfterSuccessfulDrain({
+            db,
+            sessionId,
+            pending: expected,
+            deferredHistoryRefreshSessions,
+        });
+
+        expect(outcome).toBe("cas-lost-newer-pending");
+        expect(deferredHistoryRefreshSessions.has(sessionId)).toBe(true);
+    });
+
+    it("does not re-add the signal when the pending blob was already cleared", () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-marker-cas-cleared";
+        const expected = { ordinal: 10, endMessageId: "msg-old", publishedAt: 1 };
+        const deferredHistoryRefreshSessions = new Set<string>();
+
+        const outcome = clearPendingCompactionMarkerAfterSuccessfulDrain({
+            db,
+            sessionId,
+            pending: expected,
+            deferredHistoryRefreshSessions,
+        });
+
+        expect(outcome).toBe("cas-lost-already-cleared");
+        expect(deferredHistoryRefreshSessions.has(sessionId)).toBe(false);
+    });
+});
 
 describe("postprocess emergency drop accounting", () => {
     it("plans emergency floor from tags that remain active after pending ops", async () => {
