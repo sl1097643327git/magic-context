@@ -613,6 +613,50 @@ describe("createCtxMemoryTool", () => {
 		}
 	});
 
+	it("REJECTS merging memories from DIFFERENT categories (structural guard parity)", async () => {
+		const db = createTestDb();
+		try {
+			const dreamer = createCtxMemoryTool({
+				db,
+				memoryEnabled: true,
+				embeddingEnabled: false,
+				allowDreamerActions: true,
+			});
+			const ctx = fakeContext("ses-dreamer") as never;
+			const ownIdentity = resolveProjectIdentity((ctx as { cwd: string }).cwd);
+			const arch = insertMemory(db, {
+				projectPath: ownIdentity,
+				category: "ARCHITECTURE",
+				content: "Execute threshold capped at 80% for headroom.",
+			});
+			const cfg = insertMemory(db, {
+				projectPath: ownIdentity,
+				category: "CONFIG_VALUES",
+				content: "execute_threshold_percentage accepts 20-80 scalar or map.",
+			});
+
+			const result = await dreamer.execute(
+				"call-xcat",
+				{
+					action: "merge",
+					ids: [arch.id, cfg.id],
+					content: "Execute threshold stuff.",
+					category: "CONFIG_VALUES",
+				},
+				new AbortController().signal,
+				undefined,
+				ctx,
+			);
+
+			expect(result.isError).toBe(true);
+			expect(result.content[0]?.text).toContain("different categories");
+			expect(getMemoryById(db, arch.id)?.status).toBe("active");
+			expect(getMemoryById(db, cfg.id)?.status).toBe("active");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	it("ALLOWS a DREAMER merge of a foreign SHARED-category memory INSIDE a workspace (D1 parity)", async () => {
 		const db = createTestDb();
 		try {

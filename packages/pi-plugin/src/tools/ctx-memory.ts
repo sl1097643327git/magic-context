@@ -618,6 +618,19 @@ export function createCtxMemoryTool(
 					}
 				}
 
+				// A fact has exactly one category. If sources span categories they
+				// are NOT genuine duplicates — one is miscategorized; archive the
+				// redundant one instead. Merging across categories silently destroys
+				// a distinct fact, so reject it structurally (not a prompt rule).
+				const sourceCategories = new Set(
+					sourceMemories.map((memory) => memory.category),
+				);
+				if (sourceCategories.size > 1) {
+					return err(
+						`Error: Cannot merge memories from different categories (${[...sourceCategories].join(", ")}). If they are genuine duplicates, one is miscategorized — archive the redundant one instead of merging across categories.`,
+					);
+				}
+
 				// Schema-validated literal union — no runtime re-check needed.
 				const requestedCategoryTyped: MemoryCategory | undefined =
 					params.category;
@@ -627,15 +640,6 @@ export function createCtxMemoryTool(
 				if (!category) {
 					return err(
 						"Error: A valid category is required when action is 'merge'.",
-					);
-				}
-
-				if (
-					!requestedCategoryTyped &&
-					sourceMemories.some((memory) => memory.category !== category)
-				) {
-					return err(
-						"Error: Mixed-category merges require an explicit 'category'.",
 					);
 				}
 

@@ -635,6 +635,34 @@ describe("createCtxMemoryTools", () => {
         expect(getMemoryById(db, foreignShared.id)?.status).toBe("archived");
     });
 
+    it("REJECTS merging memories from DIFFERENT categories (structural guard)", async () => {
+        const arch = insertMemory(db, {
+            projectPath: "/repo/project",
+            category: "ARCHITECTURE",
+            content: "Execute threshold is capped at 80% for safety headroom.",
+        });
+        const cfg = insertMemory(db, {
+            projectPath: "/repo/project",
+            category: "CONFIG_VALUES",
+            content: "execute_threshold_percentage accepts 20-80 as scalar or map.",
+        });
+
+        const result = await tools.ctx_memory.execute(
+            {
+                action: "merge",
+                ids: [arch.id, cfg.id],
+                content: "Execute threshold stuff.",
+                category: "CONFIG_VALUES",
+            },
+            dreamerToolContext("/repo/project"),
+        );
+
+        expect(result).toContain("different categories");
+        // both sources remain untouched — no destructive collapse
+        expect(getMemoryById(db, arch.id)?.status).toBe("active");
+        expect(getMemoryById(db, cfg.id)?.status).toBe("active");
+    });
+
     it("REFUSES a DREAMER merge of a foreign NON-shared-category memory INSIDE a workspace (D1)", async () => {
         // The dreamer keeps cross-project merge OUTSIDE a workspace (#5971), but
         // INSIDE a workspace the per-category sharing policy is the user's explicit
