@@ -34,7 +34,6 @@ export function buildDreamTaskRuntimeConfigs(dreamer: DreamerConfig): DreamTaskR
             promotionThreshold: t.promotion_threshold,
             tokenBudget: t.token_budget,
             minReads: t.min_reads,
-            broadIntervalDays: task === "verify" ? (t.broad_interval_days ?? 7) : undefined,
         };
     });
 }

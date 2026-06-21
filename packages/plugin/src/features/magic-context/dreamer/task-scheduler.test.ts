@@ -241,12 +241,33 @@ describe("task-scheduler — runDueTasksForProject", () => {
 
         const executor = async (): Promise<TaskExecOutcome> => ({
             status: "completed",
-            schedulePatch: { lastCheckedCommit: "abc123", lastBroadRunAt: 42 },
+            schedulePatch: { lastCheckedCommit: "abc123" },
         });
         await runDueTasksForProject({ db, projectIdentity: PROJECT, tasks, executor, now });
         const state = getTaskScheduleState(db, PROJECT, "verify");
         expect(state?.lastCheckedCommit).toBe("abc123");
-        expect(state?.lastBroadRunAt).toBe(42);
+    });
+
+    it("verify-broad writes its commit watermark to the VERIFY row, not its own", async () => {
+        db = freshDb();
+        seedActiveMemory(db);
+        const now = Date.now();
+        const tasks = [cfg("verify-broad", "0 4 * * 0")];
+        planDueTasks(db, PROJECT, tasks, now);
+        forceDue(db, "verify-broad", now);
+
+        const executor = async (): Promise<TaskExecOutcome> => ({
+            status: "completed",
+            // verify-broad targets the verify row (the gate reads it there).
+            schedulePatch: { lastCheckedCommit: "broadhead", watermarkTask: "verify" },
+        });
+        await runDueTasksForProject({ db, projectIdentity: PROJECT, tasks, executor, now });
+
+        // verify row got the watermark; verify-broad's own row did NOT.
+        expect(getTaskScheduleState(db, PROJECT, "verify")?.lastCheckedCommit).toBe("broadhead");
+        expect(getTaskScheduleState(db, PROJECT, "verify-broad")?.lastCheckedCommit ?? null).toBe(
+            null,
+        );
     });
 
     it("a busy domain lease defers its tasks (next_due unchanged, no run)", async () => {

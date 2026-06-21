@@ -84,21 +84,10 @@ const MinReadsSchema = z
     .max(20)
     .optional()
     .describe("key-files: min full-read count before a file is pinned (default: 4)");
-const BroadIntervalDaysSchema = z
-    .number()
-    .min(1)
-    .max(365)
-    .default(7)
-    .describe("verify: days between broad full-pool passes (default: 7)");
-
 export const DreamTaskConfigSchema = DreamTaskBaseConfigSchema.extend({
     promotion_threshold: PromotionThresholdSchema,
     token_budget: TokenBudgetSchema,
     min_reads: MinReadsSchema,
-    broad_interval_days: BroadIntervalDaysSchema.optional(),
-});
-const VerifyTaskConfigSchema = DreamTaskBaseConfigSchema.extend({
-    broad_interval_days: BroadIntervalDaysSchema,
 });
 const KeyFilesTaskConfigSchema = DreamTaskBaseConfigSchema.extend({
     token_budget: TokenBudgetSchema,
@@ -116,6 +105,7 @@ export type DreamTaskConfig = z.infer<typeof DreamTaskConfigSchema>;
  *  post-phases run nightly and are gated. */
 const DEFAULT_TASK_SCHEDULES: Record<DreamTaskName, string> = {
     verify: "0 3 * * *",
+    "verify-broad": "0 4 * * 0",
     curate: "0 4 * * 0",
     "classify-memories": "0 6 * * *",
     retrospective: "0 5 * * *",
@@ -127,7 +117,6 @@ const DEFAULT_TASK_SCHEDULES: Record<DreamTaskName, string> = {
 
 function defaultTaskConfig(task: DreamTaskName): z.input<typeof DreamTaskConfigSchema> {
     const base: z.input<typeof DreamTaskConfigSchema> = { schedule: DEFAULT_TASK_SCHEDULES[task] };
-    if (task === "verify") base.broad_interval_days = 7;
     if (task === "review-user-memories") base.promotion_threshold = 3;
     if (task === "key-files") {
         base.token_budget = 10000;
@@ -143,8 +132,11 @@ function defaultTaskConfig(task: DreamTaskName): z.input<typeof DreamTaskConfigS
  *  the inferred type stays a precise per-key object. */
 export const DreamTasksSchema = z
     .object({
-        verify: VerifyTaskConfigSchema.default(() =>
-            VerifyTaskConfigSchema.parse(defaultTaskConfig("verify")),
+        verify: DreamTaskBaseConfigSchema.default(() =>
+            DreamTaskBaseConfigSchema.parse(defaultTaskConfig("verify")),
+        ),
+        "verify-broad": DreamTaskBaseConfigSchema.default(() =>
+            DreamTaskBaseConfigSchema.parse(defaultTaskConfig("verify-broad")),
         ),
         curate: DreamTaskBaseConfigSchema.default(() =>
             DreamTaskBaseConfigSchema.parse(defaultTaskConfig("curate")),

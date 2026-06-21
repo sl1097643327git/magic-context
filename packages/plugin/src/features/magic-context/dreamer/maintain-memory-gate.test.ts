@@ -91,7 +91,6 @@ describe("verify incremental gate", () => {
             projectIdentity: repo.dir,
             projectDirectory: repo.dir,
             scheduleState: scheduleState(repo.dir, repo.head, Date.now()),
-            broadIntervalDays: 7,
         });
 
         expect(result.mode).toBe("incremental");
@@ -114,13 +113,12 @@ describe("verify incremental gate", () => {
             projectIdentity: repo.dir,
             projectDirectory: repo.dir,
             scheduleState: scheduleState(repo.dir, repo.head, Date.now()),
-            broadIntervalDays: 7,
         });
 
         expect(result.inScopeIds.sort((a, b) => a - b)).toEqual([changed.id, missing.id].sort());
     });
 
-    test("non-git projects and broad mode full-verify active memories", async () => {
+    test("non-git full-verify, and forceBroad pulls the WHOLE pool incl sentinel-only", async () => {
         db = freshDb();
         const nonGitDir = mkdtempSync(join(tmpdir(), "mc-verify-non-git-"));
         dirs.push(nonGitDir);
@@ -130,11 +128,12 @@ describe("verify incremental gate", () => {
             projectIdentity: nonGitDir,
             projectDirectory: nonGitDir,
             scheduleState: null,
-            broadIntervalDays: 7,
         });
         expect(nonGit.mode).toBe("non-git");
         expect(nonGit.inScopeIds).toEqual([nonGitMemory.id]);
 
+        // verify-broad: even with a current watermark + a sentinel-only memory
+        // (which incremental SKIPS), forceBroad pulls the entire active pool.
         const repo = makeGitRepo();
         dirs.push(repo.dir);
         const sentinel = activeMemory(db, repo.dir, "File independent.");
@@ -143,8 +142,8 @@ describe("verify incremental gate", () => {
             db,
             projectIdentity: repo.dir,
             projectDirectory: repo.dir,
-            scheduleState: { ...scheduleState(repo.dir, repo.head, Date.now()), lastBroadRunAt: 0 },
-            broadIntervalDays: 7,
+            scheduleState: scheduleState(repo.dir, repo.head, Date.now()),
+            forceBroad: true,
         });
         expect(broad.mode).toBe("broad");
         expect(broad.inScopeIds).toEqual([sentinel.id]);
@@ -162,7 +161,6 @@ describe("verify incremental gate", () => {
             projectIdentity: repo.dir,
             projectDirectory: repo.dir,
             scheduleState: scheduleState(repo.dir, "deadbeef", Date.now()),
-            broadIntervalDays: 7,
         });
 
         expect(result.mode).toBe("full");

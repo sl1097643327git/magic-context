@@ -747,23 +747,28 @@ async function runAgenticTask(
 
     let verifyGate: MaintainMemoryGateResult | null = null;
     let curateMemories: MaintainMemoryGateResult["inScope"] | undefined;
-    if (task === "verify") {
+    const isVerify = task === "verify" || task === "verify-broad";
+    if (isVerify) {
         verifyGate = await partitionMaintainMemoryScope({
             db,
             projectIdentity,
             projectDirectory: deps.sessionDirectory,
-            scheduleState: getTaskScheduleState(db, projectIdentity, config.task),
-            broadIntervalDays: config.broadIntervalDays,
+            // BOTH verify and verify-broad read+advance the "verify" row's commit
+            // watermark (shared, serialized by the memory lease). verify-broad
+            // forces the full pool regardless of changed files.
+            scheduleState: getTaskScheduleState(db, projectIdentity, "verify"),
+            forceBroad: task === "verify-broad",
         });
         log(
-            `[dreamer] verify gate: mode=${verifyGate.mode} in_scope=${verifyGate.inScopeIds.length} skipped=${verifyGate.skippedIds.length} reason=${verifyGate.reason}`,
+            `[dreamer] ${task} gate: mode=${verifyGate.mode} in_scope=${verifyGate.inScopeIds.length} skipped=${verifyGate.skippedIds.length} reason=${verifyGate.reason}`,
         );
         if (verifyGate.inScopeIds.length === 0) {
+            // Empty scope is still complete coverage → advance the verify
+            // watermark to startHead. verify-broad writes the VERIFY row, not its
+            // own (BLOCKER: the incremental gate + verification-recording read the
+            // watermark from the verify row).
             const schedulePatch = verifyGate.startHead
-                ? {
-                      lastCheckedCommit: verifyGate.startHead,
-                      ...(verifyGate.broadMode ? { lastBroadRunAt: Date.now() } : {}),
-                  }
+                ? { lastCheckedCommit: verifyGate.startHead, watermarkTask: "verify" as const }
                 : undefined;
             helpers.recordRun("completed", null, {
                 memoryChanges: helpers.computeMemoryDelta(memoryBefore),
@@ -898,9 +903,12 @@ async function runAgenticTask(
                 runStartedAt: verifyGate.runStartedAt,
             });
             if (coverage.covered && verifyGate.startHead) {
+                // Both verify and verify-broad advance the VERIFY row's watermark
+                // to their run-start HEAD on full coverage (BLOCKER: verify-broad
+                // must NOT write its own row — the gate reads the verify row).
                 schedulePatch = {
                     lastCheckedCommit: verifyGate.startHead,
-                    ...(verifyGate.broadMode ? { lastBroadRunAt: Date.now() } : {}),
+                    watermarkTask: "verify",
                 };
             } else if (!coverage.covered) {
                 log(

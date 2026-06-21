@@ -9,6 +9,7 @@ describe("dreamer task registry", () => {
         expect(isCanonicalDreamTask("retrospective")).toBe(true);
         expect(MEMORY_DOMAIN_TASKS).toEqual([
             "verify",
+            "verify-broad",
             "curate",
             "classify-memories",
             "retrospective",

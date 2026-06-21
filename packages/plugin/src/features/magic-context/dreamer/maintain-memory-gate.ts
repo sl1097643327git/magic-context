@@ -14,8 +14,6 @@ import {
 import type { TaskScheduleStateRow } from "./storage-task-schedule";
 
 // Verify task gate substrate (formerly maintain-memory); kept here to avoid a noisy mechanical rename.
-const DEFAULT_BROAD_INTERVAL_DAYS = 7;
-const DAY_MS = 24 * 60 * 60 * 1000;
 
 export interface MaintainMemoryPromptMemory {
     id: number;
@@ -30,7 +28,6 @@ export interface MaintainMemoryGateResult {
     runStartedAt: number;
     startHead: string | null;
     mode: "non-git" | "full" | "broad" | "incremental";
-    broadMode: boolean;
     inScope: MaintainMemoryPromptMemory[];
     inScopeIds: number[];
     skippedIds: number[];
@@ -53,21 +50,26 @@ function toPromptMemory(
     };
 }
 
-function isBroadDue(
-    state: TaskScheduleStateRow | null,
-    now: number,
-    broadIntervalDays: number | undefined,
-): boolean {
-    const intervalDays = Math.max(1, broadIntervalDays ?? DEFAULT_BROAD_INTERVAL_DAYS);
-    return state?.lastBroadRunAt == null || now - state.lastBroadRunAt >= intervalDays * DAY_MS;
-}
-
+/**
+ * Partition the active memory pool for a verify run.
+ *
+ * - `verify` (incremental, default): only memories whose mapped files changed
+ *   since the stored commit watermark are in scope; file-independent (sentinel)
+ *   memories are skipped — they get re-verified by the broad pass.
+ * - `verify-broad` (`forceBroad: true`): the ENTIRE active pool is in scope,
+ *   regardless of changed files — the home for sentinel/file-independent
+ *   memories + drift catching. Replaces the old internal `broad_interval_days`
+ *   cadence; broad is now its own scheduled task.
+ *
+ * Both advance the SAME `lastCheckedCommit` watermark on full completion (they
+ * share the memory lease → serialize, never race); the executor owns that write.
+ */
 export async function partitionMaintainMemoryScope(args: {
     db: Database;
     projectIdentity: string;
     projectDirectory: string;
     scheduleState: TaskScheduleStateRow | null;
-    broadIntervalDays?: number;
+    forceBroad?: boolean;
     now?: number;
 }): Promise<MaintainMemoryGateResult> {
     const runStartedAt = args.now ?? Date.now();
@@ -77,13 +79,11 @@ export async function partitionMaintainMemoryScope(args: {
         activeMemories.map((memory) => memory.id),
     );
     const startHead = await readGitHead(args.projectDirectory);
-    const broadMode = isBroadDue(args.scheduleState, runStartedAt, args.broadIntervalDays);
 
     const allInScope = (mode: MaintainMemoryGateResult["mode"], reason: string) => ({
         runStartedAt,
         startHead,
         mode,
-        broadMode: mode === "broad" || broadMode,
         inScope: activeMemories.map((memory) => {
             const verification = verificationById.get(memory.id);
             return toPromptMemory(
@@ -98,28 +98,27 @@ export async function partitionMaintainMemoryScope(args: {
         reason,
     });
 
+    // verify-broad: full pool, unconditionally — does not read the watermark for
+    // scoping (it verifies everything as of startHead).
+    if (args.forceBroad) {
+        return allInScope("broad", "broad full-pool verification");
+    }
+
     if (!startHead) {
         return allInScope("non-git", "non-git project; full verification");
     }
 
     const storedWatermark = args.scheduleState?.lastCheckedCommit ?? null;
     if (!storedWatermark) {
-        return allInScope(
-            broadMode ? "broad" : "full",
-            "no stored verify commit watermark; full verification",
-        );
+        return allInScope("full", "no stored verify commit watermark; full verification");
     }
 
     const changedFiles = await readGitChangedFilesSince(args.projectDirectory, storedWatermark);
     if (!changedFiles) {
         return allInScope(
-            broadMode ? "broad" : "full",
+            "full",
             "stored verify commit watermark is unavailable; full verification",
         );
-    }
-
-    if (broadMode) {
-        return allInScope("broad", "broad verify interval elapsed");
     }
 
     const gitRoot =
@@ -158,7 +157,6 @@ export async function partitionMaintainMemoryScope(args: {
         runStartedAt,
         startHead,
         mode: "incremental",
-        broadMode: false,
         inScope,
         inScopeIds: inScope.map((memory) => memory.id),
         skippedIds,

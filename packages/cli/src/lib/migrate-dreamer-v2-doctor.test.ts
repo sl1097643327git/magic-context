@@ -82,7 +82,8 @@ describe("migrateDreamerV2ForDoctor", () => {
         expect(migrateDreamerV2ForDoctor(cfg)).toBe(true);
         const t = tasksOf(cfg);
         expect(t.verify.schedule).toBe("0 3 * * *");
-        expect(t.verify.broad_interval_days).toBe(7);
+        expect(t.verify.broad_interval_days).toBeUndefined();
+        expect(t["verify-broad"].schedule).toBe("0 4 * * 0");
         expect(t.curate.schedule).toBe("0 * * * *");
         expect(t["classify-memories"].schedule).toBe("0 6 * * *");
         expect(t.retrospective.schedule).toBe("0 5 * * *");
@@ -121,10 +122,11 @@ describe("migrateDreamerV2ForDoctor", () => {
         const t = tasksOf(cfg);
         expect(t.verify.schedule).toBe("0 5 * * *");
         expect(t.verify.model).toBe("x/y");
-        expect(t.verify.broad_interval_days).toBe(9);
+        // broad_interval_days is dropped; broad is its own task now.
+        expect(t.verify.broad_interval_days).toBeUndefined();
+        expect(t["verify-broad"].schedule).toBe("0 4 * * 0");
         expect(t.curate.schedule).toBe("0 5 * * *");
         expect(t.curate.model).toBe("x/y");
-        expect(t.curate.broad_interval_days).toBeUndefined();
         expect(t["maintain-memory"]).toBeUndefined();
     });
 });

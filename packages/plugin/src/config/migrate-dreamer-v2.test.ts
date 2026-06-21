@@ -63,9 +63,10 @@ describe("migrateDreamerV2", () => {
         const { out } = migrate({ dreamer: { schedule: "02:00-06:00" } });
         const t = tasks(out);
         expect(t.verify.schedule).toBe("0 2 * * *");
-        expect(t.verify.broad_interval_days).toBe(7);
+        // verify enabled → verify-broad defaults ON weekly; broad_interval_days gone.
+        expect(t["verify-broad"].schedule).toBe("0 4 * * 0");
+        expect(t.verify.broad_interval_days).toBeUndefined();
         expect(t.curate.schedule).toBe("0 2 * * *");
-        expect(t.curate.broad_interval_days).toBeUndefined();
         expect(t["classify-memories"].schedule).toBe("0 6 * * *");
         expect(t["maintain-docs"].schedule).toBe(""); // not in v1 default list
     });
@@ -164,7 +165,7 @@ describe("migrateDreamerV2", () => {
         expect(warnings.join("\n")).toContain("dreamer.tasks");
     });
 
-    it("all 8 canonical tasks are present after migration", () => {
+    it("all 9 canonical tasks are present after migration", () => {
         const { out } = migrate({ dreamer: { schedule: "02:00-06:00" } });
         expect(Object.keys(tasks(out)).sort()).toEqual(
             [
@@ -176,6 +177,7 @@ describe("migrateDreamerV2", () => {
                 "retrospective",
                 "review-user-memories",
                 "verify",
+                "verify-broad",
             ].sort(),
         );
     });
@@ -192,7 +194,9 @@ describe("migrateDreamerV2", () => {
         });
         const t = tasks(out);
         expect(t.verify.schedule).toBe("0 3 * * *");
-        expect(t.verify.broad_interval_days).toBe(7);
+        // verify present+enabled → verify-broad defaults ON weekly.
+        expect(t["verify-broad"].schedule).toBe("0 4 * * 0");
+        expect(t.verify.broad_interval_days).toBeUndefined();
         expect(t.curate.schedule).toBe("0 * * * *");
         expect(t["classify-memories"].schedule).toBe("0 6 * * *");
         expect(t.retrospective.schedule).toBe("0 5 * * *");
@@ -200,7 +204,7 @@ describe("migrateDreamerV2", () => {
         expect(t.improve).toBeUndefined();
     });
 
-    it("maps object-shaped maintain-memory to verify + curate", () => {
+    it("maps object-shaped maintain-memory to verify + curate, broad_interval_days dropped", () => {
         const { out } = migrate({
             dreamer: {
                 tasks: {
@@ -215,10 +219,11 @@ describe("migrateDreamerV2", () => {
         const t = tasks(out);
         expect(t.verify.schedule).toBe("0 5 * * *");
         expect(t.verify.model).toBe("x/y");
-        expect(t.verify.broad_interval_days).toBe(9);
+        // The legacy broad_interval_days knob is dropped; broad is its own task.
+        expect(t.verify.broad_interval_days).toBeUndefined();
+        expect(t["verify-broad"].schedule).toBe("0 4 * * 0");
         expect(t.curate.schedule).toBe("0 5 * * *");
         expect(t.curate.model).toBe("x/y");
-        expect(t.curate.broad_interval_days).toBeUndefined();
         expect(t["maintain-memory"]).toBeUndefined();
     });
 });

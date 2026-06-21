@@ -38,6 +38,7 @@ const OLD_CURATE_TASKS = ["consolidate", "archive-stale", "improve"] as const;
 const RETIRED_OBJECT_MEMORY_TASKS = ["maintain-memory", ...OLD_CURATE_TASKS] as const;
 const CANONICAL = [
     "verify",
+    "verify-broad",
     "curate",
     "classify-memories",
     "retrospective",
@@ -49,6 +50,7 @@ const CANONICAL = [
 const DEFAULT_BASE_CRON = "0 2 * * *"; // matches the historical "02:00-06:00" default window start
 const DEFAULT_CLASSIFY_CRON = "0 6 * * *";
 const DEFAULT_RETROSPECTIVE_CRON = "0 5 * * *";
+const DEFAULT_VERIFY_BROAD_CRON = "0 4 * * 0"; // weekly — replaces the old broad_interval_days cadence
 
 /** "02:00-06:00" → "0 2 * * *". Falls back to the default base cron on any
  *  unparseable window (never throws — config migration is fail-open). */
@@ -151,13 +153,9 @@ export function migrateDreamerV2(
                     ? maintainMemoryEntry.schedule
                     : baseCron;
             tasks.verify = withTimeout({
-                ...maintainMemoryEntry,
+                ...withoutBroadInterval(maintainMemoryEntry),
                 ...(tasks.verify ?? {}),
                 schedule: tasks.verify?.schedule ?? schedule,
-                broad_interval_days:
-                    tasks.verify?.broad_interval_days ??
-                    maintainMemoryEntry.broad_interval_days ??
-                    7,
             });
             tasks.curate = withTimeout({
                 ...withoutBroadInterval(maintainMemoryEntry),
@@ -169,14 +167,24 @@ export function migrateDreamerV2(
         const oldVerifyEntry = asObject(tasksObject[OLD_VERIFY_TASK]);
         if (oldVerifyEntry) {
             tasks.verify = withTimeout({
-                ...oldVerifyEntry,
+                ...withoutBroadInterval(oldVerifyEntry),
                 ...(tasks.verify ?? {}),
                 schedule:
                     tasks.verify?.schedule ??
                     (typeof oldVerifyEntry.schedule === "string"
                         ? oldVerifyEntry.schedule
                         : baseCron),
-                broad_interval_days: tasks.verify?.broad_interval_days ?? 7,
+            });
+        }
+
+        // The old internal broad cadence becomes its own task. If verify is
+        // enabled (broad used to run inside it), default verify-broad ON weekly;
+        // if verify is disabled, leave verify-broad disabled.
+        if (!tasks["verify-broad"]) {
+            const verifyEnabled =
+                typeof tasks.verify?.schedule === "string" && tasks.verify.schedule.trim() !== "";
+            tasks["verify-broad"] = withTimeout({
+                schedule: verifyEnabled ? DEFAULT_VERIFY_BROAD_CRON : "",
             });
         }
 
@@ -196,7 +204,7 @@ export function migrateDreamerV2(
         for (const task of CANONICAL) {
             if (!tasks[task]) {
                 const schedule =
-                    task === "verify" || task === "curate"
+                    task === "verify" || task === "curate" || task === "verify-broad"
                         ? ""
                         : task === "classify-memories"
                           ? classifySchedule
@@ -205,10 +213,7 @@ export function migrateDreamerV2(
                             : task === "maintain-docs" || task === "key-files"
                               ? ""
                               : baseCron;
-                tasks[task] = withTimeout({
-                    schedule,
-                    ...(task === "verify" ? { broad_interval_days: 7 } : {}),
-                });
+                tasks[task] = withTimeout({ schedule });
             }
         }
     } else {
@@ -224,7 +229,9 @@ export function migrateDreamerV2(
             : true;
         tasks.verify = withTimeout({
             schedule: verifySelected ? baseCron : "",
-            broad_interval_days: 7,
+        });
+        tasks["verify-broad"] = withTimeout({
+            schedule: verifySelected ? DEFAULT_VERIFY_BROAD_CRON : "",
         });
         tasks.curate = withTimeout({
             schedule: curateSelected ? baseCron : "",

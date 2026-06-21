@@ -24,7 +24,8 @@ import type { PromptIO, SelectOption } from "./prompts";
 
 /** Short, user-facing description of what each task does (wizard copy). */
 const TASK_DESCRIPTIONS: Record<DreamTaskName, string> = {
-    verify: "Checks memories against code and fixes/removes stale ones",
+    verify: "Checks changed-file memories against code and fixes/removes stale ones",
+    "verify-broad": "Periodic full re-check of the whole memory pool (catches drift)",
     curate: "Deduplicates, tightens, and prunes the memory pool",
     "classify-memories": "Scores memory importance, scope, and shareability",
     retrospective: "Learns from moments you had to correct or re-explain, and records the lesson",
@@ -37,6 +38,7 @@ const TASK_DESCRIPTIONS: Record<DreamTaskName, string> = {
 /** v1-behavior-preserving default schedules (must match the Zod schema defaults). */
 const DEFAULT_TASK_SCHEDULES: Record<DreamTaskName, string> = {
     verify: "0 3 * * *",
+    "verify-broad": "0 4 * * 0",
     curate: "0 4 * * 0",
     "classify-memories": "0 6 * * *",
     retrospective: "0 5 * * *",

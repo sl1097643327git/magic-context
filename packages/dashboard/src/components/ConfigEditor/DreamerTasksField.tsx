@@ -38,8 +38,13 @@ interface TaskMeta {
 const TASKS: TaskMeta[] = [
   {
     name: "verify",
-    description: "Checks memories against code and fixes/removes stale ones",
+    description: "Checks changed-file memories against code and fixes/removes stale ones",
     defaultSchedule: "0 3 * * *",
+  },
+  {
+    name: "verify-broad",
+    description: "Periodic full re-check of the whole memory pool (catches drift)",
+    defaultSchedule: "0 4 * * 0",
   },
   {
     name: "curate",

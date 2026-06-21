@@ -80,6 +80,11 @@ export function evaluateTaskGate(task: DreamTaskName, ctx: TaskGateContext): boo
             // scheduler only avoids taking the memory lease when there is no pool.
             return countActiveMemories(db, project) > 0;
 
+        case "verify-broad":
+            // Broad re-verifies the WHOLE pool (incl. file-independent memories the
+            // incremental gate skips) — only needs a non-empty pool to run.
+            return countActiveMemories(db, project) > 0;
+
         case "curate":
             // Curate is whole-pool hygiene, but still needs an active pool before
             // taking the shared memory lease.

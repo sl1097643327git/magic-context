@@ -10,6 +10,7 @@
 
 export const CANONICAL_DREAM_TASKS = [
     "verify",
+    "verify-broad",
     "curate",
     "classify-memories",
     "retrospective",
@@ -29,6 +30,7 @@ export type DreamTaskName = (typeof CANONICAL_DREAM_TASKS)[number];
  */
 export const AGENTIC_DREAM_TASKS = [
     "verify",
+    "verify-broad",
     "curate",
     "classify-memories",
     "maintain-docs",
@@ -50,6 +52,7 @@ export function isAgenticTask(task: DreamTaskName): task is AgenticDreamTask {
  */
 export const MEMORY_DOMAIN_TASKS: readonly DreamTaskName[] = [
     "verify",
+    "verify-broad",
     "curate",
     "classify-memories",
     "retrospective",

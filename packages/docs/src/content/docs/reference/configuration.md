@@ -145,7 +145,11 @@ Off-hours maintenance (Dreamer) and on-demand prompt augmentation (Sidekick).
 | `dreamer.tasks.verify.fallback_models` | string \\| string[] | — | Per-task fallback chain (inherits dreamer.fallback_models) |
 | `dreamer.tasks.verify.thinking_level` | `"off"` \\| `"minimal"` \\| `"low"` \\| `"medium"` \\| `"high"` \\| `"xhigh"` | — | Pi only: per-task thinking level |
 | `dreamer.tasks.verify.timeout_minutes` | number (5–) | `20` | Minutes allowed for this task before it is aborted |
-| `dreamer.tasks.verify.broad_interval_days` | number (1–365) | `7` | verify: days between broad full-pool passes (default: 7) |
+| `dreamer.tasks.verify-broad.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |
+| `dreamer.tasks.verify-broad.model` | string | — | Per-task model override (inherits dreamer.model) |
+| `dreamer.tasks.verify-broad.fallback_models` | string \\| string[] | — | Per-task fallback chain (inherits dreamer.fallback_models) |
+| `dreamer.tasks.verify-broad.thinking_level` | `"off"` \\| `"minimal"` \\| `"low"` \\| `"medium"` \\| `"high"` \\| `"xhigh"` | — | Pi only: per-task thinking level |
+| `dreamer.tasks.verify-broad.timeout_minutes` | number (5–) | `20` | Minutes allowed for this task before it is aborted |
 | `dreamer.tasks.curate.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |
 | `dreamer.tasks.curate.model` | string | — | Per-task model override (inherits dreamer.model) |
 | `dreamer.tasks.curate.fallback_models` | string \\| string[] | — | Per-task fallback chain (inherits dreamer.fallback_models) |

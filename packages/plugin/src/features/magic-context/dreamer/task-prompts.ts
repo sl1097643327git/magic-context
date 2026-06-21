@@ -465,9 +465,12 @@ export function buildDreamTaskPrompt(
 ): string {
     switch (task) {
         case "verify":
+        case "verify-broad":
             return buildVerifyPrompt({
                 projectPath: args.projectPath,
                 memories: args.verify?.memories ?? [],
+                // verify-broad always partitions the full pool (mode "broad"); the
+                // gate sets the mode, so this just passes it through.
                 mode: args.verify?.mode ?? "full",
             });
         case "curate":
