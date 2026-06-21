@@ -743,3 +743,52 @@ context (`holderId`/`leaseKey`) into the child session's `ctx_memory` tool calls
 so each memory mutation re-verifies the lease at its own write site — a
 tool-surface change that applies equally to shipped v1 and is out of scope for
 this cutover. Tracked as Dreamer-v2 post-ship hardening.
+
+### A48. Dreamer V2 audit (v0.27.0) — accepted/deferred non-gating findings
+
+The three blind councils for v0.27.0 Dreamer V2 returned a SHIP-conditional read
+once the gating set was fixed (B#1 watermark loss, A#1/A#2 migration gap, B#2
+full-source overlap, B#4 gate parser, C#1/C#2 shareable invalidation, B#3 orphan
+sweep — all fixed in this release). The remaining items are accepted as-is or
+deferred:
+
+**Two SOLO Council-A P1 watermark claims — DISMISSED (verified at source, not
+corroborated by the other 8 members):**
+- "sentinel `files=[]` / new-memory writes advance the verify watermark past
+  degraded verification state." False: `verify` intentionally SKIPS sentinel
+  (file-independent) memories — they are re-verified by `verify-broad`, which
+  runs the full pool. A newly-written memory has no `memory_verifications` row,
+  so it is always in-scope on the next run (`!verification → inScope`). Nothing
+  is silently marked verified.
+- "git-diff computed against the worktree, not the captured `startHead`, lets a
+  masked committed change advance the watermark unverified." False: `git diff
+  <rev>` is ALWAYS against the working tree by definition, so any worktree
+  difference re-surfaces the file on the next run. At worst redundant, never
+  lost.
+
+**Deferred (non-gating, post-ship):**
+- **B#3 residual** — the orphan sweep is OpenCode-only and periodic (next dream
+  tick), so a retrospective child orphaned by a hard crash persists until the
+  next sweep cycle, not instantly. Acceptable: the sweep is age-gated and the
+  window is bounded; Pi children die with their subprocess.
+- **B#6** — the overlap reader is a fixed `readUserMessagesBefore(count)` per
+  session, not paged until N user rows accumulate. The bounded count is the
+  intended cap; the idempotence key prevents re-extraction regardless.
+- **B#7** — observation candidates are not deduped at insert (the source-window
+  key already prevents the same friction window from being deepened twice).
+- **B#8** — a malformed-vs-empty deepen output is treated the same (no learning,
+  watermark still advances). Fail-safe by design.
+- **B#9** — the cheap activity pre-gate keys off `session_projects.updated_at`,
+  which can be stale relative to the content watermark; the executor's precise
+  scan is the real gate and bails before any child session when empty.
+- **C#3** — classify has no empty-pool early-exit / per-ID coverage gate; the
+  task bails cheaply on an empty pool and per-ID errors abort the batch.
+- **C#4** — a classify batch is not wrapped in a single transaction, so a
+  mid-batch error can leave earlier-ID column writes committed. Harmless
+  (column-only, cache-neutral, re-runnable); a future hardening can pre-validate
+  all ids + wrap.
+- **C#5 / nits** — `scope`/`shareable` absent from the startup `ensureColumn`
+  heal-list (the v44 migration adds them; heal-list is belt-and-suspenders);
+  stale dashboard `MemoryCategory` TS union; `RAW_QUOTE_REGEX` misses curly
+  single quotes; dedup key collapses same-ms messages (1-message boundary
+  re-read is covered by idempotence). All cosmetic / self-healing.

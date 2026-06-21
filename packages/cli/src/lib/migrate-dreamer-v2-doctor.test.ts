@@ -16,11 +16,38 @@ describe("migrateDreamerV2ForDoctor", () => {
         expect(migrateDreamerV2ForDoctor(cfg)).toBe(false);
     });
 
-    it("is idempotent when tasks is already a v2 record", () => {
+    it("a v2 record missing verify-broad is touched up (adds it, coupled to verify)", () => {
         const cfg: Record<string, unknown> = {
             dreamer: { tasks: { verify: { schedule: "0 3 * * *" } } },
         };
+        // Not a no-op: it backfills verify-broad rather than leaving the user on
+        // Zod's default-on for a task they never configured.
+        expect(migrateDreamerV2ForDoctor(cfg)).toBe(true);
+        expect(tasksOf(cfg)["verify-broad"].schedule).toBe("0 4 * * 0");
+    });
+
+    it("is a true no-op once verify-broad is present (no broad_interval_days)", () => {
+        const cfg: Record<string, unknown> = {
+            dreamer: {
+                tasks: {
+                    verify: { schedule: "0 3 * * *" },
+                    "verify-broad": { schedule: "0 4 * * 0" },
+                },
+            },
+        };
         expect(migrateDreamerV2ForDoctor(cfg)).toBe(false);
+    });
+
+    it("v2 record with verify DISABLED backfills verify-broad OFF + strips broad_interval_days", () => {
+        const cfg: Record<string, unknown> = {
+            dreamer: {
+                tasks: { verify: { schedule: "", broad_interval_days: 9 } },
+            },
+        };
+        expect(migrateDreamerV2ForDoctor(cfg)).toBe(true);
+        const t = tasksOf(cfg);
+        expect(t["verify-broad"].schedule).toBe("");
+        expect(t.verify.broad_interval_days).toBeUndefined();
     });
 
     it("converts window + tasks array → per-task record (window→cron, omitted disabled)", () => {

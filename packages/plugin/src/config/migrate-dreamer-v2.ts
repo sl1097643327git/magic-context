@@ -97,6 +97,37 @@ function withoutBroadInterval(entry: Record<string, unknown>): Record<string, un
     return rest;
 }
 
+/** Surgical reconcile for an already-v2 tasks-object config (no legacy keys):
+ *  backfill `verify-broad` (coupled to verify's enabled state) and strip the
+ *  dead `broad_interval_days` from every task. Returns rawConfig UNCHANGED when
+ *  nothing needs touching (so an already-reconciled config is a stable no-op /
+ *  idempotent). */
+function reconcileV2TasksObject(
+    rawConfig: Record<string, unknown>,
+    dreamer: Record<string, unknown>,
+    tasksObject: Record<string, unknown>,
+): Record<string, unknown> {
+    const hasVerifyBroad = "verify-broad" in tasksObject;
+    const hasBroadIntervalAnywhere = Object.values(tasksObject).some(
+        (v) => asObject(v) && "broad_interval_days" in (v as Record<string, unknown>),
+    );
+    if (hasVerifyBroad && !hasBroadIntervalAnywhere) return rawConfig;
+
+    const nextTasks: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(tasksObject)) {
+        const obj = asObject(value);
+        nextTasks[key] = obj ? withoutBroadInterval(obj) : value;
+    }
+    if (!hasVerifyBroad) {
+        const verify = asObject(tasksObject.verify);
+        const verifyEnabled = typeof verify?.schedule === "string" && verify.schedule.trim() !== "";
+        nextTasks["verify-broad"] = {
+            schedule: verifyEnabled ? DEFAULT_VERIFY_BROAD_CRON : "",
+        };
+    }
+    return { ...rawConfig, dreamer: { ...dreamer, tasks: nextTasks } };
+}
+
 export function migrateDreamerV2(
     rawConfig: Record<string, unknown>,
     warnings: string[],
@@ -116,7 +147,15 @@ export function migrateDreamerV2(
             "pin_key_files" in dreamer ||
             "task_timeout_minutes" in dreamer ||
             "max_runtime_minutes" in dreamer;
-        if (!hasLegacyOutsideTasks) return rawConfig;
+        if (!hasLegacyOutsideTasks) {
+            // Already a v2 tasks-object, no legacy keys → only a SURGICAL touch-up
+            // is needed (don't reshape an otherwise-valid config): add a
+            // `verify-broad` task coupled to verify's enabled state, and strip the
+            // dead `broad_interval_days` knob. Without this, a user who DISABLED
+            // verify but never wrote verify-broad gets Zod's default `0 4 * * 0`
+            // and unintended weekly full-pool LLM verification.
+            return reconcileV2TasksObject(rawConfig, dreamer, tasksObject);
+        }
     }
 
     // Nothing legacy to migrate (no window/array/blocks) → leave as-is; the

@@ -140,7 +140,7 @@ function hasMemoryScopeColumn(db: Database): boolean {
     return hasColumn;
 }
 
-function hasMemoryShareableColumn(db: Database): boolean {
+export function hasMemoryShareableColumn(db: Database): boolean {
     const cached = memoryShareableColumnCache.get(db);
     if (cached !== undefined) return cached;
     const columns = db.prepare("PRAGMA table_info(memories)").all() as Array<{ name?: string }>;
@@ -795,6 +795,14 @@ export function updateMemoryContent(
 
     db.transaction(() => {
         getUpdateMemoryContentStatement(db).run(content, normalizedHash, Date.now(), id);
+
+        // The `shareable` flag was scored against the OLD content by classify; new
+        // content invalidates that judgement. Fail closed: reset to private so a
+        // now-sensitive edit can't inherit a stale shareable=1. The dreamer's
+        // classify task re-scores it later. Column-guarded for pre-v44 DBs.
+        if (hasMemoryShareableColumn(db)) {
+            db.prepare("UPDATE memories SET shareable = 0 WHERE id = ?").run(id);
+        }
 
         // Invalidate stale embedding — backfill will regenerate with new content.
         // Uses the same prepared statement pool as deleteEmbedding() in storage-memory-embeddings.ts,

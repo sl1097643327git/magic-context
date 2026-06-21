@@ -82,11 +82,13 @@ export class PiRetrospectiveRawProvider implements RetrospectiveRawProvider {
 		capPerSession: number,
 	): Promise<RetrospectiveRawMessage[]> {
 		const all = await this.loadUserEntries(sessionId);
+		// OLDEST-first cap: keep the oldest post-watermark messages so the
+		// watermark walks forward through a backlog without skipping the gap
+		// (mirrors the OpenCode reader; see readRetrospectiveScanWindow).
 		return all
 			.filter((entry) => entry.ts > sinceMs)
-			.sort((a, b) => b.ts - a.ts || b.ordinal - a.ordinal)
-			.slice(0, Math.max(1, Math.floor(capPerSession)))
-			.sort((a, b) => a.ts - b.ts || a.ordinal - b.ordinal);
+			.sort((a, b) => a.ts - b.ts || a.ordinal - b.ordinal)
+			.slice(0, Math.max(1, Math.floor(capPerSession)));
 	}
 
 	async readUserMessagesBefore(

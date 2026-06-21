@@ -382,14 +382,42 @@ function renderGateUserLines(messages: RetrospectiveRawMessage[]): string[] {
  *  against the re-read re-extracting an already-processed window. */
 const RETROSPECTIVE_OVERLAP_USER_LINES = 12;
 
-/** Parse the gate's one-line verdict: "n" → no friction; "y: 3, 7" → flagged
- *  ordinals. Tolerant of surrounding whitespace/prose; anything not starting
- *  with y is a miss. */
-function parseFrictionGateVerdict(verdict: string): { hit: boolean; ordinals: number[] } {
-    const trimmed = verdict.trim().toLowerCase();
-    if (!trimmed.startsWith("y")) return { hit: false, ordinals: [] };
-    const ordinals = (verdict.match(/\d+/g) ?? []).map(Number).filter((n) => Number.isFinite(n));
-    return { hit: ordinals.length > 0, ordinals };
+/** Parse the gate's verdict. Expected shape: a single line `n` (no friction) or
+ *  `y: 3, 7` (flagged ordinals). Robust to a model that wraps it in prose:
+ *  - scan LINE BY LINE for the first verdict-leading line (`y`/`yes`/`n`/`no`);
+ *  - ordinals are taken ONLY from that verdict line (so a stray year/number in
+ *    surrounding prose can't fabricate a deepen);
+ *  - if no verdict-leading line exists, look for an embedded `y: <nums>` pattern;
+ *  - anything unparseable → NO hit (fail safe — the caller still advances the
+ *    watermark on a clean run, so a garbled verdict can't wedge progress).
+ *  A `y` with zero ordinals is NOT a hit (there are no lines to deepen on). */
+export function parseFrictionGateVerdict(verdict: string): { hit: boolean; ordinals: number[] } {
+    const ordinalsFrom = (line: string): number[] => {
+        const afterColon = line.includes(":") ? line.slice(line.indexOf(":") + 1) : line;
+        return (afterColon.match(/\d+/g) ?? [])
+            .map(Number)
+            .filter((n) => Number.isInteger(n) && n > 0);
+    };
+
+    for (const raw of verdict.split(/\r?\n/)) {
+        const line = raw.trim().toLowerCase();
+        if (!line) continue;
+        if (/^n(o)?\b/.test(line)) return { hit: false, ordinals: [] };
+        if (/^y(es)?\b/.test(line)) {
+            const ordinals = ordinalsFrom(line);
+            return { hit: ordinals.length > 0, ordinals };
+        }
+    }
+
+    // No clean verdict line — accept an embedded `y: <nums>` form, else fail safe.
+    const embedded = verdict.toLowerCase().match(/\by(?:es)?\s*:\s*([\d,\s]+)/);
+    if (embedded) {
+        const ordinals = (embedded[1].match(/\d+/g) ?? [])
+            .map(Number)
+            .filter((n) => Number.isInteger(n) && n > 0);
+        return { hit: ordinals.length > 0, ordinals };
+    }
+    return { hit: false, ordinals: [] };
 }
 
 /** Stable source-window key for idempotence: a hash over the flagged user lines'

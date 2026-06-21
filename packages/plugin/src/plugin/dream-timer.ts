@@ -1,6 +1,10 @@
 import type { DreamerConfig } from "../config/schema/magic-context";
 import { openOpenCodeDb } from "../features/magic-context/dreamer/open-opencode-db";
 import {
+    retrospectiveOrphanStaleMs,
+    sweepOrphanedRetrospectiveChildren,
+} from "../features/magic-context/dreamer/retrospective-orphan-sweep";
+import {
     OpenCodeRetrospectiveRawProvider,
     type RetrospectiveRawProvider,
 } from "../features/magic-context/dreamer/retrospective-raw-provider";
@@ -27,6 +31,7 @@ import { drainCommitBacklogForProject } from "../features/magic-context/project-
 import { openDatabase, runSqliteOptimize } from "../features/magic-context/storage";
 import { log } from "../shared/logger";
 import type { Database } from "../shared/sqlite";
+import { closeQuietly } from "../shared/sqlite-helpers";
 import type { PluginContext } from "./types";
 
 /** Check interval for dream schedule (15 minutes). */
@@ -262,6 +267,29 @@ async function sweepProject(
         });
         if (ran > 0) {
             log(`[dreamer] timer tick (${origin}) ${reg.projectIdentity} — ran ${ran} task(s)`);
+        }
+
+        // PRIVACY backstop: remove crash-orphaned retrospective children (raw
+        // user text on disk) older than any legitimate run. OpenCode-only (Pi
+        // subprocess children die with their process); skip when no opencode.db.
+        const retroTimeout = runtimeConfigs.find((c) => c.task === "retrospective")?.timeoutMinutes;
+        const ocDb = openOpenCodeDb();
+        if (ocDb) {
+            try {
+                await sweepOrphanedRetrospectiveChildren({
+                    opencodeDb: ocDb,
+                    client: reg.client,
+                    sessionDirectory: reg.directory,
+                    staleMs: retrospectiveOrphanStaleMs(retroTimeout),
+                });
+            } catch (sweepError) {
+                log(
+                    `[dreamer] retrospective orphan sweep failed for ${reg.projectIdentity}:`,
+                    sweepError,
+                );
+            } finally {
+                closeQuietly(ocDb);
+            }
         }
     } catch (error) {
         log(`[dreamer] timer-triggered task scheduling failed for ${reg.projectIdentity}:`, error);

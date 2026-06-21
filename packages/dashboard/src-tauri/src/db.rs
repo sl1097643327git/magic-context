@@ -2894,6 +2894,16 @@ pub fn update_memory_content(
         "UPDATE memories SET content = ?1, normalized_hash = ?2, updated_at = ?3 WHERE id = ?4",
         params![new_content, new_hash, now_millis(), memory_id],
     )?;
+    // The classify `shareable` verdict was scored against the OLD content; a
+    // dashboard content edit invalidates it. Fail closed → private; the dreamer
+    // re-scores later. Mirrors the plugin's updateMemoryContent. Column-guarded
+    // for pre-v44 DBs.
+    if memories_has_classify_columns(&tx) {
+        tx.execute(
+            "UPDATE memories SET shareable = 0 WHERE id = ?1",
+            params![memory_id],
+        )?;
+    }
     tx.execute(
         "DELETE FROM memory_embeddings WHERE memory_id = ?1",
         params![memory_id],

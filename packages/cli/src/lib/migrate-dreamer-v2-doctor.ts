@@ -74,6 +74,30 @@ function withoutBroadInterval(entry: Record<string, unknown>): Record<string, un
     return rest;
 }
 
+/** In-place surgical reconcile of an already-v2 tasks-object (no legacy keys):
+ *  add `verify-broad` coupled to verify's enabled state + strip
+ *  `broad_interval_days`. Returns true iff it mutated `dreamer.tasks`. */
+function reconcileV2TasksObjectForDoctor(tasksObject: Record<string, unknown>): boolean {
+    const hasVerifyBroad = "verify-broad" in tasksObject;
+    const hasBroadIntervalAnywhere = Object.values(tasksObject).some(
+        (v) => asObject(v) && "broad_interval_days" in (v as Record<string, unknown>),
+    );
+    if (hasVerifyBroad && !hasBroadIntervalAnywhere) return false;
+
+    for (const value of Object.values(tasksObject)) {
+        const obj = asObject(value);
+        if (obj && "broad_interval_days" in obj) delete obj.broad_interval_days;
+    }
+    if (!hasVerifyBroad) {
+        const verify = asObject(tasksObject.verify);
+        const verifyEnabled = typeof verify?.schedule === "string" && verify.schedule.trim() !== "";
+        tasksObject["verify-broad"] = {
+            schedule: verifyEnabled ? DEFAULT_VERIFY_BROAD_CRON : "",
+        };
+    }
+    return true;
+}
+
 export function migrateDreamerV2ForDoctor(mcConfig: Record<string, unknown>): boolean {
     const dreamer = asObject(mcConfig.dreamer);
     if (!dreamer) return false;
@@ -90,7 +114,13 @@ export function migrateDreamerV2ForDoctor(mcConfig: Record<string, unknown>): bo
             "pin_key_files" in dreamer ||
             "task_timeout_minutes" in dreamer ||
             "max_runtime_minutes" in dreamer;
-        if (!hasLegacyOutsideTasks) return false;
+        if (!hasLegacyOutsideTasks) {
+            // Already a v2 tasks-object, no legacy keys → only a SURGICAL on-disk
+            // touch-up: add `verify-broad` (coupled to verify's enabled state) and
+            // strip the dead `broad_interval_days`. Mirrors migrateDreamerV2's
+            // reconcileV2TasksObject. Returns true iff it changed the file.
+            return reconcileV2TasksObjectForDoctor(tasksObject);
+        }
     }
 
     const hasLegacy =

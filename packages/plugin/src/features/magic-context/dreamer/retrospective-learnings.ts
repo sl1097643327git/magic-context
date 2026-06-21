@@ -71,47 +71,34 @@ export function parseRetrospectiveLearnings(text: string): ParsedRetrospectiveLe
 // memory must be the third-person LESSON, never the user's own words.)
 export const MAX_SOURCE_WORD_RUN = 7;
 export const MAX_SOURCE_WORD_RUN_RATIO = 0.5;
-// Bound the DP inputs. `longestCommonWordRun` is O(n*m); a learning is short by
-// nature, and we only need the FIRST window of a long source to detect a run, so
-// cap both sides. (A learning > this many words is itself suspicious; we compare
-// against the source's leading window — a transcription echoes a contiguous run,
-// which a leading window still catches for the common case.)
+// The LEARNING is short by nature (a one-line lesson); cap it as defense. The
+// SOURCE is NOT capped — see hasHighSourceOverlap: the n-gram membership check is
+// O(source) time / O(learning) memory, so the whole source is scanned and a
+// verbatim run anywhere in it is caught (no leading-window truncation gap).
 export const MAX_OVERLAP_LEARNING_WORDS = 200;
-export const MAX_OVERLAP_SOURCE_WORDS = 400;
 
-function toWords(text: string, cap: number): string[] {
+function toWords(text: string, cap?: number): string[] {
     const words = text
         .toLowerCase()
         .replace(/[^\p{L}\p{N}\s]/gu, " ")
         .split(/\s+/)
         .filter((word) => word.length > 0);
-    return words.length > cap ? words.slice(0, cap) : words;
-}
-
-/** Longest run of CONSECUTIVE shared words between two word sequences. */
-function longestCommonWordRun(a: string[], b: string[]): number {
-    if (a.length === 0 || b.length === 0) return 0;
-    let best = 0;
-    let prev = new Array<number>(b.length + 1).fill(0);
-    for (let i = 1; i <= a.length; i++) {
-        const curr = new Array<number>(b.length + 1).fill(0);
-        for (let j = 1; j <= b.length; j++) {
-            if (a[i - 1] === b[j - 1]) {
-                curr[j] = prev[j - 1] + 1;
-                if (curr[j] > best) best = curr[j];
-            }
-        }
-        prev = curr;
-    }
-    return best;
+    return cap !== undefined && words.length > cap ? words.slice(0, cap) : words;
 }
 
 /**
  * True when `content` reads as a near-transcription of any source user line:
- * it shares a long contiguous word run (absolute threshold, or a large fraction
- * of the learning's own length). This is the structural enforcement of "distill,
- * don't transcribe" — the regexes catch quotes/dates/anger, this catches a
- * lightly-reworded user sentence that would otherwise pass.
+ * it shares a contiguous run of ≥ runCap words (an absolute cap of
+ * MAX_SOURCE_WORD_RUN, or half the learning's own length for very short
+ * learnings). This is the structural enforcement of "distill, don't transcribe"
+ * — the regexes catch quotes/dates/anger; this catches a lightly-reworded user
+ * sentence that would otherwise pass.
+ *
+ * Implementation: since runCap ≤ MAX_SOURCE_WORD_RUN (small), "a shared run ≥
+ * runCap exists" is equivalent to "some runCap-gram of the learning occurs in the
+ * source". We build the learning's runCap-grams once (≤ learning length) and
+ * stream each FULL source past them — O(Σ source words) time, O(learning) memory,
+ * with NO source truncation (a verbatim run at any offset is caught).
  */
 export function hasHighSourceOverlap(content: string, sourceUserTexts: string[]): boolean {
     const learningWords = toWords(content, MAX_OVERLAP_LEARNING_WORDS);
@@ -120,9 +107,21 @@ export function hasHighSourceOverlap(content: string, sourceUserTexts: string[])
         MAX_SOURCE_WORD_RUN,
         Math.max(3, Math.ceil(learningWords.length * MAX_SOURCE_WORD_RUN_RATIO)),
     );
+    if (learningWords.length < runCap) return false;
+
+    // All runCap-length contiguous grams of the learning (joined on \u0000 so
+    // word boundaries are unambiguous).
+    const learningGrams = new Set<string>();
+    for (let i = 0; i + runCap <= learningWords.length; i++) {
+        learningGrams.add(learningWords.slice(i, i + runCap).join("\u0000"));
+    }
+    if (learningGrams.size === 0) return false;
+
     for (const source of sourceUserTexts) {
-        const run = longestCommonWordRun(learningWords, toWords(source, MAX_OVERLAP_SOURCE_WORDS));
-        if (run >= runCap) return true;
+        const words = toWords(source);
+        for (let i = 0; i + runCap <= words.length; i++) {
+            if (learningGrams.has(words.slice(i, i + runCap).join("\u0000"))) return true;
+        }
     }
     return false;
 }

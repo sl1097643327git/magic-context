@@ -238,6 +238,19 @@ export async function readRetrospectiveScanWindow(
                 provider.readUserMessagesSince(session.sessionId, watermarkMs, capPerSession),
             ),
         );
+
+        // A session that returned EXACTLY capPerSession rows is saturated: it may
+        // hold newer (unseen) messages beyond the cap. Since each batch is
+        // oldest-first, everything ≤ its last-kept ts is seen; advancing the
+        // watermark past that ts would skip the unseen tail. Record a safe
+        // frontier (lastKept.ts − 1, so same-ms siblings re-read next run).
+        let saturatedFrontier = Number.POSITIVE_INFINITY;
+        for (const batch of sinceBatches) {
+            const lastKept = batch.length >= capPerSession ? batch[batch.length - 1] : undefined;
+            if (lastKept) {
+                saturatedFrontier = Math.min(saturatedFrontier, lastKept.ts - 1);
+            }
+        }
         const overlapBatches =
             overlapUserCount > 0 && watermarkMs > 0
                 ? await Promise.all(
@@ -251,29 +264,40 @@ export async function readRetrospectiveScanWindow(
                   )
                 : [];
 
-        // maxScannedTs is computed ONLY over the since portion — overlap rows are
-        // ≤ watermark by construction and must never advance the watermark.
+        // Cap the SINCE portion OLDEST-first (so a backlog drains from the front,
+        // one bounded chunk per run). Reading/capping newest-first dropped the
+        // oldest friction while the watermark jumped to the newest → permanent
+        // loss of the gap.
+        const keptSince = sinceBatches
+            .flat()
+            .sort((a, b) => a.ts - b.ts || a.ordinal - b.ordinal)
+            .slice(0, maxMessages);
+
+        // Watermark = the newest KEPT ts. Rows are oldest-first, so everything
+        // ≤ newestKept is in keptSince and the global maxMessages cap only drops
+        // NEWER rows (re-read next run — no loss). The ONE case that needs a
+        // tighter frontier: a per-session-SATURATED batch can hide newer rows
+        // BELOW another session's newest kept ts, so cap the watermark at
+        // saturatedFrontier. Never moves backward.
         let maxScannedTs = watermarkMs;
-        for (const row of sinceBatches.flat()) {
+        for (const row of keptSince) {
             if (row.ts > maxScannedTs) maxScannedTs = row.ts;
         }
+        maxScannedTs = Math.max(watermarkMs, Math.min(maxScannedTs, saturatedFrontier));
 
-        // Merge, dedupe by stable identity (sessionId + ts + role + toolName) so an
-        // overlap row that also appears in the since read isn't double-counted.
+        // Merge kept-since + overlap (context only, bounded by sessions ×
+        // overlapUserCount), dedupe by stable identity, oldest-first. Overlap rows
+        // are ≤ watermark so they never affect maxScannedTs.
         const seen = new Set<string>();
         const merged: RetrospectiveRawMessage[] = [];
-        for (const row of [...sinceBatches.flat(), ...overlapBatches.flat()]) {
+        for (const row of [...keptSince, ...overlapBatches.flat()]) {
             const key = `${row.sessionId}\u0000${row.ts}\u0000${row.role}\u0000${row.toolName ?? ""}`;
             if (seen.has(key)) continue;
             seen.add(key);
             merged.push(row);
         }
         merged.sort((a, b) => a.ts - b.ts || a.ordinal - b.ordinal);
-        const capped = merged
-            .sort((a, b) => b.ts - a.ts || b.ordinal - a.ordinal)
-            .slice(0, maxMessages)
-            .sort((a, b) => a.ts - b.ts || a.ordinal - b.ordinal);
-        return { messages: capped, maxScannedTs };
+        return { messages: merged, maxScannedTs };
     } finally {
         provider.dispose?.();
     }
@@ -286,16 +310,19 @@ function readOpenCodeMessagesSince(
     capPerSession: number,
 ): RetrospectiveRawMessage[] {
     const limit = Math.max(1, Math.floor(capPerSession));
+    // OLDEST-first: the cap must keep the OLDEST post-watermark messages so the
+    // watermark advances forward through a backlog one bounded chunk per run.
+    // Reading newest-first (the old behavior) dropped the oldest friction while
+    // the watermark jumped to the newest → permanent loss of the gap.
     const rows = db
         .prepare<[string, number, number], OpenCodeMessageRow>(
             `SELECT id, data, time_created
                FROM message
               WHERE session_id = ? AND time_created > ?
-              ORDER BY time_created DESC, id DESC
+              ORDER BY time_created ASC, id ASC
               LIMIT ?`,
         )
-        .all(sessionId, sinceMs, limit)
-        .reverse();
+        .all(sessionId, sinceMs, limit);
     return normalizeOpenCodeRows(db, sessionId, rows);
 }
 

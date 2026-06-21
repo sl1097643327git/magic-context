@@ -190,9 +190,30 @@ export function sanitizeDiagnosticText(value: string): string {
     return redactSecretText(sanitizePathString(value));
 }
 
+// Extra shareability-only signals — patterns that mark text as unsafe to share
+// with teammates but that the diagnostic sanitizer (tuned for secret/path
+// REDACTION, not share-gating) does not rewrite. Kept here, NOT in
+// sanitizeDiagnosticText, so diagnostic redaction output is unchanged.
+const SHAREABILITY_SENSITIVE_PATTERNS: RegExp[] = [
+    // Windows user home, forward- OR back-slash (sanitizePathString only rewrites
+    // the backslash form).
+    /\bC:\/Users\/[^/\s]+/i,
+    // A `~`-rooted home path (personal/local).
+    /(?:^|\s)~\/[^\s]+/,
+    // Inline `key: value` / `key=value` secrets the keyed redactor misses in free
+    // text (it keys on config OBJECT keys, not prose).
+    /\b(?:api[_-]?key|secret|token|password|passwd|pwd|client[_-]?secret|access[_-]?key)\b\s*[:=]\s*\S+/i,
+    // Local / private endpoints — environment-specific, not a shared truth.
+    /\b(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::\d+)?\b/i,
+    /\b(?:10|127)\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/,
+    /\b192\.168\.\d{1,3}\.\d{1,3}\b/,
+    /\b172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}\b/,
+];
+
 export function hasShareabilitySensitiveText(text: string): boolean {
     try {
-        return sanitizeDiagnosticText(text) !== text;
+        if (sanitizeDiagnosticText(text) !== text) return true;
+        return SHAREABILITY_SENSITIVE_PATTERNS.some((pattern) => pattern.test(text));
     } catch {
         return true;
     }

@@ -1595,5 +1595,31 @@ describe("createCtxMemoryTools", () => {
 
             expect(result).toContain("At least one of 'importance', 'scope', or 'shareable'");
         });
+
+        it("an `update` to content RESETS a prior shareable=1 (fail closed on re-edit)", async () => {
+            const memory = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "PROJECT_RULES",
+                content: "Historian runs as a hidden subagent.",
+            });
+            // Dreamer marks it shareable.
+            await tools.ctx_memory.execute(
+                { action: "classify", ids: [memory.id], shareable: true },
+                toolContext("ses-dreamer", DREAMER_AGENT),
+            );
+            expect(getMemoryById(db, memory.id)).toMatchObject({ shareable: 1 });
+
+            // A later content edit (primary agent) must invalidate the stale flag.
+            const res = await tools.ctx_memory.execute(
+                {
+                    action: "update",
+                    ids: [memory.id],
+                    content: "Historian runs as a hidden subagent at endpoint 192.168.1.9.",
+                },
+                toolContext("ses-primary"),
+            );
+            expect(res).not.toContain("Error");
+            expect(getMemoryById(db, memory.id)).toMatchObject({ shareable: 0 });
+        });
     });
 });

@@ -97,6 +97,16 @@ describe("hasHighSourceOverlap", () => {
             false,
         );
     });
+
+    test("catches a verbatim run buried PAST the old 400-word leading window", () => {
+        // Privacy regression: the old guard truncated each source to its leading
+        // 400 words, so a verbatim run from word 401+ slipped through. Build a
+        // source with 500 filler words then the sensitive run at the tail.
+        const filler = Array.from({ length: 500 }, (_, i) => `filler${i}`).join(" ");
+        const tail = "delete the production database without any backup whatsoever";
+        const source = [`${filler} ${tail}`];
+        expect(hasHighSourceOverlap(`Note: ${tail}.`, source)).toBe(true);
+    });
 });
 
 describe("applyRetrospectiveLearnings", () => {

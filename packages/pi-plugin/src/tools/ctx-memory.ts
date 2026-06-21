@@ -38,6 +38,7 @@ import {
 	getMemoriesByProject,
 	getMemoryByHash,
 	getMemoryById,
+	hasMemoryShareableColumn,
 	insertMemory,
 	type Memory,
 	type MemoryCategory,
@@ -259,6 +260,11 @@ function updateMemoryContentInCurrentTransaction(
 	db.prepare(
 		"UPDATE memories SET content = ?, normalized_hash = ?, updated_at = ? WHERE id = ?",
 	).run(content, normalizedHash, Date.now(), memory.id);
+	// The classify `shareable` verdict was scored against the OLD content; new
+	// content invalidates it. Fail closed → private; the dreamer re-scores later.
+	if (hasMemoryShareableColumn(db)) {
+		db.prepare("UPDATE memories SET shareable = 0 WHERE id = ?").run(memory.id);
+	}
 	db.prepare("DELETE FROM memory_embeddings WHERE memory_id = ?").run(
 		memory.id,
 	);

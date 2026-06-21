@@ -16,6 +16,57 @@ import {
     isRetrospectiveWindowProcessed,
     recordRetrospectiveWindowProcessed,
 } from "./storage-task-schedule";
+import { parseFrictionGateVerdict } from "./task-executor";
+
+describe("parseFrictionGateVerdict", () => {
+    test("clean verdicts: n / y:ords", () => {
+        expect(parseFrictionGateVerdict("n")).toEqual({ hit: false, ordinals: [] });
+        expect(parseFrictionGateVerdict("y: 3, 7")).toEqual({ hit: true, ordinals: [3, 7] });
+        expect(parseFrictionGateVerdict("Y: 5")).toEqual({ hit: true, ordinals: [5] });
+        expect(parseFrictionGateVerdict("no")).toEqual({ hit: false, ordinals: [] });
+        expect(parseFrictionGateVerdict("yes: 1")).toEqual({ hit: true, ordinals: [1] });
+    });
+
+    test("prose-wrapped hit on its own line is still caught", () => {
+        const v = "Looking at the lines, the user corrected the agent twice.\ny: 4, 9";
+        expect(parseFrictionGateVerdict(v)).toEqual({ hit: true, ordinals: [4, 9] });
+    });
+
+    test("a stray number in prose BEFORE the verdict line does not fabricate ordinals", () => {
+        // '2024' must not leak into the ordinals; the verdict line is 'n'.
+        const v = "I reviewed all 2024 messages.\nn";
+        expect(parseFrictionGateVerdict(v)).toEqual({ hit: false, ordinals: [] });
+    });
+
+    test("ordinals come ONLY from the verdict line, not surrounding prose", () => {
+        const v = "Context from 2019 and 2020.\ny: 6\nirrelevant 9999 trailing";
+        expect(parseFrictionGateVerdict(v)).toEqual({ hit: true, ordinals: [6] });
+    });
+
+    test("'y' with no ordinals is NOT a hit (nothing to deepen on)", () => {
+        expect(parseFrictionGateVerdict("y")).toEqual({ hit: false, ordinals: [] });
+        expect(parseFrictionGateVerdict("yes, some friction")).toEqual({
+            hit: false,
+            ordinals: [],
+        });
+    });
+
+    test("embedded y:<nums> with no clean verdict line is accepted", () => {
+        expect(parseFrictionGateVerdict("verdict y: 2, 3 done")).toEqual({
+            hit: true,
+            ordinals: [2, 3],
+        });
+    });
+
+    test("garbage fails safe (no hit)", () => {
+        expect(parseFrictionGateVerdict("")).toEqual({ hit: false, ordinals: [] });
+        expect(parseFrictionGateVerdict("maybe?")).toEqual({ hit: false, ordinals: [] });
+        expect(parseFrictionGateVerdict("the answer is unclear")).toEqual({
+            hit: false,
+            ordinals: [],
+        });
+    });
+});
 
 let db: Database | null = null;
 afterEach(() => {
@@ -43,8 +94,16 @@ class ScriptedProvider implements RetrospectiveRawProvider {
     listProjectSessions(): RetrospectiveProjectSession[] {
         return this.sessions.map((sessionId) => ({ sessionId }));
     }
-    readUserMessagesSince(sessionId: string, sinceMs: number): RetrospectiveRawMessage[] {
-        return (this.rowsBySession.get(sessionId) ?? []).filter((r) => r.ts > sinceMs);
+    readUserMessagesSince(
+        sessionId: string,
+        sinceMs: number,
+        capPerSession: number,
+    ): RetrospectiveRawMessage[] {
+        // Mirror the real readers: oldest-first, capped per session.
+        return (this.rowsBySession.get(sessionId) ?? [])
+            .filter((r) => r.ts > sinceMs)
+            .sort((a, b) => a.ts - b.ts)
+            .slice(0, Math.max(1, Math.floor(capPerSession)));
     }
     readUserMessagesBefore(
         sessionId: string,
@@ -87,6 +146,60 @@ describe("readRetrospectiveScanWindow", () => {
         const win = await readRetrospectiveScanWindow(provider, "proj", 0, 12);
         expect(win.messages.map((m) => m.text).sort()).toEqual(["a", "b"]);
         expect(win.maxScannedTs).toBe(200);
+    });
+
+    test("backlog: keeps the OLDEST since-rows and never advances the watermark past a dropped row (global cap)", async () => {
+        // 6 new post-watermark rows, global cap 3. Must keep the oldest 3 and
+        // stop the watermark BELOW the first dropped row, so the dropped newer
+        // rows are re-read next run (no permanent loss).
+        const rows = new Map([
+            [
+                "s1",
+                [
+                    u("s1", 110, "a1"),
+                    u("s1", 120, "a2"),
+                    u("s1", 130, "a3"),
+                    u("s1", 140, "a4"),
+                    u("s1", 150, "a5"),
+                    u("s1", 160, "a6"),
+                ],
+            ],
+        ]);
+        const provider = new ScriptedProvider(["s1"], rows);
+
+        const win = await readRetrospectiveScanWindow(provider, "proj", 100, 0, {
+            maxMessagesPerRun: 3,
+            capPerSession: 100,
+        });
+        expect(win.messages.map((m) => m.text)).toEqual(["a1", "a2", "a3"]);
+        // watermark = newest KEPT ts (a3 @ 130). The dropped rows a4..a6 are all
+        // NEWER, so they're re-read next run — nothing lost.
+        expect(win.maxScannedTs).toBe(130);
+
+        // Next run from the advanced watermark re-reads a4..a6 (nothing lost).
+        const win2 = await readRetrospectiveScanWindow(provider, "proj", win.maxScannedTs, 0, {
+            maxMessagesPerRun: 3,
+            capPerSession: 100,
+        });
+        expect(win2.messages.map((m) => m.text)).toEqual(["a4", "a5", "a6"]);
+        expect(win2.maxScannedTs).toBe(160);
+    });
+
+    test("backlog: a per-session-saturated batch caps the watermark at its frontier", async () => {
+        // capPerSession 2: the session returns its OLDEST 2 but holds newer
+        // unseen rows. The watermark must not pass the last-kept ts.
+        const rows = new Map([
+            ["s1", [u("s1", 110, "a1"), u("s1", 120, "a2"), u("s1", 130, "a3")]],
+        ]);
+        const provider = new ScriptedProvider(["s1"], rows);
+
+        const win = await readRetrospectiveScanWindow(provider, "proj", 100, 0, {
+            maxMessagesPerRun: 100,
+            capPerSession: 2,
+        });
+        expect(win.messages.map((m) => m.text)).toEqual(["a1", "a2"]);
+        // saturated (got exactly 2) → frontier = lastKept(120) − 1 = 119.
+        expect(win.maxScannedTs).toBe(119);
     });
 
     test("dedupes a row that appears in both since and overlap reads", async () => {

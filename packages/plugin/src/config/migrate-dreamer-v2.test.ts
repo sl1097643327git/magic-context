@@ -27,10 +27,13 @@ describe("migrateDreamerV2", () => {
         expect(out).toEqual({ enabled: true });
     });
 
-    it("is a no-op (idempotent) when tasks is already a v2 record", () => {
+    it("a v2 record MISSING verify-broad gets it backfilled (coupled to verify)", () => {
+        // A v2 tasks-object predating the verify-broad split must gain the task
+        // rather than silently inheriting Zod's default-on — otherwise a user who
+        // disabled verify would get unintended weekly broad verification.
         const v2 = { dreamer: { tasks: { verify: { schedule: "0 3 * * *" } } } };
         const { out, warnings } = migrate(structuredClone(v2));
-        expect(out).toEqual(v2);
+        expect(tasks(out)["verify-broad"].schedule).toBe("0 4 * * 0");
         expect(warnings).toHaveLength(0);
     });
 
@@ -202,6 +205,53 @@ describe("migrateDreamerV2", () => {
         expect(t.retrospective.schedule).toBe("0 5 * * *");
         expect(t["maintain-docs"].schedule).toBe("0 4 * * *");
         expect(t.improve).toBeUndefined();
+    });
+
+    it("v2-object with verify DISABLED backfills verify-broad OFF (not Zod's default-on)", () => {
+        const { out } = migrate({
+            dreamer: {
+                tasks: {
+                    verify: { schedule: "" },
+                    curate: { schedule: "0 4 * * 0" },
+                },
+            },
+        });
+        const t = tasks(out);
+        expect(t.verify.schedule).toBe("");
+        // verify off → verify-broad must be off, NOT the schema default 0 4 * * 0.
+        expect(t["verify-broad"].schedule).toBe("");
+    });
+
+    it("v2-object with verify ENABLED backfills verify-broad ON weekly", () => {
+        const { out } = migrate({
+            dreamer: { tasks: { verify: { schedule: "0 3 * * *" } } },
+        });
+        expect(tasks(out)["verify-broad"].schedule).toBe("0 4 * * 0");
+    });
+
+    it("v2-object strips a stale broad_interval_days from verify", () => {
+        const { out } = migrate({
+            dreamer: {
+                tasks: { verify: { schedule: "0 3 * * *", broad_interval_days: 9 } },
+            },
+        });
+        const t = tasks(out);
+        expect(t.verify.broad_interval_days).toBeUndefined();
+        expect(t["verify-broad"].schedule).toBe("0 4 * * 0");
+    });
+
+    it("v2-object already reconciled is a stable no-op (idempotent)", () => {
+        const input = {
+            dreamer: {
+                tasks: {
+                    verify: { schedule: "0 3 * * *" },
+                    "verify-broad": { schedule: "0 4 * * 0" },
+                },
+            },
+        };
+        const { out } = migrate(input);
+        // Unchanged → returns the SAME object reference (no churn on every load).
+        expect(out).toBe(input);
     });
 
     it("maps object-shaped maintain-memory to verify + curate, broad_interval_days dropped", () => {
