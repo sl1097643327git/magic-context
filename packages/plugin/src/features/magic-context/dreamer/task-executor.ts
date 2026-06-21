@@ -24,7 +24,6 @@ import { recordChildInvocation } from "../subagent-token-capture";
 import { reviewUserMemories } from "../user-memory/review-user-memories";
 import { getActiveUserMemories } from "../user-memory/storage-user-memory";
 import { evaluateSmartNotes } from "./evaluate-smart-notes";
-import type { FrictionSignal } from "./friction-signals";
 import { renewLease } from "./lease";
 import {
     enforceMaintainDocsProtectedRegions,
@@ -404,24 +403,20 @@ function computeRetrospectiveWindowKey(flagged: RetrospectiveRawMessage[]): stri
     return createHash("sha256").update(anchors).digest("hex").slice(0, 32);
 }
 
+/** Render the deepen zoom window: the gate-flagged user lines plus ±radius
+ *  surrounding context (other user lines + tool metadata), with the flagged
+ *  lines marked. Privacy: only user TEXT carries content; tool rows are
+ *  metadata-only (the provider already strips assistant prose + tool output). */
 function renderFrictionWindow(
     messages: RetrospectiveRawMessage[],
-    signals: FrictionSignal[],
+    flaggedOrdinals: number[],
     radius = 2,
 ): string {
-    const anchors = new Set(signals.flatMap((signal) => signal.ordinals));
+    const flagged = new Set(flaggedOrdinals);
     const included = new Set<number>();
-    for (const anchor of anchors) {
+    for (const anchor of flaggedOrdinals) {
         for (let ordinal = anchor - radius; ordinal <= anchor + radius; ordinal += 1) {
             included.add(ordinal);
-        }
-    }
-    const signalByOrdinal = new Map<number, string[]>();
-    for (const signal of signals) {
-        for (const ordinal of signal.ordinals) {
-            const list = signalByOrdinal.get(ordinal) ?? [];
-            list.push(signal.kind);
-            signalByOrdinal.set(ordinal, list);
         }
     }
 
@@ -430,8 +425,7 @@ function renderFrictionWindow(
         .map((message) => {
             const role =
                 message.role === "assistant" ? "A" : message.role === "tool" ? "tool" : "U";
-            const markers = signalByOrdinal.get(message.ordinal);
-            const suffix = markers ? `  [signal: ${markers.join(", ")}]` : "";
+            const suffix = flagged.has(message.ordinal) ? "  [friction]" : "";
             const tool = message.toolName ? ` ${message.toolName}` : "";
             return `${message.ordinal}. (${message.sessionId}) ${role}${tool}: ${message.text}${suffix}`;
         })
@@ -635,15 +629,10 @@ async function runRetrospectiveTask(
         }
 
         // ── Turn 2: deepen — host renders the zoom window, LLM extracts the rule.
-        const signals: FrictionSignal[] = [
-            {
-                kind: "frustration_marker",
-                ordinals: flagged.map((message) => message.ordinal),
-                message: "llm gate flagged user friction",
-                score: 1,
-            },
-        ];
-        const frictionWindow = renderFrictionWindow(messages, signals);
+        const frictionWindow = renderFrictionWindow(
+            messages,
+            flagged.map((message) => message.ordinal),
+        );
         const eventSessionIds = new Set(messages.map((message) => message.sessionId));
         const events = retrospectiveEventsForSessions(db, eventSessionIds);
         const deepenRun = await runChildTurn(

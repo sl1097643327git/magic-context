@@ -83,6 +83,7 @@ function createTestDb(): Database {
             retry_count INTEGER NOT NULL DEFAULT 0,
             last_checked_commit TEXT,
             last_broad_run_at INTEGER,
+            retrospective_watermark_ms INTEGER,
             PRIMARY KEY(project_path, task)
         );
 

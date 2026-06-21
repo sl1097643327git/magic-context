@@ -4,7 +4,6 @@ import { cleanUserText } from "../../../hooks/magic-context/read-session-chunk";
 import { hasMeaningfulUserText } from "../../../hooks/magic-context/read-session-formatting";
 import type { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
-import type { RetrospectiveMessage } from "./friction-signals";
 import { openOpenCodeDb } from "./open-opencode-db";
 
 export const RETROSPECTIVE_MAX_MESSAGES_PER_SESSION = 80;
@@ -14,16 +13,21 @@ export const RETROSPECTIVE_MAX_MESSAGES_PER_RUN = 240;
 // history; this bounds the scan/IO regardless of how many sessions exist.
 export const RETROSPECTIVE_MAX_SESSIONS_PER_RUN = 20;
 
+export type RetrospectiveMessageRole = "user" | "assistant" | "tool";
+
 export interface RetrospectiveProjectSession {
     sessionId: string;
     path?: string;
     updatedAt?: number;
 }
 
-export interface RetrospectiveRawMessage extends RetrospectiveMessage {
+export interface RetrospectiveRawMessage {
     sessionId: string;
-    role: "user" | "assistant" | "tool";
+    ordinal: number;
+    role: RetrospectiveMessageRole;
     text: string;
+    toolName?: string;
+    isError?: boolean;
     ts: number;
 }
 

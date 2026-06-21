@@ -3,7 +3,14 @@ import { computeNormalizedHash } from "../memory/normalize-hash";
 import { getMemoryByHash, insertMemory } from "../memory/storage-memory";
 import type { MemoryCategory } from "../memory/types";
 import { insertUserMemoryCandidates } from "../user-memory/storage-user-memory";
-import { FRUSTRATION_MARKER_REGEX } from "./friction-signals";
+
+/**
+ * A durable learning must not preserve session-local anger/friction language
+ * verbatim ("distill, don't transcribe"). This catches the strongest correction
+ * phrases + repeated no/wrong/again/stop runs + punctuation bursts.
+ */
+const FRUSTRATION_MARKER_REGEX =
+    /\b(?:not what i asked|i already (?:said|told you|explained)|you (?:ignored|missed)|that'?s wrong|this is wrong|stop (?:doing|claiming|using)|(?:no|wrong|again|stop)(?:\W+\b(?:no|wrong|again|stop)\b)+)\b|[!?]{3,}/i;
 
 export type RetrospectiveLearningRoute = "memory" | "observation";
 

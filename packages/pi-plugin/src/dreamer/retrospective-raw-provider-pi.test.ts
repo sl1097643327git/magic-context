@@ -83,4 +83,43 @@ describe("PiRetrospectiveRawProvider", () => {
 			},
 		]);
 	});
+
+	it("readUserMessagesBefore returns the newest N typed user lines at/before the cutoff", async () => {
+		const provider = new PiRetrospectiveRawProvider({
+			projectCwd: "/repo/project",
+			listSessions: () => [
+				{
+					id: "s1",
+					cwd: "/repo/project",
+					path: "/sessions/s1.jsonl",
+					modified: 30,
+				},
+			],
+			loadEntriesFromFile: () => [
+				{
+					type: "message",
+					message: { role: "user", timestamp: 100, content: "first" },
+				},
+				{
+					type: "message",
+					message: { role: "user", timestamp: 200, content: "second" },
+				},
+				{
+					type: "message",
+					message: { role: "user", timestamp: 300, content: "third" },
+				},
+				// after the cutoff — excluded
+				{
+					type: "message",
+					message: { role: "user", timestamp: 400, content: "future" },
+				},
+			],
+		});
+
+		await provider.listProjectSessions("identity");
+		// cutoff=300, count=2 → the 2 newest user lines AT/BEFORE 300, oldest→newest.
+		const before = await provider.readUserMessagesBefore("s1", 300, 2);
+		expect(before.map((m) => m.text)).toEqual(["second", "third"]);
+		expect(before.every((m) => m.ts <= 300)).toBe(true);
+	});
 });
