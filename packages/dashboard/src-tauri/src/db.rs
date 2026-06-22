@@ -1888,6 +1888,44 @@ pub fn enumerate_memory_projects(conn: &Connection) -> Result<Vec<ProjectRow>, r
         .collect())
 }
 
+/// Map project identity → a representative real directory, computed from
+/// opencode.db's `session.directory` column — the SAME signal the plugin keys
+/// identity off. This resolves `dir:<hash>` identities (non-git directories
+/// opened directly, e.g. `/Users/x/Work`) to their real path: OpenCode buckets
+/// such sessions under the `global` project (worktree `/`), so the
+/// project.worktree-based `enumerate_projects_filtered` can't surface them and
+/// the dashboard would otherwise show only the opaque `dir:<hash>`. When several
+/// directories map to one identity (git subdir sessions), the shortest path wins
+/// (closest to the repo root).
+fn session_directories_by_identity() -> HashMap<String, String> {
+    let mut map: HashMap<String, String> = HashMap::new();
+    let Some(oc) = resolve_opencode_db_path() else {
+        return map;
+    };
+    let Ok(conn) = open_readonly(&oc) else {
+        return map;
+    };
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT DISTINCT directory FROM session WHERE directory IS NOT NULL AND directory != ''",
+    ) else {
+        return map;
+    };
+    let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) else {
+        return map;
+    };
+    for dir in rows.flatten() {
+        let identity = resolve_project_identity(&dir);
+        map.entry(identity)
+            .and_modify(|existing| {
+                if dir.len() < existing.len() {
+                    *existing = dir.clone();
+                }
+            })
+            .or_insert(dir);
+    }
+    map
+}
+
 fn enumerate_projects_filtered(project_paths_filter: Option<&HashSet<String>>) -> Vec<ProjectRow> {
     #[derive(Default)]
     struct ProjectAccum {
@@ -4312,6 +4350,11 @@ pub fn get_dreamer_projects(conn: &Connection) -> Result<Vec<DreamerProject>, ru
         .map(|row| (row.identity.clone(), row))
         .collect();
 
+    // 2b. Reverse map identity → real directory from session.directory, so
+    // `dir:<hash>` identities (non-git dirs OpenCode buckets under `global`,
+    // invisible to the worktree-based enumeration) resolve to their real path.
+    let dir_by_identity = session_directories_by_identity();
+
     // 3. Global (user) dreamer schedules — the baseline every project inherits.
     let global_schedules =
         crate::jsonc::read_dreamer_task_schedules(&crate::config::resolve_user_config_path());
@@ -4320,17 +4363,28 @@ pub fn get_dreamer_projects(conn: &Connection) -> Result<Vec<DreamerProject>, ru
         .into_iter()
         .map(|(identity, states)| {
             let row = identity_to_row.get(&identity);
+            // Prefer the enumerated worktree; else the session.directory reverse
+            // map (resolves dir:<hash>); keep only if it still exists on disk.
+            let resolved_dir = row
+                .map(|r| r.primary_path.clone())
+                .filter(|p| !p.is_empty())
+                .or_else(|| dir_by_identity.get(&identity).cloned())
+                .filter(|p| std::path::Path::new(p).is_dir());
             let label = match row {
                 Some(r) => r.display_name.clone(),
-                None if identity.starts_with("git:") => {
-                    format!("git:{}…", &identity[4..std::cmp::min(identity.len(), 14)])
-                }
-                None => identity.clone(),
+                // No enumerated row: name from the resolved directory's basename
+                // (e.g. dir:c1a3… → "Work") so the user sees a real name, not a
+                // hash. Fall back to a shortened identity only when unresolvable.
+                None => match &resolved_dir {
+                    Some(dir) => basename(dir),
+                    None if identity.starts_with("git:") => {
+                        format!("git:{}…", &identity[4..std::cmp::min(identity.len(), 14)])
+                    }
+                    None => identity.clone(),
+                },
             };
             // A worktree is usable for config read/write only if it still exists.
-            let worktree = row
-                .map(|r| r.primary_path.clone())
-                .filter(|p| !p.is_empty() && std::path::Path::new(p).is_dir());
+            let worktree = resolved_dir.clone();
             let (config_path, has_project_config, project_schedules) = match &worktree {
                 Some(wt) => {
                     let path = crate::config::resolve_project_config_path(wt);

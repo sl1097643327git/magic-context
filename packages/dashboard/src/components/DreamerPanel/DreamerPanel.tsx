@@ -360,7 +360,9 @@ export default function DreamerPanel() {
                     >
                       {project.has_project_config ? "per-project" : "inherited"}
                     </span>
-                    <span class="mono dreamer-project-identity">{project.identity}</span>
+                    <span class="mono dreamer-project-identity" title={project.identity}>
+                      {project.worktree ?? project.identity}
+                    </span>
                   </div>
 
                   <Show when={isCardExpanded(project.identity)}>
