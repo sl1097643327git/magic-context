@@ -403,7 +403,11 @@ export function parseFrictionGateVerdict(verdict: string): { hit: boolean; ordin
         const line = raw.trim().toLowerCase();
         if (!line) continue;
         if (/^n(o)?\b/.test(line)) return { hit: false, ordinals: [] };
-        if (/^y(es)?\b/.test(line)) {
+        // A POSITIVE verdict requires the `y:`/`yes:` colon form. A `y`-leading
+        // line WITHOUT a colon is prose ("yes, the user was upset about 3…") —
+        // keep scanning so its stray digits aren't harvested as ordinals and a
+        // later well-formed `y: 3` isn't swallowed.
+        if (/^y(es)?\s*:/.test(line)) {
             const ordinals = ordinalsFrom(line);
             return { hit: ordinals.length > 0, ordinals };
         }

@@ -31,6 +31,16 @@ export interface RetrospectiveRawMessage {
     ts: number;
 }
 
+/** A per-session since-read. `truncated` is the EXACT saturation signal (the
+ *  underlying read hit `capPerSession` with more rows available) — never inferred
+ *  from `messages.length`, because normalization both drops rows (assistant/empty)
+ *  and adds rows (one assistant message → many tool rows), so a length-based guess
+ *  can false-NEGATIVE and lose data. */
+export interface RetrospectiveSinceRead {
+    messages: RetrospectiveRawMessage[];
+    truncated: boolean;
+}
+
 export interface RetrospectiveRawProvider {
     listProjectSessions(
         projectIdentity: string,
@@ -39,7 +49,7 @@ export interface RetrospectiveRawProvider {
         sessionId: string,
         sinceMs: number,
         capPerSession: number,
-    ): RetrospectiveRawMessage[] | Promise<RetrospectiveRawMessage[]>;
+    ): RetrospectiveSinceRead | Promise<RetrospectiveSinceRead>;
     /** The ~`count` most recent typed USER messages at or before `beforeMs` — the
      *  run-boundary overlap so friction spanning two runs isn't missed. */
     readUserMessagesBefore(
@@ -126,13 +136,13 @@ export class OpenCodeRetrospectiveRawProvider implements RetrospectiveRawProvide
         sessionId: string,
         sinceMs: number,
         capPerSession: number,
-    ): RetrospectiveRawMessage[] {
+    ): RetrospectiveSinceRead {
         const db = this.resolveDb();
-        if (!db) return [];
+        if (!db) return { messages: [], truncated: false };
         try {
             return readOpenCodeMessagesSince(db, sessionId, sinceMs, capPerSession);
         } catch {
-            return [];
+            return { messages: [], truncated: false };
         }
     }
 
@@ -157,43 +167,6 @@ export class OpenCodeRetrospectiveRawProvider implements RetrospectiveRawProvide
         }
         this.sharedDb = null;
         this.sharedDbOpened = false;
-    }
-}
-
-export async function readProjectRetrospectiveMessages(
-    provider: RetrospectiveRawProvider,
-    projectIdentity: string,
-    sinceMs: number,
-    options?: {
-        maxMessagesPerRun?: number;
-        capPerSession?: number;
-        maxSessionsPerRun?: number;
-    },
-): Promise<RetrospectiveRawMessage[]> {
-    const maxMessages = options?.maxMessagesPerRun ?? RETROSPECTIVE_MAX_MESSAGES_PER_RUN;
-    const capPerSession = options?.capPerSession ?? RETROSPECTIVE_MAX_MESSAGES_PER_SESSION;
-    const maxSessions = options?.maxSessionsPerRun ?? RETROSPECTIVE_MAX_SESSIONS_PER_RUN;
-    try {
-        // Cap the session count HERE (newest-first) so EVERY provider is bounded,
-        // not just the OpenCode one — a provider that lists every project session
-        // (e.g. Pi's JSONL enumeration) must not fan out unbounded reads.
-        const sessions = (await provider.listProjectSessions(projectIdentity)).slice(
-            0,
-            maxSessions,
-        );
-        const batches = await Promise.all(
-            sessions.map((session) =>
-                provider.readUserMessagesSince(session.sessionId, sinceMs, capPerSession),
-            ),
-        );
-        return batches
-            .flat()
-            .sort((a, b) => b.ts - a.ts || b.ordinal - a.ordinal)
-            .slice(0, maxMessages)
-            .sort((a, b) => a.ts - b.ts || a.ordinal - b.ordinal);
-    } finally {
-        // Release the provider's reused DB handle (OpenCode) after the run's reads.
-        provider.dispose?.();
     }
 }
 
@@ -233,20 +206,22 @@ export async function readRetrospectiveScanWindow(
             0,
             maxSessions,
         );
-        const sinceBatches = await Promise.all(
+        const sinceReads = await Promise.all(
             sessions.map((session) =>
                 provider.readUserMessagesSince(session.sessionId, watermarkMs, capPerSession),
             ),
         );
 
-        // A session that returned EXACTLY capPerSession rows is saturated: it may
-        // hold newer (unseen) messages beyond the cap. Since each batch is
-        // oldest-first, everything ≤ its last-kept ts is seen; advancing the
-        // watermark past that ts would skip the unseen tail. Record a safe
-        // frontier (lastKept.ts − 1, so same-ms siblings re-read next run).
+        // A TRUNCATED session read hit its per-session cap with more rows
+        // available — it may hold newer (unseen) messages beyond what we got.
+        // Each batch is oldest-first, so everything ≤ its last-kept ts is seen;
+        // advancing the watermark past that ts would skip the unseen tail. Record
+        // a safe frontier (lastKept.ts − 1, so same-ms siblings re-read next run).
+        // `truncated` is the EXACT SQL-level signal — never inferred from
+        // messages.length, which normalization distorts in both directions.
         let saturatedFrontier = Number.POSITIVE_INFINITY;
-        for (const batch of sinceBatches) {
-            const lastKept = batch.length >= capPerSession ? batch[batch.length - 1] : undefined;
+        for (const read of sinceReads) {
+            const lastKept = read.truncated ? read.messages[read.messages.length - 1] : undefined;
             if (lastKept) {
                 saturatedFrontier = Math.min(saturatedFrontier, lastKept.ts - 1);
             }
@@ -268,22 +243,30 @@ export async function readRetrospectiveScanWindow(
         // one bounded chunk per run). Reading/capping newest-first dropped the
         // oldest friction while the watermark jumped to the newest → permanent
         // loss of the gap.
-        const keptSince = sinceBatches
-            .flat()
-            .sort((a, b) => a.ts - b.ts || a.ordinal - b.ordinal)
-            .slice(0, maxMessages);
+        const allSince = sinceReads
+            .flatMap((read) => read.messages)
+            .sort((a, b) => a.ts - b.ts || a.ordinal - b.ordinal);
+        const keptSince = allSince.slice(0, maxMessages);
+        const droppedSince = allSince.slice(maxMessages);
 
-        // Watermark = the newest KEPT ts. Rows are oldest-first, so everything
-        // ≤ newestKept is in keptSince and the global maxMessages cap only drops
-        // NEWER rows (re-read next run — no loss). The ONE case that needs a
-        // tighter frontier: a per-session-SATURATED batch can hide newer rows
-        // BELOW another session's newest kept ts, so cap the watermark at
-        // saturatedFrontier. Never moves backward.
+        // Watermark = newest KEPT ts, clamped below any INCOMPLETELY-scanned
+        // ts-group so the exclusive `> watermark` next-run filter can never skip a
+        // same-ms sibling. Two truncation sources can split a ts-group:
+        //   • global maxMessages cap → never advance into the FIRST dropped row's
+        //     ts (droppedSince[0].ts − 1); if it's strictly newer than newestKept
+        //     the min() is a no-op (clean boundary).
+        //   • per-session saturation → saturatedFrontier (computed above).
+        // Take the tightest; never move backward.
         let maxScannedTs = watermarkMs;
         for (const row of keptSince) {
             if (row.ts > maxScannedTs) maxScannedTs = row.ts;
         }
-        maxScannedTs = Math.max(watermarkMs, Math.min(maxScannedTs, saturatedFrontier));
+        let frontier = saturatedFrontier;
+        const firstDropped = droppedSince[0];
+        if (firstDropped) {
+            frontier = Math.min(frontier, firstDropped.ts - 1);
+        }
+        maxScannedTs = Math.max(watermarkMs, Math.min(maxScannedTs, frontier));
 
         // Merge kept-since + overlap (context only, bounded by sessions ×
         // overlapUserCount), dedupe by stable identity, oldest-first. Overlap rows
@@ -308,12 +291,14 @@ function readOpenCodeMessagesSince(
     sessionId: string,
     sinceMs: number,
     capPerSession: number,
-): RetrospectiveRawMessage[] {
+): RetrospectiveSinceRead {
     const limit = Math.max(1, Math.floor(capPerSession));
     // OLDEST-first: the cap must keep the OLDEST post-watermark messages so the
     // watermark advances forward through a backlog one bounded chunk per run.
     // Reading newest-first (the old behavior) dropped the oldest friction while
     // the watermark jumped to the newest → permanent loss of the gap.
+    // Read limit+1 so a FULL limit is distinguishable from "exactly limit rows
+    // exist" — the (limit+1)th row's existence is the exact truncation signal.
     const rows = db
         .prepare<[string, number, number], OpenCodeMessageRow>(
             `SELECT id, data, time_created
@@ -322,8 +307,10 @@ function readOpenCodeMessagesSince(
               ORDER BY time_created ASC, id ASC
               LIMIT ?`,
         )
-        .all(sessionId, sinceMs, limit);
-    return normalizeOpenCodeRows(db, sessionId, rows);
+        .all(sessionId, sinceMs, limit + 1);
+    const truncated = rows.length > limit;
+    const kept = truncated ? rows.slice(0, limit) : rows;
+    return { messages: normalizeOpenCodeRows(db, sessionId, kept), truncated };
 }
 
 /**

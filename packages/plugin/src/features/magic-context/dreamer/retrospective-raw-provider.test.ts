@@ -183,24 +183,50 @@ describe("OpenCodeRetrospectiveRawProvider", () => {
         // is dropped entirely; a tool row carries metadata (name + error flag)
         // with NO raw output text — so no cross-session secret/file content can
         // reach the friction prompt.
-        expect(provider.readUserMessagesSince("s1", 150, 10)).toEqual([
-            {
-                sessionId: "s1",
-                ordinal: 1,
+        expect(provider.readUserMessagesSince("s1", 150, 10)).toEqual({
+            messages: [
+                {
+                    sessionId: "s1",
+                    ordinal: 1,
+                    role: "user",
+                    text: "Please fix the retrospective scanner.",
+                    ts: 200,
+                },
+                {
+                    sessionId: "s1",
+                    ordinal: 3,
+                    role: "tool",
+                    text: "",
+                    toolName: "bash",
+                    isError: true,
+                    ts: 220,
+                },
+            ],
+            truncated: false,
+        });
+    });
+
+    it("sets truncated=true only when the raw read hits its cap", () => {
+        const contextDb = setupContextDb();
+        const opencodeDb = setupOpenCodeDb();
+        for (let i = 0; i < 3; i++) {
+            insertMessage(opencodeDb, {
+                id: `m${i}`,
+                ts: 100 + i,
                 role: "user",
-                text: "Please fix the retrospective scanner.",
-                ts: 200,
-            },
-            {
-                sessionId: "s1",
-                ordinal: 3,
-                role: "tool",
-                text: "",
-                toolName: "bash",
-                isError: true,
-                ts: 220,
-            },
-        ]);
+                parts: [{ type: "text", text: `msg ${i}` }],
+            });
+        }
+        const provider = new OpenCodeRetrospectiveRawProvider({ contextDb, opencodeDb });
+
+        // cap 5 ≥ 3 rows → not truncated.
+        expect(provider.readUserMessagesSince("s1", 0, 5).truncated).toBe(false);
+        // cap 2 < 3 rows → truncated (the SQL saw a 3rd row past the limit).
+        const capped = provider.readUserMessagesSince("s1", 0, 2);
+        expect(capped.truncated).toBe(true);
+        expect(capped.messages).toHaveLength(2);
+        // oldest-first: kept the 2 OLDEST.
+        expect(capped.messages.map((m) => m.text)).toEqual(["msg 0", "msg 1"]);
     });
 
     it("degrades gracefully when opencode.db is absent", () => {
@@ -210,6 +236,9 @@ describe("OpenCodeRetrospectiveRawProvider", () => {
             openOpenCodeDb: () => null,
         });
 
-        expect(provider.readUserMessagesSince("missing", 0, 10)).toEqual([]);
+        expect(provider.readUserMessagesSince("missing", 0, 10)).toEqual({
+            messages: [],
+            truncated: false,
+        });
     });
 });

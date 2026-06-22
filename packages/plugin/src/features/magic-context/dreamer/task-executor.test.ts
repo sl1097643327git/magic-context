@@ -174,15 +174,18 @@ describe("createDreamTaskExecutor — retrospective", () => {
         const project = "/repo/project";
         const provider = {
             listProjectSessions: mock(() => [{ sessionId: "s1" }]),
-            readUserMessagesSince: mock(() => [
-                {
-                    sessionId: "s1",
-                    ordinal: 1,
-                    role: "user" as const,
-                    text: "Please add a focused migration test for the new config key.",
-                    ts: 200,
-                },
-            ]),
+            readUserMessagesSince: mock(() => ({
+                messages: [
+                    {
+                        sessionId: "s1",
+                        ordinal: 1,
+                        role: "user" as const,
+                        text: "Please add a focused migration test for the new config key.",
+                        ts: 200,
+                    },
+                ],
+                truncated: false,
+            })),
             readUserMessagesBefore: mock(() => []),
         };
         let prompts = 0;
@@ -233,29 +236,32 @@ describe("createDreamTaskExecutor — retrospective", () => {
         const project = "/repo/project";
         const provider = {
             listProjectSessions: mock(() => [{ sessionId: "s1" }]),
-            readUserMessagesSince: mock(() => [
-                {
-                    sessionId: "s1",
-                    ordinal: 1,
-                    role: "user" as const,
-                    text: "Please verify provider-executed tools on the wire before saying they work.",
-                    ts: 200,
-                },
-                {
-                    sessionId: "s1",
-                    ordinal: 2,
-                    role: "assistant" as const,
-                    text: "It should work.",
-                    ts: 210,
-                },
-                {
-                    sessionId: "s1",
-                    ordinal: 3,
-                    role: "user" as const,
-                    text: "Please verify provider executed tools on wire before saying they work.",
-                    ts: 220,
-                },
-            ]),
+            readUserMessagesSince: mock(() => ({
+                messages: [
+                    {
+                        sessionId: "s1",
+                        ordinal: 1,
+                        role: "user" as const,
+                        text: "Please verify provider-executed tools on the wire before saying they work.",
+                        ts: 200,
+                    },
+                    {
+                        sessionId: "s1",
+                        ordinal: 2,
+                        role: "assistant" as const,
+                        text: "It should work.",
+                        ts: 210,
+                    },
+                    {
+                        sessionId: "s1",
+                        ordinal: 3,
+                        role: "user" as const,
+                        text: "Please verify provider executed tools on wire before saying they work.",
+                        ts: 220,
+                    },
+                ],
+                truncated: false,
+            })),
         };
         provider.readUserMessagesBefore = mock(() => []);
         // The two turns share one `messages` mock — drive the response off the
@@ -345,22 +351,25 @@ describe("createDreamTaskExecutor — retrospective", () => {
         const project = "/repo/project";
         const provider = {
             listProjectSessions: mock(() => [{ sessionId: "s1" }]),
-            readUserMessagesSince: mock(() => [
-                {
-                    sessionId: "s1",
-                    ordinal: 1,
-                    role: "user" as const,
-                    text: "Please stop assuming CLI commands work without checking the actual output.",
-                    ts: 200,
-                },
-                {
-                    sessionId: "s1",
-                    ordinal: 2,
-                    role: "user" as const,
-                    text: "Please stop assuming CLI commands work without checking actual output.",
-                    ts: 220,
-                },
-            ]),
+            readUserMessagesSince: mock(() => ({
+                messages: [
+                    {
+                        sessionId: "s1",
+                        ordinal: 1,
+                        role: "user" as const,
+                        text: "Please stop assuming CLI commands work without checking the actual output.",
+                        ts: 200,
+                    },
+                    {
+                        sessionId: "s1",
+                        ordinal: 2,
+                        role: "user" as const,
+                        text: "Please stop assuming CLI commands work without checking actual output.",
+                        ts: 220,
+                    },
+                ],
+                truncated: false,
+            })),
             readUserMessagesBefore: mock(() => []),
         };
         let lastSystem = "";

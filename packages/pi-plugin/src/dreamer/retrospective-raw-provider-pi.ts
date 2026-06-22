@@ -4,6 +4,7 @@ import type {
 	RetrospectiveProjectSession,
 	RetrospectiveRawMessage,
 	RetrospectiveRawProvider,
+	RetrospectiveSinceRead,
 } from "@magic-context/core/features/magic-context/dreamer/retrospective-raw-provider";
 
 interface PiSessionInfoLike {
@@ -80,15 +81,22 @@ export class PiRetrospectiveRawProvider implements RetrospectiveRawProvider {
 		sessionId: string,
 		sinceMs: number,
 		capPerSession: number,
-	): Promise<RetrospectiveRawMessage[]> {
+	): Promise<RetrospectiveSinceRead> {
 		const all = await this.loadUserEntries(sessionId);
 		// OLDEST-first cap: keep the oldest post-watermark messages so the
 		// watermark walks forward through a backlog without skipping the gap
 		// (mirrors the OpenCode reader; see readRetrospectiveScanWindow).
-		return all
+		const limit = Math.max(1, Math.floor(capPerSession));
+		const eligible = all
 			.filter((entry) => entry.ts > sinceMs)
-			.sort((a, b) => a.ts - b.ts || a.ordinal - b.ordinal)
-			.slice(0, Math.max(1, Math.floor(capPerSession)));
+			.sort((a, b) => a.ts - b.ts || a.ordinal - b.ordinal);
+		// `truncated` is the exact saturation signal — more eligible rows existed
+		// than the cap kept (Pi loads user-only entries, so length is reliable here,
+		// but we keep the same contract as OpenCode for the aggregator).
+		return {
+			messages: eligible.slice(0, limit),
+			truncated: eligible.length > limit,
+		};
 	}
 
 	async readUserMessagesBefore(

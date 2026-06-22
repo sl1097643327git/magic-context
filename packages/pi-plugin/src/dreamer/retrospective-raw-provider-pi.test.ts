@@ -73,15 +73,18 @@ describe("PiRetrospectiveRawProvider", () => {
 		});
 
 		await provider.listProjectSessions("identity");
-		expect(await provider.readUserMessagesSince("s1", 150, 10)).toEqual([
-			{
-				sessionId: "s1",
-				ordinal: 4,
-				role: "user",
-				text: "new line\nsecond line",
-				ts: 300,
-			},
-		]);
+		expect(await provider.readUserMessagesSince("s1", 150, 10)).toEqual({
+			messages: [
+				{
+					sessionId: "s1",
+					ordinal: 4,
+					role: "user",
+					text: "new line\nsecond line",
+					ts: 300,
+				},
+			],
+			truncated: false,
+		});
 	});
 
 	it("readUserMessagesBefore returns the newest N typed user lines at/before the cutoff", async () => {
