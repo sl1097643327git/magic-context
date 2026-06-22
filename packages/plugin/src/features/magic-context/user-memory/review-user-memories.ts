@@ -17,6 +17,8 @@ import {
     getActiveUserMemories,
     getUserMemoryCandidates,
     insertUserMemory,
+    pruneExpiredUserMemoryCandidates,
+    USER_MEMORY_CANDIDATE_TTL_MS,
     updateUserMemoryContent,
 } from "./storage-user-memory";
 
@@ -46,6 +48,14 @@ interface ReviewResult {
 
 export async function reviewUserMemories(args: ReviewUserMemoriesArgs): Promise<ReviewResult> {
     const result: ReviewResult = { promoted: 0, merged: 0, dismissed: 0, candidatesConsumed: 0 };
+
+    // Decay first: prune one-off candidates older than the TTL that never
+    // accumulated enough corroboration to promote, so the pool can't fill with
+    // stale noise under the threshold. Runs every scheduled review (daily).
+    const prunedExpired = pruneExpiredUserMemoryCandidates(args.db, USER_MEMORY_CANDIDATE_TTL_MS);
+    if (prunedExpired > 0) {
+        log(`[dreamer] user-memories: decayed ${prunedExpired} expired candidate(s)`);
+    }
 
     const candidates = getUserMemoryCandidates(args.db);
     if (candidates.length < args.promotionThreshold) {

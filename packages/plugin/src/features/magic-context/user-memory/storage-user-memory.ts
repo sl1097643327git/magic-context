@@ -1,5 +1,13 @@
 import type { Database } from "../../../shared/sqlite";
 
+/**
+ * Default candidate decay TTL (30 days). review-user-memories runs daily with a
+ * default promotion_threshold of 3, and genuine user traits recur over days-to-
+ * weeks, so 30d leaves ample room for a real pattern to accumulate its variants
+ * while pruning one-off noise that never recurs. Tune if promotion starves.
+ */
+export const USER_MEMORY_CANDIDATE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
 export interface UserMemoryCandidate {
     id: number;
     content: string;
@@ -75,6 +83,28 @@ export function deleteUserMemoryCandidates(db: Database, ids: number[]): void {
     if (ids.length === 0) return;
     const placeholders = ids.map(() => "?").join(",");
     db.prepare(`DELETE FROM user_memory_candidates WHERE id IN (${placeholders})`).run(...ids);
+}
+
+/**
+ * Time-based decay: drop candidate observations older than the TTL that never
+ * accumulated enough corroborating variants to be promoted. Without this, a
+ * one-off observation that never recurs sits in the pool forever (review only
+ * consumes candidates when the pool reaches the promotion threshold, so an
+ * under-threshold trickle of noise accrues indefinitely). The TTL must comfortably
+ * exceed promotion_threshold × the typical recurrence interval of a real trait so
+ * decay prunes only noise, never a slow-but-genuine pattern mid-accumulation.
+ * Returns rows pruned.
+ */
+export function pruneExpiredUserMemoryCandidates(
+    db: Database,
+    ttlMs: number,
+    now: number = Date.now(),
+): number {
+    const cutoff = now - ttlMs;
+    const result = db
+        .prepare("DELETE FROM user_memory_candidates WHERE created_at < ?")
+        .run(cutoff);
+    return Number(result.changes ?? 0);
 }
 
 // ── Stable user memories ────────────────────────────────────────────────
