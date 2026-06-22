@@ -689,11 +689,12 @@ After outputting compartments, facts, events, and user observations, also output
 - Bad candidates (DO NOT emit): one-off task questions, questions about the human user, questions answerable only by today's transient state, bug-specific questions with no durable subsystem value.
 - Emit at most two questions; most chunks should emit zero. Prefer the single strongest candidate when the chunk has one clear durable topic.
 - Keep each question concise, stable, and project-scoped. Do not include dates, session-local wording, or quoted user text.
+- Tag each candidate with the \`start\` ordinal of the ONE compartment above that it came from, using \`at_compartment="N"\` — so the question can later be traced to the exact episode that raised it.
 - The output shape gains an additional section:
 \`\`\`
 <primer_candidates>
-* How does the Dreamer task lease system serialize memory mutations?
-* How does ctx_search combine memory, message, and commit results?
+<primer at_compartment="FIRST">How does the Dreamer task lease system serialize memory mutations?</primer>
+<primer at_compartment="FIRST">How does ctx_search combine memory, message, and commit results?</primer>
 </primer_candidates>
 \`\`\`
 If no candidates, omit the \`<primer_candidates>\` section entirely.
@@ -760,7 +761,7 @@ Output valid XML only in this shape:
 * Observation text
 </user_observations>
 <primer_candidates>
-* How does subsystem X work?
+<primer at_compartment="FIRST">How does subsystem X work?</primer>
 </primer_candidates>
 <meta>
 <messages_processed>FIRST-LAST</messages_processed>

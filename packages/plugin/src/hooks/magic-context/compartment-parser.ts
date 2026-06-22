@@ -37,6 +37,10 @@ export interface ParsedEvent {
 
 export interface ParsedPrimerCandidate {
     question: string;
+    /** The `start` ordinal of the compartment the question was extracted from
+     *  (`<primer at_compartment="N">`). Undefined for the legacy bullet form,
+     *  in which case emission falls back to the chunk span. */
+    originCompartmentStart?: number;
 }
 
 export interface ParsedCompartmentOutput {
@@ -73,6 +77,11 @@ const UNPROCESSED_REGEX = /<unprocessed_from>(\d+)<\/unprocessed_from>/;
 const USER_OBSERVATIONS_REGEX = /<user_observations>(.*?)<\/user_observations>/s;
 const USER_OBS_ITEM_REGEX = /^\s*\*\s*(.+)$/gm;
 const PRIMER_CANDIDATES_REGEX = /<primer_candidates>(.*?)<\/primer_candidates>/s;
+// Preferred form: <primer at_compartment="N">question</primer>, where N is the
+// `start` ordinal of the origin compartment (reuses the ordinal the historian is
+// already emitting on each <compartment start="N">). The legacy bullet form
+// (*/-/1.) is still accepted and falls back to the chunk span at emission.
+const PRIMER_ELEMENT_REGEX = /<primer\s+at_compartment="(\d+)"\s*>(.*?)<\/primer>/gs;
 const PRIMER_ITEM_REGEX = /^\s*(?:\*|-|\d+\.)\s*(.+)$/gm;
 
 // Events: scan the <events>…</events> block (if any) for event elements. Kinds
@@ -202,9 +211,26 @@ export function parseCompartmentOutput(text: string): ParsedCompartmentOutput {
     const primerCandidates: ParsedPrimerCandidate[] = [];
     const primerMatch = text.match(PRIMER_CANDIDATES_REGEX);
     if (primerMatch) {
-        for (const itemMatch of primerMatch[1].matchAll(PRIMER_ITEM_REGEX)) {
-            const question = unescapeXml(itemMatch[1].trim());
-            if (question) primerCandidates.push({ question });
+        const block = primerMatch[1];
+        // Preferred: <primer at_compartment="N">…</primer> with origin ordinal.
+        let sawElement = false;
+        for (const el of block.matchAll(PRIMER_ELEMENT_REGEX)) {
+            sawElement = true;
+            const question = unescapeXml(el[2].trim());
+            if (question) {
+                primerCandidates.push({
+                    question,
+                    originCompartmentStart: Number.parseInt(el[1], 10),
+                });
+            }
+        }
+        // Legacy bullet form (no origin tag) — only if no element form was used,
+        // so an element-form question isn't also captured as a bullet line.
+        if (!sawElement) {
+            for (const itemMatch of block.matchAll(PRIMER_ITEM_REGEX)) {
+                const question = unescapeXml(itemMatch[1].trim());
+                if (question) primerCandidates.push({ question });
+            }
         }
     }
 

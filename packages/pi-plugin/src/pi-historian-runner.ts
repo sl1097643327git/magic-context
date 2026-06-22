@@ -1055,27 +1055,40 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				try {
 					const firstNew = newCompartments[0];
 					const lastNew = newCompartments[newCompartments.length - 1];
+					// Stable occurrence key intentionally excludes question text, so a
+					// source chunk stores at most one candidate occurrence (its
+					// origin-compartment tag is the single tagged origin).
+					const [candidate] = validatedPass.primerCandidates;
+					// Origin-tag (mirrors OpenCode): narrow the source to the SPECIFIC
+					// compartment the question came from, with chunk-span fallback when
+					// untagged or unmatched (non-fatal).
+					const origin =
+						typeof candidate.originCompartmentStart === "number"
+							? newCompartments.find(
+									(c) =>
+										c.startMessage === candidate.originCompartmentStart,
+								)
+							: undefined;
+					const startC = origin ?? firstNew;
+					const endC = origin ?? lastNew;
 					const sourceStartMessageId =
-						firstNew?.startMessageId ||
-						`ordinal:${firstNew?.startMessage ?? chunk.startIndex}`;
+						startC?.startMessageId ||
+						`ordinal:${startC?.startMessage ?? chunk.startIndex}`;
 					const sourceEndMessageId =
-						lastNew?.endMessageId ||
-						`ordinal:${lastNew?.endMessage ?? lastNewEnd}`;
+						endC?.endMessageId ||
+						`ordinal:${endC?.endMessage ?? lastNewEnd}`;
 					const sourceMessage =
 						provider.readMessageById?.(sourceStartMessageId);
 					const sourceMessageTime =
 						parseSourceMessageTime(sourceMessage?.version) ?? Date.now();
-					// Stable occurrence key intentionally excludes question text, so a
-					// source chunk stores at most one candidate occurrence.
-					const [candidate] = validatedPass.primerCandidates;
 					const stored = insertPrimerCandidates(db, [
 						{
 							projectPath,
 							harness: "pi",
 							sessionId,
 							question: candidate.question,
-							sourceCompartmentStart: firstNew?.startMessage,
-							sourceCompartmentEnd: lastNew?.endMessage,
+							sourceCompartmentStart: startC?.startMessage,
+							sourceCompartmentEnd: endC?.endMessage,
 							sourceStartMessageId,
 							sourceEndMessageId,
 							sourceMessageTime,
@@ -1083,7 +1096,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					]);
 					sessionLog(
 						sessionId,
-						`stored ${stored.length} primer candidate occurrence(s)${validatedPass.primerCandidates.length > 1 ? " (stable occurrence key kept the first candidate)" : ""}`,
+						`stored ${stored.length} primer candidate occurrence(s)${origin ? " (origin-tagged)" : " (chunk-span fallback)"}`,
 					);
 				} catch (error) {
 					sessionLog(sessionId, "failed to store primer candidates:", error);
