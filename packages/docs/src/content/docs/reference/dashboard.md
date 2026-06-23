@@ -30,12 +30,12 @@ Changes write to the shared database; **running sessions pick up memory updates 
 
 ## Hist (sessions / history)
 
-Browse OpenCode and Pi sessions: compartments, facts, notes, smart notes, token breakdown, cache events per session, pinned key files, and subagent stats.
+Browse OpenCode and Pi sessions: compartments, facts, notes, smart notes, token breakdown, cache events per session, and subagent stats.
 
 **What you can do.**
 
 - Filter by harness, project, search, and hide subagent sessions.
-- Open a session and switch tabs: messages, **compartments**, facts, notes, historian runs, tokens, key files, cache.
+- Open a session and switch tabs: messages, **compartments**, facts, notes, historian runs, tokens, cache.
 - **Compartment viewer:** message ranges, v2 **tiers** (`p1`–`p4`) with the same fallback chain as runtime rendering, **importance** bands (critical/high/medium/low/minimal), and episode tags.
 - Edit or dismiss **session notes** and manage **smart notes** for that session.
 - Edit or delete **session facts**.

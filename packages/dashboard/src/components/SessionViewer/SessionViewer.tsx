@@ -2153,7 +2153,6 @@ export default function SessionViewer() {
               }}
             </Show>
           </Show>
-
         </div>
       </Show>
     </>

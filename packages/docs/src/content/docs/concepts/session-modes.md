@@ -30,7 +30,7 @@ This mode is for users who want a fully automatic pipeline. You can optionally e
 Subagent sessions (council members, historian, sidekick, dreamer child sessions) get a lightweight pass:
 
 - Tagging and heuristic cleanup run normally
-- No historian, no compartment injection, no prompt-adjunct blocks (`<project-docs>`, `<user-profile>`, `<key-files>`)
+- No historian, no compartment injection, no prompt-adjunct blocks (`<project-docs>`, `<user-profile>`)
 - No deferred-note nudges
 - Heuristic drops run on **every** execute pass (not once-per-turn like primary sessions — subagents are effectively one parent turn)
 - Overflow is handled via the overflow detection path without emergency-recovery state
@@ -46,7 +46,7 @@ Subagents are driven by a parent agent, have bounded lifetimes, and often run in
 | `ctx_reduce` tool | ✓ | | |
 | Historian and compartments | ✓ | ✓ | |
 | `<session-history>` injection | ✓ | ✓ | |
-| `<project-docs>`, `<user-profile>`, `<key-files>` | ✓ | ✓ | |
+| `<project-docs>`, `<user-profile>` | ✓ | ✓ | |
 | Channel 1 nudge (tool-output reminder) | ✓ | | ✓ |
 | Channel 2 ceiling nudge | ✓ | | |
 | Deferred-note nudges | ✓ | | |

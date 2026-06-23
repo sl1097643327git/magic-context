@@ -46,9 +46,8 @@ const CronScheduleSchema = z
     .describe('5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task.');
 
 /** Per-task scheduling + model config. Model/fallback/thinking inherit the
- *  dreamer-level defaults when omitted. Task-specific params (promotion_threshold,
- *  token_budget, min_reads) are optional and only meaningful for their owning
- *  task. */
+ *  dreamer-level defaults when omitted. Task-specific params (promotion_threshold)
+ *  are optional and only meaningful for their owning task. */
 const DreamTaskBaseConfigSchema = z.object({
     schedule: CronScheduleSchema.default(""),
     model: z.string().optional().describe("Per-task model override (inherits dreamer.model)"),

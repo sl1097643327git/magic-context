@@ -24,7 +24,8 @@
  *    LISTED agentic task gets the base cron; each OMITTED canonical task gets ""
  *    (disabled). Built-in defaults are used ONLY when `tasks` is absent.
  *  - user_memories.enabled false → review-user-memories "" ; true → base cron
- *    (promotion_threshold carried). Same for pin_key_files → key-files.
+ *    (promotion_threshold carried). A legacy pin_key_files block is dropped
+ *    (key-files pinning moved out of Magic Context).
  *  - classify-memories is NEW in v2 and defaults ON daily at 06:00, unless the
  *    whole dreamer block is disabled.
  *  - evaluate-smart-notes → base cron (it always ran on pending notes).

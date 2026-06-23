@@ -25,21 +25,23 @@ The dreamer pairs well with local or inexpensive models. Nobody is waiting — i
 
 ## The tasks
 
-The dreamer has nine tasks, each independently scheduled:
+The dreamer has these tasks, each independently scheduled:
 
 | Task | Default | What it does |
 |------|---------|-------------|
-| **verify** | nightly | Incrementally verify memories whose backing files changed since the last run, and fix or remove stale facts. |
-| **verify-broad** | weekly | Re-verify the *entire* active memory pool against code — including file-independent memories the incremental pass skips — to catch drift the change-gated pass can't see. |
+| **map-memories** | nightly | Map each memory to the project files that back it (or mark it file-independent), so verify knows what to re-check. Mostly a one-time backfill, then a cheap trickle for new memories. |
+| **verify** | nightly | Re-verify only the memories whose mapped files changed since *that memory* was last checked, and fix or remove stale facts. |
+| **verify-broad** | weekly | Re-verify the *entire* file-mapped pool against code, ignoring the change gate, to catch drift the incremental pass can't see. |
 | **curate** | weekly | Curate the whole active memory pool: consolidate duplicates, tighten wording, and archive low-value or redundant entries. |
 | **classify-memories** | daily | Score memory importance, scope, and shareability so recall stays focused. |
 | **retrospective** | daily | Learn from moments you had to correct or re-explain, and record the durable lesson. |
 | **maintain-docs** | off | Keep `ARCHITECTURE.md` and `STRUCTURE.md` at the project root synchronized with codebase changes. |
 | **review-user-memories** | nightly | Promote recurring behavioral observations into your `<user-profile>` (privacy-sensitive — see below). |
-| **key-files** | off | Pin frequently-read project files into a `<key-files>` block injected into the conversation. |
+| **promote-primers** | nightly | Promote recurring standing questions the historian noticed into durable primers. |
+| **refresh-primers** | nightly | Re-investigate stale primers against current code and refresh their answers. |
 | **evaluate-smart-notes** | nightly | Check whether any smart-note conditions (`ctx_note` with a surface condition) have come true and surface the ready ones. |
 
-Each task has its own schedule, an optional per-task model override (falling back to the dreamer-level model), and a timeout (default: 20 minutes). `verify`, `verify-broad`, `curate`, `classify-memories`, and `retrospective` share the per-project memory lease; the others run independently. (`verify` and `verify-broad` share one commit watermark, so they never re-do each other's work.)
+Each task has its own schedule, an optional per-task model override (falling back to the dreamer-level model), and a timeout (default: 20 minutes). `map-memories`, `verify`, `verify-broad`, `curate`, `classify-memories`, `retrospective`, and the primer tasks share the per-project memory lease so they never collide; the others run independently. verify gates per-memory on each memory's own last-checked time, so a run that times out banks its progress and the next run continues.
 
 Configure all of this under `dreamer.tasks` in `magic-context.jsonc`, or visually in the dashboard config editor.
 

@@ -2,12 +2,6 @@
 
 All settings are flat top-level keys in `magic-context.jsonc`. The schema is **shared between the OpenCode plugin and the Pi extension** — every setting documented here applies to both unless explicitly marked **Pi only** or **OpenCode only**.
 
-### Key files (`dreamer.pin_key_files`)
-
-`dreamer.pin_key_files.enabled: true` requires AFT to be registered in the active harness. OpenCode checks `~/.config/opencode/opencode.json[c]` for an AFT plugin entry; Pi checks `~/.pi/agent/settings.json` for `@cortexkit/aft-pi` in `packages` or `extensions`. If AFT is missing, key-files generation and injection soft-disable: Magic Context logs a warning, `doctor` reports the missing AFT configuration, and no `<key-files>` block is emitted.
-
-Key files are project-scoped in SQLite. `project_key_files` stores one row per file, with LLM-stitched content and a plugin-computed `content_hash`; `project_key_files_version` stores the per-project version counter used to invalidate per-session prompt caches after Dreamer commits.
-
 ### Configuration locations
 
 **OpenCode** reads (in priority order, project overrides user):
@@ -328,12 +322,15 @@ Each dreamer task is **independently scheduled** with its own cron expression. T
     "model": "github-copilot/gpt-5.4",
     "fallback_models": ["anthropic/claude-sonnet-4-6"],
     "tasks": {
-      "verify": { "schedule": "0 3 * * *", "broad_interval_days": 7 },
+      "map-memories": { "schedule": "0 2 * * *" },
+      "verify": { "schedule": "0 3 * * *" },
+      "verify-broad": { "schedule": "0 4 * * 0" },
       "curate": { "schedule": "0 4 * * 0" },
       "classify-memories": { "schedule": "0 6 * * *" },
       "retrospective": { "schedule": "0 5 * * *" },
       "maintain-docs": { "schedule": "" },
-      "key-files": { "schedule": "", "token_budget": 10000, "min_reads": 4 },
+      "promote-primers": { "schedule": "0 3 * * *", "promotion_threshold": 2 },
+      "refresh-primers": { "schedule": "0 3 * * *" },
       "evaluate-smart-notes": { "schedule": "0 3 * * *" },
       "review-user-memories": { "schedule": "0 3 * * *", "promotion_threshold": 3 }
     }
@@ -364,21 +361,21 @@ To disable the dreamer entirely, set `dreamer.disable: true`. To disable a singl
 | `model` | `string` | inherits `dreamer.model` | Per-task model override. |
 | `fallback_models` | `string` or `string[]` | inherits `dreamer.fallback_models` | Per-task fallback chain. |
 | `timeout_minutes` | `number` | `20` | Minutes allowed before the task is aborted. |
-| `promotion_threshold` | `number` (2–20) | `3` | **review-user-memories only.** Min candidate observations before promotion. |
-| `token_budget` | `number` (2k–30k) | `10000` | **key-files only.** Total token budget for pinned files. |
-| `min_reads` | `number` (2–20) | `4` | **key-files only.** Min full-read count before a file is pinned. |
-| `broad_interval_days` | `number` (1–365) | `7` | **verify only.** Days between broad full-pool passes; incremental runs verify only memories whose backing files changed. |
+| `promotion_threshold` | `number` (2–20) | `3` (review-user-memories) / `2` (promote-primers) | Min recurrences before promotion. **review-user-memories** and **promote-primers** only. |
 
 ### The tasks
 
 | Task | Default schedule | What it does |
 |------|------------------|-------------|
-| `verify` | `0 3 * * *` | Incrementally verify memories against backing files and fix or remove stale facts. |
+| `map-memories` | `0 2 * * *` | Map each memory to its backing files (or mark it file-independent) so verify has a per-memory gate target. Mostly a one-time backfill, then a cheap trickle. |
+| `verify` | `0 3 * * *` | Re-verify only memories whose mapped files changed since *that memory* was last checked, and fix or remove stale facts. |
+| `verify-broad` | `0 4 * * 0` | Re-verify the whole file-mapped pool against code, ignoring the change gate. |
 | `curate` | `0 4 * * 0` | Curate the whole active memory pool: consolidate duplicates, tighten wording, and archive low-value or redundant entries. |
 | `classify-memories` | `0 6 * * *` | Score memory importance, scope, and shareability so recall stays focused. |
 | `retrospective` | `0 5 * * *` | Learn from moments you had to correct or re-explain, and record the durable lesson. |
 | `maintain-docs` | `""` (off) | Keep `ARCHITECTURE.md` and `STRUCTURE.md` at project root synchronized with the codebase. |
-| `key-files` | `""` (off) | Pin frequently-read project files into a `<key-files>` block. Requires AFT (see above). |
+| `promote-primers` | `0 3 * * *` | Promote recurring standing questions the historian noticed into durable primers. |
+| `refresh-primers` | `0 3 * * *` | Re-investigate stale primers against current code and refresh their answers. |
 | `evaluate-smart-notes` | `0 3 * * *` | Surface smart notes whose `ctx_note` conditions have come true. |
 | `review-user-memories` | `0 3 * * *` | Promote recurring behavioral observations into the `<user-profile>` block (privacy-sensitive). |
 
@@ -391,7 +388,7 @@ To disable the dreamer entirely, set `dreamer.disable: true`. To disable a singl
 A process-wide 15-minute timer checks every task's `next_due_at` regardless of user activity, so scheduled tasks trigger even when you aren't chatting:
 
 1. The timer evaluates each task's cron schedule and collects the tasks that are due.
-2. Due tasks pass their activity gate (e.g. memory tasks only run when there are memories to maintain), then run grouped by lease domain. `verify`, `curate`, `classify-memories`, and `retrospective` share the memory lease; docs, key-files, smart notes, and user-memory review use their own domains.
+2. Due tasks pass their activity gate (e.g. memory tasks only run when there are memories to maintain), then run grouped by lease domain. The memory-maintenance tasks (`map-memories`, `verify`, `verify-broad`, `curate`, `classify-memories`, `retrospective`, and the primer tasks) share the memory lease so they never collide; docs, smart notes, and user-memory review use their own domains.
 3. Each task runs in its own ephemeral child session and advances its own `next_due_at`.
 4. `/ctx-dream` runs every enabled task now (honoring gates); `/ctx-dream <task>` force-runs one task immediately, ignoring its gate.
 
@@ -488,10 +485,9 @@ It is useful when starting a new session. It's better to choose a fast and cheap
 
 ## Dreamer Sub-Features
 
-In Dreamer v2 the former `user_memories` and `pin_key_files` sub-feature blocks became first-class scheduled tasks: **`review-user-memories`** and **`key-files`** (see the `dreamer.tasks` table above). The `doctor` command migrates a legacy `dreamer.user_memories` / `dreamer.pin_key_files` config to the equivalent task entries automatically, preserving your enable/disable state and tuning values.
+In Dreamer v2 the former `user_memories` sub-feature block became a first-class scheduled task: **`review-user-memories`** (see the `dreamer.tasks` table above). The `doctor` command migrates a legacy `dreamer.user_memories` config to the equivalent task entry automatically, preserving your enable/disable state and tuning values. (A legacy `dreamer.pin_key_files` block is dropped — key-files pinning has moved out of Magic Context.)
 
 - **`review-user-memories`** (was `user_memories`): set its `schedule` to enable, `""` to disable. Carries `promotion_threshold` (2–20, default 3). When scheduled, the historian extracts behavioral observations and this task promotes recurring patterns to stable user memories injected via `<user-profile>`. Privacy-sensitive — only runs when scheduled.
-- **`key-files`** (was `pin_key_files`): set its `schedule` to enable (default off). Carries `token_budget` (2k–30k, default 10000) and `min_reads` (2–20, default 4). Requires AFT (see the Key files note at the top). Pins frequently-read files into a `<key-files>` block.
 
 ## History & Recall Features
 
@@ -639,12 +635,15 @@ Tier boundaries are hardcoded to keep behavior predictable and prevent cache-bus
     "model": "github-copilot/gpt-5.4",
     "fallback_models": ["anthropic/claude-sonnet-4-6"],
     "tasks": {
-      "verify": { "schedule": "0 3 * * *", "broad_interval_days": 7 },
+      "map-memories": { "schedule": "0 2 * * *" },
+      "verify": { "schedule": "0 3 * * *" },
+      "verify-broad": { "schedule": "0 4 * * 0" },
       "curate": { "schedule": "0 4 * * 0" },
       "classify-memories": { "schedule": "0 6 * * *" },
       "retrospective": { "schedule": "0 5 * * *" },
       "maintain-docs": { "schedule": "" },
-      "key-files": { "schedule": "", "token_budget": 10000, "min_reads": 4 },
+      "promote-primers": { "schedule": "0 3 * * *", "promotion_threshold": 2 },
+      "refresh-primers": { "schedule": "0 3 * * *" },
       "evaluate-smart-notes": { "schedule": "0 3 * * *" },
       "review-user-memories": { "schedule": "0 3 * * *", "promotion_threshold": 3 }
     }

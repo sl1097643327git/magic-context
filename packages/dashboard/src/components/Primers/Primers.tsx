@@ -56,10 +56,7 @@ export default function Primers() {
       </div>
 
       <div class="scroll-area">
-        <Show
-          when={!primers.loading}
-          fallback={<div class="empty-state">Loading primers…</div>}
-        >
+        <Show when={!primers.loading} fallback={<div class="empty-state">Loading primers…</div>}>
           <Show
             when={(primers() ?? []).length > 0}
             fallback={

@@ -17,7 +17,7 @@ Magic Context renders the compacted history into **two synthetic message slots**
 
 **m[0] — the cumulative baseline.** This holds project docs, the baseline user profile, and the decay-rendered compartment history as of the last materialization. It is treated like a frozen prefix: it does **not** change on routine turns, so its prompt-cache bytes persist across requests.
 
-**m[1] — the volatile delta.** This holds everything added since the last m[0] materialization: key files, new user-profile additions, new memories (surfaced via a **watermark** — memories with IDs above the last materialized max), and the newest compartments rendered at full fidelity. When there's nothing new, m[1] renders a minimal placeholder.
+**m[1] — the volatile delta.** This holds everything added since the last m[0] materialization: new user-profile additions, new memories (surfaced via a **watermark** — memories with IDs above the last materialized max), and the newest compartments rendered at full fidelity. When there's nothing new, m[1] renders a minimal placeholder.
 
 The system prompt, m[0], and m[1] form a prefix that stays byte-identical across most turns. Only the conversation tail (the raw messages after the last compartment boundary) changes on every request. The component that assigns `§N§` tags to messages (internally called the **tagger**) runs on every pass but its output is replayed byte-identically, so it doesn't bust the cache either.
 
