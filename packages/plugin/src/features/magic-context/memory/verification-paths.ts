@@ -97,8 +97,7 @@ export async function readGitFileChangeTimesSince(
     // default), keeping the FIRST (= latest) time seen per file.
     const stdout = await runGit(gitRoot, [
         "log",
-        `--since=${sinceSec}`,
-        "--no-merges",
+        `--since=@${sinceSec}`,
         "--name-only",
         "--format=%ct",
     ]);

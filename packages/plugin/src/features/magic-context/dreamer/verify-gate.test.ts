@@ -7,7 +7,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
-import { insertMemory, recordMemoryMapping, recordMemoryVerifications } from "../memory";
+import {
+    insertMemory,
+    readGitFileChangeTimesSince,
+    recordMemoryMapping,
+    recordMemoryVerifications,
+} from "../memory";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
 import { partitionVerifyScope } from "./verify-gate";
@@ -19,10 +24,11 @@ function freshDb(): Database {
     return db;
 }
 
-function git(args: string[], cwd: string): string {
+function git(args: string[], cwd: string, env?: Record<string, string>): string {
     return execFileSync("git", args, {
         cwd,
         encoding: "utf8",
+        env: { ...process.env, ...env },
         stdio: ["ignore", "pipe", "ignore"],
     });
 }
@@ -35,7 +41,10 @@ function makeGitRepo(): string {
     writeFileSync(join(dir, "a.ts"), "export const a = 1;\n");
     writeFileSync(join(dir, "b.ts"), "export const b = 1;\n");
     git(["add", "a.ts", "b.ts"], dir);
-    git(["commit", "-m", "initial"], dir);
+    git(["commit", "-m", "initial"], dir, {
+        GIT_AUTHOR_DATE: "2026-01-01T00:00:00Z",
+        GIT_COMMITTER_DATE: "2026-01-01T00:00:00Z",
+    });
     return dir;
 }
 
@@ -144,6 +153,26 @@ describe("partitionVerifyScope (per-memory verified_at gate)", () => {
         } finally {
             closeQuietly(db);
         }
+    });
+
+    test("reads commit change times using Unix timestamp --since format", async () => {
+        const dir = makeGitRepo();
+        dirs.push(dir);
+        const changeDate = "2026-01-02T00:00:00Z";
+        writeFileSync(join(dir, "a.ts"), "export const a = 3;\n");
+        git(["commit", "-am", "dated change"], dir, {
+            GIT_AUTHOR_DATE: changeDate,
+            GIT_COMMITTER_DATE: changeDate,
+        });
+
+        const beforeChange = Date.parse("2026-01-01T12:00:00Z");
+        const changeTimes = await readGitFileChangeTimesSince(dir, beforeChange);
+
+        expect(changeTimes?.get("a.ts")).toBe(Date.parse(changeDate));
+
+        const afterChange = Date.parse("2026-01-03T00:00:00Z");
+        const laterTimes = await readGitFileChangeTimesSince(dir, afterChange);
+        expect(laterTimes?.has("a.ts")).toBe(false);
     });
 
     test("verify-broad includes every file-mapped memory regardless of change time", async () => {
