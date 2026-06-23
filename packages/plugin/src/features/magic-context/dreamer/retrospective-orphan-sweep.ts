@@ -19,6 +19,11 @@ type OpencodeClient = PluginContext["client"];
  * the age gate is airtight. 404 on delete = already-swept = success.
  */
 export const RETROSPECTIVE_CHILD_TITLE = "magic-context-dream-retrospective";
+export const USER_MEMORIES_CHILD_TITLE = "magic-context-dream-user-memories";
+const PRIVACY_SENSITIVE_CHILD_TITLES = [
+    RETROSPECTIVE_CHILD_TITLE,
+    USER_MEMORIES_CHILD_TITLE,
+] as const;
 
 /** Stale threshold from the task timeout: max(60min, timeout×3) — comfortably
  *  past any enforced run so a live child is never swept. */
@@ -33,9 +38,10 @@ interface OrphanRow {
 }
 
 /**
- * Delete crash-orphaned retrospective children for THIS project directory older
- * than `staleMs`. Best-effort + fail-open: any DB/schema/API error is logged and
- * skipped (never throws into the caller's sweep). Returns the count deleted.
+ * Delete crash-orphaned privacy-sensitive dreamer children for THIS project
+ * directory when they are older than `staleMs`. Best-effort + fail-open: any
+ * DB/schema/API error is logged and skipped (never throws into the caller's
+ * sweep). Returns the count deleted.
  */
 export async function sweepOrphanedRetrospectiveChildren(args: {
     opencodeDb: Database | null;
@@ -52,14 +58,16 @@ export async function sweepOrphanedRetrospectiveChildren(args: {
     let rows: OrphanRow[];
     try {
         rows = opencodeDb
-            .prepare<[string, string, number], OrphanRow>(
+            .prepare<[string, string, string, number], OrphanRow>(
                 `SELECT id, time_created
                    FROM session
-                  WHERE title = ? AND directory = ? AND time_created < ?
+                  WHERE title IN (${PRIVACY_SENSITIVE_CHILD_TITLES.map(() => "?").join(", ")})
+                    AND directory = ?
+                    AND time_created < ?
                   ORDER BY time_created ASC
                   LIMIT 200`,
             )
-            .all(RETROSPECTIVE_CHILD_TITLE, sessionDirectory, cutoff);
+            .all(...PRIVACY_SENSITIVE_CHILD_TITLES, sessionDirectory, cutoff);
     } catch (error) {
         // `session` table absent / schema drift / locked → skip silently.
         log(`[dreamer] retrospective orphan sweep: read skipped (${String(error)})`);
@@ -78,7 +86,7 @@ export async function sweepOrphanedRetrospectiveChildren(args: {
         }
     }
     if (deleted > 0) {
-        log(`[dreamer] swept ${deleted} crash-orphaned retrospective child session(s)`);
+        log(`[dreamer] swept ${deleted} crash-orphaned privacy-sensitive child session(s)`);
     }
     return deleted;
 }

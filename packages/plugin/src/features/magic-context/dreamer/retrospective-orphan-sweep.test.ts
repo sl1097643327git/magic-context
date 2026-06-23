@@ -6,6 +6,7 @@ import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
 import {
     RETROSPECTIVE_CHILD_TITLE,
+    USER_MEMORIES_CHILD_TITLE,
     retrospectiveOrphanStaleMs,
     sweepOrphanedRetrospectiveChildren,
 } from "./retrospective-orphan-sweep";
@@ -61,9 +62,10 @@ describe("sweepOrphanedRetrospectiveChildren", () => {
         return { client, deleted };
     }
 
-    test("deletes ONLY old retrospective children in this directory", async () => {
+    test("deletes old privacy-sensitive children in this directory", async () => {
         db = makeOpencodeDb();
         // old orphan in this dir → swept
+        insert(db, "old-user-memories", USER_MEMORIES_CHILD_TITLE, DIR, now - staleMs - 2);
         insert(db, "old", RETROSPECTIVE_CHILD_TITLE, DIR, now - staleMs - 1);
         // recent child (live run) → NOT swept
         insert(db, "fresh", RETROSPECTIVE_CHILD_TITLE, DIR, now - 1000);
@@ -81,8 +83,8 @@ describe("sweepOrphanedRetrospectiveChildren", () => {
             now,
         });
 
-        expect(deleted).toEqual(["old"]);
-        expect(count).toBe(1);
+        expect(deleted).toEqual(["old-user-memories", "old"]);
+        expect(count).toBe(2);
     });
 
     test("treats a delete error (404 / already removed) as success", async () => {

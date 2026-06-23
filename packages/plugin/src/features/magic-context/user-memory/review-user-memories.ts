@@ -3,7 +3,6 @@ import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
 import { describeError, getErrorMessage } from "../../../shared/error-message";
-import { shouldKeepSubagents } from "../../../shared/keep-subagents";
 import { log } from "../../../shared/logger";
 import { modelBodyField } from "../../../shared/resolve-fallbacks";
 import type { Database } from "../../../shared/sqlite";
@@ -124,8 +123,6 @@ Return valid JSON (no markdown fencing):
 If no promotions are warranted, return empty arrays. Always consume reviewed candidates so they don't accumulate indefinitely.`;
 
     let agentSessionId: string | null = null;
-    // Keep the child session on failure (debugging), mirroring the main-task rule.
-    let phaseFailed = false;
     const startedAt = Date.now();
     let invocationRecorded = false;
     const recordInvocation = (params: {
@@ -332,7 +329,6 @@ If no promotions are warranted, return empty arrays. Always consume reviewed can
 
         return result;
     } catch (error) {
-        phaseFailed = true;
         const errorDescription = describeError(error);
         log(
             `[dreamer] user-memories: review failed: ${errorDescription.brief}`,
@@ -347,7 +343,10 @@ If no promotions are warranted, return empty arrays. Always consume reviewed can
         throw error;
     } finally {
         clearInterval(leaseInterval);
-        if (agentSessionId && !phaseFailed && !shouldKeepSubagents()) {
+        // PRIVACY: this child prompt embeds cross-session user behavior. Always
+        // delete it, even on failure and even when debug subagent retention is
+        // enabled, so personal data is not left in the OpenCode session store.
+        if (agentSessionId) {
             await args.client.session
                 .delete({
                     path: { id: agentSessionId },
