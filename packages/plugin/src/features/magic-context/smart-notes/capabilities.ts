@@ -60,8 +60,7 @@ export function isSecretDeniedPath(repoRelativePath: string): boolean {
     const basename = segments.at(-1) ?? "";
     return (
         basename === ".npmrc" ||
-        basename === ".env" ||
-        basename.startsWith(".env.") ||
+        basename.startsWith(".env") ||
         basename.endsWith(".pem") ||
         basename.endsWith(".key") ||
         basename === "id_rsa" ||
