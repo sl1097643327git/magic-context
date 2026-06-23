@@ -167,6 +167,27 @@ describe("project embedding registry", () => {
         tempDirs.length = 0;
     });
 
+    it("takes a BEGIN IMMEDIATE write lock while registering a project", () => {
+        const db = useTempDb();
+        const calls: string[] = [];
+        const originalExec = db.exec.bind(db);
+        (db as unknown as { exec: (sql: string) => unknown }).exec = (sql: string) => {
+            calls.push(sql);
+            return originalExec(sql);
+        };
+
+        registerProjectEmbeddingAndMaybeWipe(
+            db,
+            "git:test",
+            localConfig("model-a"),
+            { memoryEnabled: false, gitCommitEnabled: false },
+            "/repo/project",
+        );
+
+        expect(calls).toContain("BEGIN IMMEDIATE");
+        expect(calls).toContain("COMMIT");
+    });
+
     it("drainCommitBacklogForProject embeds pre-indexed commits with no new git log work", async () => {
         _setTestProviderFactoryForProject(
             (config) =>

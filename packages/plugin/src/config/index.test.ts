@@ -164,6 +164,18 @@ describe("loadPluginConfig — secret redaction", () => {
         expect(combined).toContain("apiKey");
     });
 
+    it("preserves dreamer.enabled=false migration after nested-field recovery", () => {
+        const config = JSON.stringify({
+            dreamer: { enabled: false },
+            memory: { injection_budget_tokens: "not-a-number" },
+        });
+
+        const result = loadWithUserConfig(config);
+
+        expect(result.dreamer?.disable).toBe(true);
+        expect(result.configWarnings?.join("\n")).toContain("dreamer.enabled=false");
+    });
+
     it("recovers an invalid NESTED field without wiping valid siblings in the same block", () => {
         // Regression: one bad nested field (memory.injection_budget_tokens as a
         // string) must NOT delete the whole `memory` block — which would silently

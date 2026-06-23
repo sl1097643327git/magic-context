@@ -350,8 +350,11 @@ function parsePluginConfig(
 
     // Re-run migration on the field-recovered patched config so legacy
     // experimental + dreamer-v1 blocks still migrate on the recovery path.
-    const retryMigrated = migrateDreamerV2(
-        migrateLegacyExperimental(patched, preMigrationWarnings),
+    const retryMigrated = migrateLegacyAgentEnabledInMemory(
+        migrateDreamerV2(
+            migrateLegacyExperimental(patched, preMigrationWarnings),
+            preMigrationWarnings,
+        ),
         preMigrationWarnings,
     );
     const retryParsed = MagicContextConfigSchema.safeParse(retryMigrated);

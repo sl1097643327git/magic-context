@@ -325,7 +325,8 @@ function maybeWipeStaleEmbeddings(
     }
 
     let wiped = false;
-    db.transaction(() => {
+    db.exec("BEGIN IMMEDIATE");
+    try {
         if (features.memoryEnabled) {
             const memoryIds = getDistinctStoredModelIds(db, projectIdentity);
             if (anyStoredModelIdIsStale(memoryIds, currentProviderIdentity)) {
@@ -351,7 +352,15 @@ function maybeWipeStaleEmbeddings(
                 wiped = true;
             }
         }
-    })();
+        db.exec("COMMIT");
+    } catch (error) {
+        try {
+            db.exec("ROLLBACK");
+        } catch {
+            // The transaction may already be closed by SQLite after a fatal error.
+        }
+        throw error;
+    }
 
     return wiped;
 }

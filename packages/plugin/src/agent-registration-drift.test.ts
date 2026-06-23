@@ -242,6 +242,18 @@ describe("hidden-agent registration drift guard", () => {
         expect(byId(SIDEKICK_AGENT)?.maxSteps).toBe(40);
     });
 
+    test("smart-note compiler uses only its own prompt", () => {
+        const regs = buildHiddenAgentRegistrations({
+            dreamerPrompt: "dreamer-prompt",
+            smartNoteCompilerPrompt: undefined,
+            historianPrompt: "historian-prompt",
+            historianEditorPrompt: "historian-editor-prompt",
+            sidekickPrompt: "sidekick-prompt",
+            historianDisallowed: [],
+        });
+        expect(regs.find((r) => r.id === SMART_NOTE_COMPILER_AGENT)?.prompt).toBeUndefined();
+    });
+
     test("each agent carries its passed-through prompt (undefined-safe)", () => {
         expect(byId(DREAMER_AGENT)?.prompt).toBe("dreamer-prompt");
         // Robustness contract: an undefined prompt is carried through (the config

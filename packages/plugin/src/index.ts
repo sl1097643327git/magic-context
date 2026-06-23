@@ -28,6 +28,7 @@ import { createLiveSessionState } from "./hooks/magic-context/live-session-state
 import { cleanupConflictWarnings, sendConflictWarning } from "./plugin/conflict-warning-hook";
 import { startDreamScheduleTimer } from "./plugin/dream-timer";
 import { ensureProjectRegisteredFromOpenCodeDirectory } from "./plugin/embedding-bootstrap";
+import { isDisposedInstanceDirectory } from "./plugin/instance-disposal";
 import { createEventHandler } from "./plugin/event";
 import { createSessionHooks } from "./plugin/hooks/create-session-hooks";
 import { createMessagesTransformHandler } from "./plugin/messages-transform";
@@ -354,10 +355,11 @@ const server: Plugin = async (ctx) => {
     // captures the correct owner for each flight.
     let lastChatContext: { providerID: string; modelID: string; agentName: string } | null = null;
 
-    // Identity of the project THIS plugin instance serves. Used to match
-    // server.instance.disposed events to our own instance (Desktop runs many
-    // instances per process; each is disposed independently).
-    const ownProjectIdentity = resolveProjectIdentity(ctx.directory);
+    // Directory of the project THIS plugin instance serves. Desktop can run two
+    // instances whose directories resolve to the same project identity (for
+    // example through symlinks or alternate checkout paths), so disposal must
+    // match this concrete instance directory rather than the shared identity.
+    const ownInstanceDirectory = ctx.directory;
 
     return {
         tool: tools,
@@ -374,15 +376,15 @@ const server: Plugin = async (ctx) => {
             // Orderly cleanup of THIS instance's process-resident resources when
             // OpenCode disposes it (server.instance.disposed). Desktop runs many
             // instances in one process, each disposed independently, so we only
-            // act when the disposed directory resolves to OUR project identity —
-            // tearing down a sibling instance's RPC server / dream timer would
+            // act when the disposed directory matches OUR concrete instance
+            // directory — tearing down a sibling instance's RPC server / dream timer would
             // break still-live sessions. We deliberately do NOT dispose the
             // native ONNX embedding session here: forcing onnxruntime-node's
             // destructor on teardown makes the Bun N-API exit crash worse, not
             // better (tracked upstream at oven-sh/bun#30291). The OS reclaims
             // that memory on exit anyway.
             onInstanceDisposed: (disposedDirectory: string) => {
-                if (resolveProjectIdentity(disposedDirectory) !== ownProjectIdentity) return;
+                if (!isDisposedInstanceDirectory(ownInstanceDirectory, disposedDirectory)) return;
                 try {
                     autoUpdateAbort.abort();
                 } catch {

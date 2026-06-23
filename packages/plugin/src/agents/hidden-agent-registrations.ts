@@ -215,7 +215,7 @@ export function buildHiddenAgentRegistrations(args: {
         },
         {
             id: "smart-note-compiler",
-            prompt: args.smartNoteCompilerPrompt ?? args.dreamerPrompt,
+            prompt: args.smartNoteCompilerPrompt,
             allowedTools: [],
             maxSteps: 8,
             overrides: args.dreamerOverrides,
