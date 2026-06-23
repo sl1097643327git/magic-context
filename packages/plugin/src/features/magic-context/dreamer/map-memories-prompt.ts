@@ -16,7 +16,7 @@ import path from "node:path";
  * pools (DeepSeek-v4-Flash); see .alfonso/plans/dreamer-v2-rework.md.
  */
 
-export const MAP_MEMORIES_SYSTEM_PROMPT = `You map project memories to the repository files that back them.
+export const MAP_MEMORIES_SYSTEM_PROMPT = `You are a memory mapper for the magic-context system. You map project memories to the repository files that back them.
 
 A memory's BACKING FILES are the file(s) whose code the memory makes a claim about — the files you would open to check whether the memory is accurate. You do NOT judge accuracy, rewrite, or remove anything. You only LOCATE backing files.
 

@@ -20,13 +20,32 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { buildHiddenAgentRegistrations } from "../../agents/hidden-agent-registrations";
+import { CLASSIFY_SYSTEM_PROMPT } from "../../features/magic-context/dreamer/classify-prompt";
+import { MAP_MEMORIES_SYSTEM_PROMPT } from "../../features/magic-context/dreamer/map-memories-prompt";
+import {
+    CURATE_SYSTEM_PROMPT,
+    DREAMER_SYSTEM_PROMPT,
+    MAINTAIN_DOCS_SYSTEM_PROMPT,
+    PRIMER_INVESTIGATOR_SYSTEM_PROMPT,
+    REVIEW_USER_MEMORIES_SYSTEM_PROMPT,
+} from "../../features/magic-context/dreamer/task-prompts";
+import { VERIFY_SYSTEM_PROMPT } from "../../features/magic-context/dreamer/verify-prompt";
+import { MIGRATION_SYSTEM_PROMPT } from "../../features/magic-context/memory/memory-migration";
+import { SIDEKICK_SYSTEM_PROMPT } from "../../features/magic-context/sidekick/agent";
+import { SMART_NOTE_COMPILER_SYSTEM_PROMPT } from "../../features/magic-context/smart-notes/compiler-prompt";
 import {
     closeDatabase,
     getOrCreateSessionMeta,
     openDatabase,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
-import { createSystemPromptHashHandler } from "./system-prompt-hash";
+import {
+    COMPARTMENT_AGENT_SYSTEM_PROMPT,
+    COMPARTMENT_STRUCTURAL_SYSTEM_PROMPT,
+    HISTORIAN_EDITOR_SYSTEM_PROMPT,
+} from "./compartment-prompt";
+import { createSystemPromptHashHandler, isMagicContextInternalAgent } from "./system-prompt-hash";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
@@ -404,6 +423,49 @@ describe("system-prompt-hash skips Magic Context internal child agents", () => {
             expect(system.join("\n")).not.toContain("## Magic Context");
         });
     }
+
+    it("detects every registered hidden-agent prompt", () => {
+        const registrations = buildHiddenAgentRegistrations({
+            dreamerPrompt: DREAMER_SYSTEM_PROMPT,
+            smartNoteCompilerPrompt: SMART_NOTE_COMPILER_SYSTEM_PROMPT,
+            historianPrompt: COMPARTMENT_AGENT_SYSTEM_PROMPT,
+            historianRecompPrompt: COMPARTMENT_STRUCTURAL_SYSTEM_PROMPT,
+            historianEditorPrompt: HISTORIAN_EDITOR_SYSTEM_PROMPT,
+            sidekickPrompt: SIDEKICK_SYSTEM_PROMPT,
+            historianDisallowed: [],
+        });
+
+        for (const registration of registrations) {
+            expect(registration.prompt, registration.id).toBeString();
+            expect(
+                isMagicContextInternalAgent(registration.prompt as string),
+                registration.id,
+            ).toBe(true);
+        }
+    });
+
+    it("detects every dedicated Magic Context child prompt constant", () => {
+        const prompts = [
+            ["dreamer-base", DREAMER_SYSTEM_PROMPT],
+            ["curate", CURATE_SYSTEM_PROMPT],
+            ["maintain-docs", MAINTAIN_DOCS_SYSTEM_PROMPT],
+            ["review-user-memories", REVIEW_USER_MEMORIES_SYSTEM_PROMPT],
+            ["primer-investigator", PRIMER_INVESTIGATOR_SYSTEM_PROMPT],
+            ["map-memories", MAP_MEMORIES_SYSTEM_PROMPT],
+            ["verify", VERIFY_SYSTEM_PROMPT],
+            ["classify", CLASSIFY_SYSTEM_PROMPT],
+            ["smart-note-compiler", SMART_NOTE_COMPILER_SYSTEM_PROMPT],
+            ["historian", COMPARTMENT_AGENT_SYSTEM_PROMPT],
+            ["historian-recomp", COMPARTMENT_STRUCTURAL_SYSTEM_PROMPT],
+            ["historian-editor", HISTORIAN_EDITOR_SYSTEM_PROMPT],
+            ["memory-migration", MIGRATION_SYSTEM_PROMPT],
+            ["sidekick", SIDEKICK_SYSTEM_PROMPT],
+        ] as const;
+
+        for (const [label, prompt] of prompts) {
+            expect(isMagicContextInternalAgent(prompt), label).toBe(true);
+        }
+    });
 
     it("skips injection via the internalChildSessions flag even when the prompt has no known signature", async () => {
         // Covers the title-prefix detection path: a child whose prompt opener

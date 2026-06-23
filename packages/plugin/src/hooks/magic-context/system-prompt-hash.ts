@@ -88,7 +88,7 @@ function isInternalOpenCodeAgent(systemPromptContent: string): boolean {
  * Literal substrings (not fuzzy) so an upstream prompt edit fails open (resumes
  * injection) rather than silently mis-detecting.
  */
-function isMagicContextInternalAgent(systemPromptContent: string): boolean {
+export function isMagicContextInternalAgent(systemPromptContent: string): boolean {
     return (
         // HISTORIAN_AGENT (also used by memory-migration)
         systemPromptContent.includes(

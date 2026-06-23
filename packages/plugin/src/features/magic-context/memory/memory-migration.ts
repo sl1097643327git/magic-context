@@ -254,8 +254,8 @@ export function loadMemoriesForMigration(db: Database, directory: string): Memor
     return getAllActiveMemoriesForMigration(db, projectPath);
 }
 
-const MIGRATION_SYSTEM_PROMPT =
-    "You re-organize a software project's long-term memory into a stricter taxonomy. " +
+export const MIGRATION_SYSTEM_PROMPT =
+    "You re-organize a software project's long-term memory for the magic-context system into a stricter taxonomy. " +
     "Follow the user instructions exactly. Output ONLY the requested XML blocks, nothing else.";
 
 export interface MemoryMigrationOutcome {

@@ -61,7 +61,7 @@ Rules:
 - Every memory in the pool below MUST appear exactly once.
 - importance is an integer 1-100; scope is one of project|ecosystem|universe; shareable is true|false.`;
 
-export const CLASSIFY_SYSTEM_PROMPT = `You classify project memories by metadata only. You do NOT rewrite, merge, archive, verify, or create memories, and you do NOT read code — you judge each memory from its own text.
+export const CLASSIFY_SYSTEM_PROMPT = `You are a memory classifier for the magic-context system. You classify project memories by metadata only. You do NOT rewrite, merge, archive, verify, or create memories, and you do NOT read code — you judge each memory from its own text.
 
 ${SCORING_GUIDANCE}
 

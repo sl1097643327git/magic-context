@@ -13,7 +13,7 @@
  * prompt and the host apply both bias hard toward keeping memories.
  */
 
-export const VERIFY_SYSTEM_PROMPT = `You verify project memories against the CURRENT code.
+export const VERIFY_SYSTEM_PROMPT = `You are a memory verifier for the magic-context system. You verify project memories against the CURRENT code.
 
 Each memory below comes with its backing file(s) — the code it makes a claim about. For EACH memory: read its backing files (you may read more if needed) and decide whether the memory is still accurate.
 
