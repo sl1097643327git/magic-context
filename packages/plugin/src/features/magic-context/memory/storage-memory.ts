@@ -104,6 +104,7 @@ const memoriesByProjectStatements = new Map<string, WeakMap<Database, PreparedSt
 const memoryImportanceColumnCache = new WeakMap<Database, boolean>();
 const memoryScopeColumnCache = new WeakMap<Database, boolean>();
 const memoryShareableColumnCache = new WeakMap<Database, boolean>();
+const memoryClassifiedAtColumnCache = new WeakMap<Database, boolean>();
 
 export interface MemoryCountsByStatus {
     total: number;
@@ -147,6 +148,31 @@ export function hasMemoryShareableColumn(db: Database): boolean {
     const hasColumn = columns.some((column) => column.name === "shareable");
     memoryShareableColumnCache.set(db, hasColumn);
     return hasColumn;
+}
+
+export function hasMemoryClassifiedAtColumn(db: Database): boolean {
+    const cached = memoryClassifiedAtColumnCache.get(db);
+    if (cached !== undefined) return cached;
+    const columns = db.prepare("PRAGMA table_info(memories)").all() as Array<{ name?: string }>;
+    const hasColumn = columns.some((column) => column.name === "classified_at");
+    memoryClassifiedAtColumnCache.set(db, hasColumn);
+    return hasColumn;
+}
+
+/** Memory ids (from the given set) that have never been classified — the
+ *  classify-memories run-gate + Stage-3 "to-classify" partition. */
+export function getUnclassifiedMemoryIds(db: Database, memoryIds: readonly number[]): number[] {
+    if (!hasMemoryClassifiedAtColumn(db)) return [...memoryIds];
+    const ids = Array.from(new Set(memoryIds.filter(Number.isInteger)));
+    if (ids.length === 0) return [];
+    const ph = ids.map(() => "?").join(", ");
+    const rows = db
+        .prepare<unknown[], { id: number }>(
+            `SELECT id FROM memories WHERE id IN (${ph}) AND classified_at IS NOT NULL`,
+        )
+        .all(...ids);
+    const classified = new Set(rows.map((r) => r.id));
+    return ids.filter((id) => !classified.has(id));
 }
 
 export function getMemorySelectColumns(db: Database, tableName = "memories"): string {
@@ -804,6 +830,12 @@ export function updateMemoryContent(
             db.prepare("UPDATE memories SET shareable = 0 WHERE id = ?").run(id);
         }
 
+        // Clear the classify marker so the changed fact is re-scored next classify
+        // run (importance/scope were judged against the old content).
+        if (hasMemoryClassifiedAtColumn(db)) {
+            db.prepare("UPDATE memories SET classified_at = NULL WHERE id = ?").run(id);
+        }
+
         // Invalidate stale embedding — backfill will regenerate with new content.
         // Uses the same prepared statement pool as deleteEmbedding() in storage-memory-embeddings.ts,
         // but we inline the query here to avoid a circular import.
@@ -873,9 +905,22 @@ export function setMemoryClassification(
         }
     }
 
+    // A classification field actually changed iff there were assignments BEFORE
+    // we add the marker (the return value reports real change, for telemetry).
+    const fieldChanged = assignments.length > 0;
+
+    // Always stamp classified_at (even when no column value changed) so the
+    // run-gate / Stage-3 partition treats this memory as classified and won't
+    // re-score it next run. Stamping a timestamp does not affect the rendered
+    // m[0] bytes, so this stays cache-neutral.
+    if (hasMemoryClassifiedAtColumn(db)) {
+        assignments.push("classified_at = ?");
+        values.push(Date.now());
+    }
+
     if (assignments.length === 0) return false;
     db.prepare(`UPDATE memories SET ${assignments.join(", ")} WHERE id = ?`).run(...values, id);
-    return true;
+    return fieldChanged;
 }
 
 export function supersededMemory(db: Database, id: number, supersededById: number): void {

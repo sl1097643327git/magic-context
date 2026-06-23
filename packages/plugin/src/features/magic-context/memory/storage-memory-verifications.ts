@@ -7,14 +7,18 @@ export interface MemoryVerificationState {
     files: string[];
     /** True when a `""` no-file sentinel row exists for this memory. */
     hasSentinel: boolean;
-    /** Max verified_at across all rows for the memory. */
+    /** Max verified_at across all rows. 0 = mapped (files known) but NOT yet
+     *  content-verified (the map-memories backfill records files without checking). */
     verifiedAt: number;
+    /** Max mapped_at across all rows — when the file mapping was established. */
+    mappedAt: number;
 }
 
 interface MemoryVerificationRow {
     memory_id: number;
     file_path: string;
     verified_at: number;
+    mapped_at: number;
 }
 
 function placeholders(values: readonly unknown[]): string {
@@ -28,8 +32,32 @@ function uniqueSortedFiles(files: readonly string[]): string[] {
 }
 
 /**
- * Replace one memory's side-table verification rows without touching `memories`.
- * Callers that update multiple memories should wrap their batch in one transaction.
+ * MAP (map-memories backfill): record WHICH files back a memory (or the no-file
+ * sentinel) WITHOUT content-verifying it — `verified_at=0`, `mapped_at=now`. The
+ * first verify still sees it as unverified (verified_at=0) and checks the claim.
+ */
+export function recordMemoryMapping(
+    db: Database,
+    memoryId: number,
+    normalizedFiles: readonly string[],
+    now: number,
+): number {
+    const realFiles = uniqueSortedFiles(normalizedFiles);
+    const filesToWrite = realFiles.length > 0 ? realFiles : [MEMORY_VERIFICATION_SENTINEL];
+    db.prepare("DELETE FROM memory_verifications WHERE memory_id = ?").run(memoryId);
+    const insert = db.prepare(
+        "INSERT INTO memory_verifications (memory_id, file_path, verified_at, mapped_at) VALUES (?, ?, 0, ?)",
+    );
+    for (const file of filesToWrite) {
+        insert.run(memoryId, file, now);
+    }
+    return filesToWrite.length;
+}
+
+/**
+ * VERIFY: replace one memory's side-table rows, marking them content-verified
+ * (`verified_at=now`, `mapped_at=now`). Callers updating multiple memories should
+ * wrap their batch in one transaction.
  */
 export function recordMemoryVerifications(
     db: Database,
@@ -41,12 +69,26 @@ export function recordMemoryVerifications(
     const filesToWrite = realFiles.length > 0 ? realFiles : [MEMORY_VERIFICATION_SENTINEL];
     db.prepare("DELETE FROM memory_verifications WHERE memory_id = ?").run(memoryId);
     const insert = db.prepare(
-        "INSERT INTO memory_verifications (memory_id, file_path, verified_at) VALUES (?, ?, ?)",
+        "INSERT INTO memory_verifications (memory_id, file_path, verified_at, mapped_at) VALUES (?, ?, ?, ?)",
     );
     for (const file of filesToWrite) {
-        insert.run(memoryId, file, now);
+        insert.run(memoryId, file, now, now);
     }
     return filesToWrite.length;
+}
+
+/** Memory ids (from the given set) that have NO mapping rows yet — the
+ *  map-memories backfill scope. */
+export function getUnmappedMemoryIds(db: Database, memoryIds: readonly number[]): number[] {
+    const ids = Array.from(new Set(memoryIds.filter(Number.isInteger)));
+    if (ids.length === 0) return [];
+    const rows = db
+        .prepare<unknown[], { memory_id: number }>(
+            `SELECT DISTINCT memory_id FROM memory_verifications WHERE memory_id IN (${placeholders(ids)})`,
+        )
+        .all(...ids);
+    const mapped = new Set(rows.map((r) => r.memory_id));
+    return ids.filter((id) => !mapped.has(id));
 }
 
 export function clearMemoryVerifications(db: Database, memoryId: number): void {
@@ -63,7 +105,7 @@ export function getMemoryVerifications(
 
     const rows = db
         .prepare<unknown[], MemoryVerificationRow>(
-            `SELECT memory_id, file_path, verified_at
+            `SELECT memory_id, file_path, verified_at, mapped_at
                FROM memory_verifications
               WHERE memory_id IN (${placeholders(ids)})
               ORDER BY memory_id, file_path`,
@@ -75,6 +117,7 @@ export function getMemoryVerifications(
             files: [],
             hasSentinel: false,
             verifiedAt: 0,
+            mappedAt: 0,
         };
         if (row.file_path === MEMORY_VERIFICATION_SENTINEL) {
             existing.hasSentinel = true;
@@ -82,6 +125,7 @@ export function getMemoryVerifications(
             existing.files.push(row.file_path);
         }
         existing.verifiedAt = Math.max(existing.verifiedAt, row.verified_at);
+        existing.mappedAt = Math.max(existing.mappedAt, row.mapped_at ?? 0);
         result.set(row.memory_id, existing);
     }
 

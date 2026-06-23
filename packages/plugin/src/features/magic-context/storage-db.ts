@@ -38,7 +38,7 @@ export function getSchemaFenceRejection(): {
     return lastSchemaFenceRejection;
 }
 
-export const LATEST_SUPPORTED_VERSION = 47;
+export const LATEST_SUPPORTED_VERSION = 48;
 
 // chmod is meaningless on Windows (POSIX modes are not honored), so all
 // permission tightening is skipped there. mkdir's `mode` is likewise ignored.
@@ -583,6 +583,7 @@ export function initializeDatabase(db: Database): void {
       expires_at INTEGER,
       verification_status TEXT DEFAULT 'unverified',
       verified_at INTEGER,
+      classified_at INTEGER,
       superseded_by_memory_id INTEGER,
       merged_from TEXT,
       metadata_json TEXT,
@@ -601,7 +602,10 @@ export function initializeDatabase(db: Database): void {
     CREATE TABLE IF NOT EXISTS memory_verifications (
       memory_id    INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
       file_path    TEXT NOT NULL,
+      -- verified_at=0 means "mapped (files known) but not yet content-verified".
+      -- map-memories sets mapped_at + verified_at=0; verify sets verified_at=now.
       verified_at  INTEGER NOT NULL,
+      mapped_at    INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (memory_id, file_path)
     );
     CREATE INDEX IF NOT EXISTS idx_memory_verifications_memory ON memory_verifications(memory_id);
@@ -1233,6 +1237,8 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     ensureColumn(db, "recomp_compartments", "importance", "INTEGER NOT NULL DEFAULT 50");
     ensureColumn(db, "recomp_compartments", "episode_type", "TEXT");
     ensureColumn(db, "memories", "importance", "INTEGER");
+    ensureColumn(db, "memories", "classified_at", "INTEGER");
+    ensureColumn(db, "memory_verifications", "mapped_at", "INTEGER NOT NULL DEFAULT 0");
     ensureColumn(db, "session_meta", "cached_m0_bytes", "BLOB");
     ensureColumn(db, "session_meta", "cached_m0_project_memory_epoch", "INTEGER");
     ensureColumn(db, "session_meta", "cached_m0_workspace_fingerprint", "TEXT");

@@ -68,6 +68,7 @@ function createTestDb(): Database {
             memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
             file_path TEXT NOT NULL,
             verified_at INTEGER NOT NULL,
+            mapped_at INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (memory_id, file_path)
         );
         CREATE INDEX IF NOT EXISTS idx_memory_verifications_memory ON memory_verifications(memory_id);

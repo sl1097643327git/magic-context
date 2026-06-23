@@ -1722,6 +1722,25 @@ const MIGRATIONS: Migration[] = [
             `);
         },
     },
+    {
+        version: 48,
+        description: "DreamerV2 rework: memory→file mapping vs verification split, classify marker",
+        up: (db: Database) => {
+            // map-memories records WHICH files back a memory (mapped_at) WITHOUT
+            // content-verifying it; verify sets verified_at when it checks the
+            // claim. verified_at=0 = "mapped, not yet content-verified". This lets
+            // the verify gate scope per-memory (files changed since THAT memory's
+            // verified_at) instead of a single global commit watermark.
+            if (tableExists(db, "memory_verifications")) {
+                ensureColumn(db, "memory_verifications", "mapped_at", "INTEGER NOT NULL DEFAULT 0");
+            }
+            // classify-memories run-gate + Stage-3 partition: NULL = unclassified.
+            // Cleared on memory content update/merge so a changed fact re-scores.
+            if (tableExists(db, "memories")) {
+                ensureColumn(db, "memories", "classified_at", "INTEGER");
+            }
+        },
+    },
 ];
 
 /**
