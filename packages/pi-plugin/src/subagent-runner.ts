@@ -168,6 +168,10 @@ const STRICT_TOOL_ALLOWLIST: ReadonlyMap<string, readonly string[]> = new Map([
 	// allow-list then strips ALL 7 built-ins, leaving only the extension-provided
 	// ctx_memory (curate never reads code — a separate verify task owns that).
 	["dreamer", ["ctx_memory"]],
+	// Pi dreamer facade default when body.agent is absent (`dreamer/index.ts`).
+	// Same ctx_memory-only lock as `dreamer`; must stay in sync with
+	// DREAMER_ACTION_AGENTS (every member needs a strict entry).
+	["magic-context-dreamer", ["ctx_memory"]],
 ]);
 
 function inferAccountingSubagent(agent: string): SubagentKind {
@@ -1122,4 +1126,6 @@ export const __test = {
 	extractFinalAssistant,
 	parsePiEventLine,
 	terminateChild,
+	DREAMER_ACTION_AGENTS,
+	STRICT_TOOL_ALLOWLIST,
 };

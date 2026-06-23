@@ -575,6 +575,26 @@ true parity.
 
 ---
 
+## 21. Dreamer map-memories / verify prompts vs Pi tool names
+
+Shared dreamer task prompts for **map-memories** and **verify** (and related
+read-only code checks) were authored against OpenCode's tool surface: they mention
+names like `glob`, `aft_search`, `aft_outline`, and `aft_zoom`. On Pi those agents
+run under a strict `--tools` allow-list of Pi's own read-only built-ins only:
+`read`, `grep`, `find`, `ls` (see `dreamer-memory-mapper` in
+`subagent-runner.ts`). Pi never registers `glob` or any `aft_*` tool in child
+subagent processes.
+
+This is intentional — we do **not** fork the shared prompts per harness. The model
+simply ignores tool names in the prompt that are not in its registry and uses
+whatever read-only tools it actually has. That behavior is harmless for these
+tasks (local code read + structured manifest output; the host applies DB writes).
+
+Same pattern as §20 (refresh-primers investigator): OpenCode gets richer
+navigation tools; Pi gets an equally safe, narrower built-in set.
+
+---
+
 ## Maintenance
 
 Update this file whenever a deliberate Pi↔OpenCode divergence is introduced or

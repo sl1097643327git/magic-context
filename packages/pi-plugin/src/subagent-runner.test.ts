@@ -241,6 +241,36 @@ describe("subagent-runner pure helpers", () => {
 		}
 	});
 
+	it("locks magic-context-dreamer (Pi facade default) to --tools ctx_memory only", () => {
+		const args = __test.buildArgs({
+			...baseOptions,
+			agent: "magic-context-dreamer",
+			model: "anthropic/claude-sonnet",
+		});
+		const idx = args.indexOf("--tools");
+		expect(idx).toBeGreaterThan(-1);
+		expect(args[idx + 1]).toBe("ctx_memory");
+		expect(args).not.toContain("--no-tools");
+		const toolList = args[idx + 1];
+		for (const denied of [
+			"read",
+			"grep",
+			"find",
+			"ls",
+			"bash",
+			"write",
+			"edit",
+		]) {
+			expect(toolList).not.toContain(denied);
+		}
+	});
+
+	it("every DREAMER_ACTION_AGENTS member has a STRICT_TOOL_ALLOWLIST entry", () => {
+		for (const agent of __test.DREAMER_ACTION_AGENTS) {
+			expect(__test.STRICT_TOOL_ALLOWLIST.has(agent)).toBe(true);
+		}
+	});
+
 	it("locks dreamer-docs to {read,grep,find,ls,write,edit,bash} with no ctx_memory and no extension", () => {
 		const args = __test.buildArgs({
 			...baseOptions,
