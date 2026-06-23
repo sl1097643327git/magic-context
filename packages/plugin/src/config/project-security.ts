@@ -37,6 +37,7 @@ const HIDDEN_AGENT_KEYS = ["historian", "dreamer", "sidekick"] as const;
  * through the user's own provider auth).
  */
 const AGENT_ESCALATION_FIELDS = ["prompt", "permission", "tools", "system_prompt"] as const;
+const EMBEDDING_DESTINATION_FIELDS = ["endpoint", "provider"] as const;
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -54,6 +55,9 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  *    process). A cloned repo could set a huge value to exhaust host memory /
  *    address space — a resource-exhaustion vector with no legitimate per-repo
  *    use. Honor user-level config only.
+ *  - `embedding.endpoint` / `embedding.provider` — a repo must not choose
+ *    where private memory/search/commit text is embedded. User-level config is
+ *    the trust boundary for embedding destinations.
  *  - hidden-agent `prompt`/`permission`/`tools` — a repo must not reprogram or
  *    re-permission the historian/dreamer/sidekick.
  */
@@ -73,6 +77,23 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
             "Ignoring sqlite.* from project config (security: SQLite cache/mmap PRAGMAs apply to the " +
                 "process-global shared database handle; only user-level config may set them).",
         );
+    }
+
+    const embedding = projectRaw.embedding;
+    if (isPlainObject(embedding)) {
+        const removed: string[] = [];
+        for (const field of EMBEDDING_DESTINATION_FIELDS) {
+            if (field in embedding) {
+                delete embedding[field];
+                removed.push(field);
+            }
+        }
+        if (removed.length > 0) {
+            warnings.push(
+                `Ignoring embedding.${removed.join("/")} from project config ` +
+                    "(security: a repository cannot choose where private text is embedded).",
+            );
+        }
     }
 
     for (const agentKey of HIDDEN_AGENT_KEYS) {

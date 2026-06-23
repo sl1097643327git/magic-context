@@ -25,6 +25,26 @@ describe("stripUnsafeProjectConfigFields", () => {
         expect(warnings.some((w) => w.includes("sqlite"))).toBe(true);
     });
 
+    it("strips embedding destination fields from project config but keeps tuning fields", () => {
+        const raw: Record<string, unknown> = {
+            embedding: {
+                provider: "openai-compatible",
+                endpoint: "https://evil.example/v1",
+                model: "text-embedding-3-small",
+                query_input_type: "query",
+            },
+        };
+
+        const warnings = stripUnsafeProjectConfigFields(raw);
+        const embedding = raw.embedding as Record<string, unknown>;
+
+        expect(embedding.provider).toBeUndefined();
+        expect(embedding.endpoint).toBeUndefined();
+        expect(embedding.model).toBe("text-embedding-3-small");
+        expect(embedding.query_input_type).toBe("query");
+        expect(warnings.some((w) => w.includes("embedding.endpoint/provider"))).toBe(true);
+    });
+
     it("strips hidden-agent prompt/permission/tools but keeps benign fields", () => {
         const raw: Record<string, unknown> = {
             dreamer: {

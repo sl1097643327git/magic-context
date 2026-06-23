@@ -223,6 +223,44 @@ describe("loadPluginConfig — secret redaction", () => {
         // The custom message explains WHY, not just "too big".
         expect(combined).toContain("capped at 80% for cache safety");
     });
+    it("keeps embedding destination fields from trusted user config", () => {
+        const config = JSON.stringify({
+            embedding: {
+                provider: "openai-compatible",
+                endpoint: "https://embeddings.example/v1",
+                model: "text-embedding-3-small",
+            },
+        });
+
+        const result = loadWithUserConfig(config);
+
+        expect(result.embedding.provider).toBe("openai-compatible");
+        expect(result.embedding.endpoint).toBe("https://embeddings.example/v1");
+    });
+
+    it("ignores embedding destination fields from untrusted project config", () => {
+        const userConfig = JSON.stringify({
+            embedding: {
+                provider: "openai-compatible",
+                endpoint: "https://trusted.example/v1",
+                model: "trusted-model",
+            },
+        });
+        const projectConfig = JSON.stringify({
+            embedding: {
+                provider: "openai-compatible",
+                endpoint: "https://evil.example/v1",
+                model: "repo-model",
+            },
+        });
+
+        const result = loadWithUserAndProjectConfig(userConfig, projectConfig);
+
+        expect(result.embedding.provider).toBe("openai-compatible");
+        expect(result.embedding.endpoint).toBe("https://trusted.example/v1");
+        expect(result.embedding.model).toBe("repo-model");
+        expect(result.configWarnings?.join("\n")).toContain("embedding.endpoint/provider");
+    });
 });
 
 describe("loadPluginConfig — experimental graduation migration", () => {
@@ -443,20 +481,18 @@ describe("loadPluginConfig — variable expansion scope", () => {
                 { MC_PROJECT_ENDPOINT: "http://project-env.test/v1" },
             );
 
-            expect(result.embedding.provider).toBe("openai-compatible");
-            if (result.embedding.provider === "openai-compatible") {
-                expect(result.embedding.model).toBe(`{file:${secretFile}}`);
-                expect(result.embedding.endpoint).toBe("{env:MC_PROJECT_ENDPOINT}");
-            }
+            expect(result.embedding.provider).toBe("local");
+            expect(result.embedding.model).toBe(`{file:${secretFile}}`);
             const warnings = result.configWarnings?.join("\n") ?? "";
             expect(warnings).toContain("Project-level config no longer supports");
             expect(warnings).toContain("security reasons");
+            expect(warnings).toContain("embedding.endpoint/provider");
         } finally {
             rmSync(secretFile, { force: true });
         }
     });
 
-    it("lets project literal token text override user-expanded secret values", () => {
+    it("prevents project literal endpoint tokens from overriding user-expanded destinations", () => {
         const result = loadWithUserAndProjectConfig(
             JSON.stringify({
                 embedding: {
@@ -479,7 +515,7 @@ describe("loadPluginConfig — variable expansion scope", () => {
         expect(result.embedding.provider).toBe("openai-compatible");
         if (result.embedding.provider === "openai-compatible") {
             expect(result.embedding.model).toBe("user-model");
-            expect(result.embedding.endpoint).toBe("{env:MC_PROJECT_LITERAL}");
+            expect(result.embedding.endpoint).toBe("http://user-expanded.test/v1");
         }
     });
 });
@@ -529,7 +565,7 @@ describe("loadPluginConfig — raw merge preserves user fields not set in projec
         }
     });
 
-    it("project can still override embedding when it explicitly sets one", () => {
+    it("project can still tune embedding model without changing the destination", () => {
         const userConfig = JSON.stringify({
             embedding: {
                 provider: "openai-compatible",
@@ -549,8 +585,9 @@ describe("loadPluginConfig — raw merge preserves user fields not set in projec
         expect(result.embedding.provider).toBe("openai-compatible");
         if (result.embedding.provider === "openai-compatible") {
             expect(result.embedding.model).toBe("project-model");
-            expect(result.embedding.endpoint).toBe("http://project:1/v1");
+            expect(result.embedding.endpoint).toBe("http://user:1/v1");
         }
+        expect(result.configWarnings?.join("\n")).toContain("embedding.endpoint/provider");
     });
 
     it("user scalar field survives when project omits it", () => {
