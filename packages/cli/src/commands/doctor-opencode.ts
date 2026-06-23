@@ -1228,7 +1228,7 @@ export async function runDoctor(
         log.info(`Log file: ${logPath} (not yet created)`);
     }
 
-    // Historian dumps live per-project under `<dir>/.opencode/magic-context/historian/`.
+    // Historian dumps live per-project under `<dir>/.cortexkit/magic-context/historian/`.
     // We surface them grouped by project so users can see which session's dumps are
     // where. Falls back to the legacy tmp-dir layout when collectDiagnostics returns
     // empty buckets (Node-only runs, no OpenCode DB, no historian has run yet under

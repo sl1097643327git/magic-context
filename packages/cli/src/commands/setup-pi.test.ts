@@ -141,7 +141,8 @@ describe("runSetup", () => {
             ],
             paths: {
                 getPiAgentConfigDir: () => agentDir,
-                getPiUserConfigPath: () => join(agentDir, "magic-context.jsonc"),
+                getPiUserConfigPath: () =>
+                    join(root, ".config", "cortexkit", "magic-context.jsonc"),
                 getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
             },
         };
@@ -152,7 +153,7 @@ describe("runSetup", () => {
 
         expect(code).toBe(0);
         const settingsPath = join(agentDir, "settings.json");
-        const configPath = join(agentDir, "magic-context.jsonc");
+        const configPath = join(root, ".config", "cortexkit", "magic-context.jsonc");
         expect(existsSync(settingsPath)).toBe(true);
         expect(existsSync(configPath)).toBe(true);
 
@@ -195,7 +196,8 @@ describe("runSetup", () => {
             getAvailableModels: () => ["anthropic/claude-haiku-4-5", "anthropic/claude-sonnet-4-6"],
             paths: {
                 getPiAgentConfigDir: () => agentDir,
-                getPiUserConfigPath: () => join(agentDir, "magic-context.jsonc"),
+                getPiUserConfigPath: () =>
+                    join(root, ".config", "cortexkit", "magic-context.jsonc"),
                 getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
             },
         };
@@ -214,7 +216,9 @@ describe("runSetup", () => {
         expect(code).toBe(0);
         expect(autocompleteCalls).toBe(1); // historian only — not dreamer
 
-        const config = parseJsonc(readFileSync(join(agentDir, "magic-context.jsonc"), "utf-8")) as {
+        const config = parseJsonc(
+            readFileSync(join(root, ".config", "cortexkit", "magic-context.jsonc"), "utf-8"),
+        ) as {
             dreamer?: { model?: string; disable?: boolean };
         };
         expect(config.dreamer?.disable).toBe(true);
@@ -233,7 +237,8 @@ describe("runSetup", () => {
             getAvailableModels: () => ["github-copilot/gpt-5.4"],
             paths: {
                 getPiAgentConfigDir: () => agentDir,
-                getPiUserConfigPath: () => join(agentDir, "magic-context.jsonc"),
+                getPiUserConfigPath: () =>
+                    join(root, ".config", "cortexkit", "magic-context.jsonc"),
                 getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
             },
         };
@@ -244,7 +249,9 @@ describe("runSetup", () => {
         const code = await runSetup({ prompts, env });
         expect(code).toBe(0);
 
-        const config = parseJsonc(readFileSync(join(agentDir, "magic-context.jsonc"), "utf-8")) as {
+        const config = parseJsonc(
+            readFileSync(join(root, ".config", "cortexkit", "magic-context.jsonc"), "utf-8"),
+        ) as {
             historian?: { model?: string; thinking_level?: string };
         };
         // github-copilot model — thinking_level must be set by setup wizard
@@ -261,7 +268,8 @@ describe("runSetup", () => {
             getAvailableModels: () => [],
             paths: {
                 getPiAgentConfigDir: () => agentDir,
-                getPiUserConfigPath: () => join(agentDir, "magic-context.jsonc"),
+                getPiUserConfigPath: () =>
+                    join(root, ".config", "cortexkit", "magic-context.jsonc"),
                 getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
             },
         };
@@ -283,7 +291,8 @@ describe("runSetup", () => {
             getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
             paths: {
                 getPiAgentConfigDir: () => agentDir,
-                getPiUserConfigPath: () => join(agentDir, "magic-context.jsonc"),
+                getPiUserConfigPath: () =>
+                    join(root, ".config", "cortexkit", "magic-context.jsonc"),
                 getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
             },
         };
@@ -296,7 +305,7 @@ describe("runSetup", () => {
         const log = prompts.messages.join("\n");
         expect(log).toContain("Pi 0.69.0 is older than the required 0.74.0");
         expect(log).toContain("outro:Setup cancelled");
-        expect(existsSync(join(agentDir, "magic-context.jsonc"))).toBe(false);
+        expect(existsSync(join(root, ".config", "cortexkit", "magic-context.jsonc"))).toBe(false);
         expect(existsSync(join(agentDir, "settings.json"))).toBe(false);
     });
 
@@ -309,7 +318,8 @@ describe("runSetup", () => {
             getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
             paths: {
                 getPiAgentConfigDir: () => agentDir,
-                getPiUserConfigPath: () => join(agentDir, "magic-context.jsonc"),
+                getPiUserConfigPath: () =>
+                    join(root, ".config", "cortexkit", "magic-context.jsonc"),
                 getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
             },
         };
@@ -320,7 +330,7 @@ describe("runSetup", () => {
         const code = await runSetup({ prompts, env });
 
         expect(code).toBe(0);
-        expect(existsSync(join(agentDir, "magic-context.jsonc"))).toBe(true);
+        expect(existsSync(join(root, ".config", "cortexkit", "magic-context.jsonc"))).toBe(true);
         expect(prompts.messages.join("\n")).toContain(
             "Pi 0.69.0 is older than the required 0.74.0",
         );

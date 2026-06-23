@@ -3,7 +3,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
 import { writeFileAtomic } from "../lib/atomic-write";
-import { getMagicContextLogPath, getPiAgentConfigDir, getPiUserExtensionsPath } from "../lib/paths";
+import {
+    getMagicContextLogPath,
+    getPiAgentConfigDir,
+    getPiUserConfigPath,
+    getPiUserExtensionsPath,
+} from "../lib/paths";
 import { detectPiBinary, PI_PACKAGE_SOURCE } from "../lib/pi-helpers";
 import type {
     HarnessAdapter,
@@ -36,7 +41,7 @@ export class PiAdapter implements HarnessAdapter {
         return {
             configDir: dir,
             pluginConfigPath: getPiUserExtensionsPath(),
-            magicContextConfigPath: `${dir}/magic-context.jsonc`,
+            magicContextConfigPath: getPiUserConfigPath(),
             secondaryConfigPath: null,
         };
     }

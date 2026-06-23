@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } fr
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
+import { resolveCortexKitProjectConfigPath } from "@magic-context/core/config/migrate-config-location";
 import {
     dropInheritedEmbeddingKeyOnRedirect,
     stripUnsafeProjectConfigFields,
@@ -258,7 +259,7 @@ function piPluginDirCandidates(packages: unknown[], cwd: string): string[] {
 }
 
 function projectConfigPath(cwd: string): string {
-    return join(cwd, ".pi", "magic-context.jsonc");
+    return resolveCortexKitProjectConfigPath(cwd);
 }
 
 function readConfigForEmbedding(
@@ -476,7 +477,7 @@ async function runHealthChecks(options: {
                 add(results, "warn", `No ${label} magic-context.jsonc found at ${path}`);
                 repairPlan.writeUserConfig = true;
             } else {
-                add(results, "info", `No project Pi magic-context.jsonc found at ${path}`);
+                add(results, "info", `No project Magic Context config found at ${path}`);
             }
             continue;
         }
@@ -749,9 +750,9 @@ async function runHealthChecks(options: {
         add(results, "info", `No plugin log file yet at ${logPath}`);
     }
 
-    // Historian dumps now live per-project under `<dir>/.opencode/magic-context/historian/`
-    // — surface them grouped by project. Falls back to the legacy harness-scoped
-    // tmp-dir layout when no project-local dumps are present (pre-Phase-3 plugin
+    // Historian dumps now live per-project under `<dir>/.cortexkit/magic-context/historian/`
+    // and are surfaced grouped by project. The legacy harness-scoped tmp-dir
+    // layout is still listed when no project-local dumps exist (older plugin
     // versions or fresh installs).
     const diagnosticsForDumps = await collectDiagnostics(options.cwd);
     const dumpBuckets = diagnosticsForDumps.historianDumps.byProject;

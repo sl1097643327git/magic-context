@@ -19,7 +19,7 @@ export interface HarnessConfigPaths {
     configDir: string;
     /** Path to the JSONC config file the plugin registers itself in. */
     pluginConfigPath: string;
-    /** Path to the magic-context.jsonc the user can edit (per harness). */
+    /** Shared CortexKit magic-context.jsonc path the user can edit. */
     magicContextConfigPath: string;
     /**
      * Optional secondary config (e.g. `tui.json` for OpenCode TUI).

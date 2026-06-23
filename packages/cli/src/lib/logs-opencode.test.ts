@@ -286,7 +286,7 @@ describe("sanitizeLogContent — secret token redaction (council finding #9)", (
 
         it("handles multiline log content", () => {
             const log = [
-                "Loading config from /Users/alice/.config/opencode/magic-context.jsonc",
+                "Loading config from /Users/alice/.config/cortexkit/magic-context.jsonc",
                 "ANTHROPIC_API_KEY=sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYzZ12345678901234567890",
                 'Spawning subagent with {"api_key":"superdupersecret"}',
                 "Done.",
@@ -337,7 +337,7 @@ describe("bundleIssueReport secret redaction", () => {
                     configDir: join(root, ".config", "opencode"),
                     opencodeConfig: join(root, ".config", "opencode", "opencode.jsonc"),
                     opencodeConfigFormat: "jsonc",
-                    magicContextConfig: join(root, ".config", "opencode", "magic-context.jsonc"),
+                    magicContextConfig: join(root, ".config", "cortexkit", "magic-context.jsonc"),
                     tuiConfig: join(root, ".config", "opencode", "tui.jsonc"),
                     tuiConfigFormat: "jsonc",
                     omoConfig: null,

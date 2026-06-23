@@ -14,6 +14,7 @@ const originalHome = process.env.HOME;
 const originalPiDir = process.env.PI_CODING_AGENT_DIR;
 const originalDataHome = process.env.XDG_DATA_HOME;
 const originalCacheHome = process.env.XDG_CACHE_HOME;
+const originalConfigHome = process.env.XDG_CONFIG_HOME;
 
 function makeTempRoot(prefix = "mc-pi-doctor-"): string {
     const path = mkdtempSync(join(tmpdir(), prefix));
@@ -75,8 +76,10 @@ function setEnv(root: string, cwd: string): string {
     process.env.PI_CODING_AGENT_DIR = join(root, ".pi", "agent");
     process.env.XDG_DATA_HOME = join(root, ".local", "share");
     process.env.XDG_CACHE_HOME = join(root, ".cache");
+    process.env.XDG_CONFIG_HOME = join(root, ".config");
     mkdirSync(process.env.PI_CODING_AGENT_DIR, { recursive: true });
-    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    mkdirSync(join(process.env.XDG_CONFIG_HOME, "cortexkit"), { recursive: true });
+    mkdirSync(join(cwd, ".cortexkit"), { recursive: true });
     return process.env.PI_CODING_AGENT_DIR;
 }
 
@@ -87,11 +90,15 @@ function writeHealthyFiles(agentDir: string, cwd: string): void {
             packages: ["npm:@cortexkit/pi-magic-context", "npm:other-pi-extension"],
         }),
     );
+    const configHome = process.env.XDG_CONFIG_HOME ?? join(process.env.HOME ?? "", ".config");
     writeFileSync(
-        join(agentDir, "magic-context.jsonc"),
+        join(configHome, "cortexkit", "magic-context.jsonc"),
         JSON.stringify({ embedding: { provider: "local" } }),
     );
-    writeFileSync(join(cwd, ".pi", "magic-context.jsonc"), JSON.stringify({ enabled: true }));
+    writeFileSync(
+        join(cwd, ".cortexkit", "magic-context.jsonc"),
+        JSON.stringify({ enabled: true }),
+    );
 }
 
 function createMockDb(): Database {
@@ -147,6 +154,8 @@ afterEach(() => {
     else process.env.XDG_DATA_HOME = originalDataHome;
     if (originalCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
     else process.env.XDG_CACHE_HOME = originalCacheHome;
+    if (originalConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = originalConfigHome;
 
     for (const path of tempRoots.splice(0)) {
         rmSync(path, { recursive: true, force: true });
@@ -192,7 +201,10 @@ describe("Pi doctor", () => {
         const cwd = makeTempRoot("mc-pi-doctor-cwd-");
         const agentDir = setEnv(root, cwd);
         writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [] }));
-        writeFileSync(join(cwd, ".pi", "magic-context.jsonc"), JSON.stringify({ enabled: true }));
+        writeFileSync(
+            join(cwd, ".cortexkit", "magic-context.jsonc"),
+            JSON.stringify({ enabled: true }),
+        );
         const prompts = new MockPrompts();
 
         const code = await runDoctor({
@@ -205,7 +217,7 @@ describe("Pi doctor", () => {
             packages?: string[];
         };
         expect(settings.packages).toContain("npm:@cortexkit/pi-magic-context");
-        expect(existsSync(join(agentDir, "magic-context.jsonc"))).toBe(true);
+        expect(existsSync(join(root, ".config", "cortexkit", "magic-context.jsonc"))).toBe(true);
         const output = prompts.messages.join("\n");
         expect(output).toContain("Added npm:@cortexkit/pi-magic-context");
         expect(output).toContain("Wrote default Magic Context config");
@@ -228,10 +240,13 @@ describe("Pi doctor", () => {
             }),
         );
         writeFileSync(
-            join(agentDir, "magic-context.jsonc"),
+            join(root, ".config", "cortexkit", "magic-context.jsonc"),
             JSON.stringify({ embedding: { provider: "local" } }),
         );
-        writeFileSync(join(cwd, ".pi", "magic-context.jsonc"), JSON.stringify({ enabled: true }));
+        writeFileSync(
+            join(cwd, ".cortexkit", "magic-context.jsonc"),
+            JSON.stringify({ enabled: true }),
+        );
         const prompts = new MockPrompts();
 
         const code = await runDoctor({
@@ -288,20 +303,20 @@ describe("Pi doctor", () => {
             },
             configPaths: {
                 agentDir,
-                userConfig: join(agentDir, "magic-context.jsonc"),
-                projectConfig: join(cwd, ".pi", "magic-context.jsonc"),
+                userConfig: join(root, ".config", "cortexkit", "magic-context.jsonc"),
+                projectConfig: join(cwd, ".cortexkit", "magic-context.jsonc"),
             },
             userConfig: {
-                path: join(agentDir, "magic-context.jsonc"),
+                path: join(root, ".config", "cortexkit", "magic-context.jsonc"),
                 exists: true,
                 flags: { embedding: { provider: "local" } },
             },
             projectConfig: {
-                path: join(cwd, ".pi", "magic-context.jsonc"),
+                path: join(cwd, ".cortexkit", "magic-context.jsonc"),
                 exists: true,
                 flags: { enabled: true },
             },
-            loadedConfigPaths: ["<HOME>/.pi/agent/magic-context.jsonc"],
+            loadedConfigPaths: ["<HOME>/.config/cortexkit/magic-context.jsonc"],
             loadWarnings: [],
             storageDir: {
                 path: join(root, ".local", "share", "cortexkit", "magic-context"),

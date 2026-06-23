@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { resolveCortexKitUserConfigPath } from "@magic-context/core/config/migrate-config-location";
 import {
     getMagicContextHistorianDir as getMagicContextHistorianDirCore,
     getMagicContextLogPath as getMagicContextLogPathCore,
@@ -92,7 +93,7 @@ export function detectConfigPaths(): ConfigPaths {
         configDir,
         opencodeConfig,
         opencodeConfigFormat,
-        magicContextConfig: join(configDir, "magic-context.jsonc"),
+        magicContextConfig: resolveCortexKitUserConfigPath(),
         omoConfig: findOmoConfig(configDir),
         tuiConfig,
         tuiConfigFormat,
@@ -110,8 +111,9 @@ export function getPiAgentConfigDir(): string {
     return join(homedir(), ".pi", "agent");
 }
 
+/** Shared Magic Context user config, independent of the Pi agent settings dir. */
 export function getPiUserConfigPath(): string {
-    return join(getPiAgentConfigDir(), "magic-context.jsonc");
+    return resolveCortexKitUserConfigPath();
 }
 
 /**

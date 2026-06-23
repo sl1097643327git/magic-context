@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
 
+import { resolveCortexKitProjectConfigPath } from "@magic-context/core/config/migrate-config-location";
 import { parseCompartmentOutput } from "@magic-context/core/hooks/magic-context/compartment-parser";
 import {
     getMagicContextStorageDir,
@@ -236,7 +237,7 @@ function readJsonc(path: string): {
 }
 
 function getProjectConfigPath(cwd: string): string {
-    return join(cwd, ".pi", "magic-context.jsonc");
+    return resolveCortexKitProjectConfigPath(cwd);
 }
 
 function readConfigDiagnostic(path: string): PiConfigDiagnostic {

@@ -78,9 +78,9 @@ export interface DiagnosticReport {
      */
     recentSessions: RecentSessionSummary[];
     /**
-     * Historian dumps grouped by project directory. Pre-Phase 3 dumps under
-     * the legacy harness-scoped tmp dir are surfaced separately as
-     * `legacyDumps` so users with old artifacts still see them in doctor.
+     * Historian dumps grouped by project directory. Older dumps under the
+     * legacy harness-scoped tmp dir are surfaced separately as `legacyDumps`
+     * so users with old artifacts still see them in doctor.
      */
     historianDumps: HistorianDumpsReport;
     /** Most recent historian-failure rows from session_meta across all sessions. */
@@ -96,7 +96,7 @@ export interface DiagnosticReport {
  * Per-project historian-dump bucket built from the recent-sessions list.
  *
  * One entry per unique project directory that has at least one dump under
- * `<directory>/.opencode/magic-context/historian/`. Sessions sharing a
+ * `<directory>/.cortexkit/magic-context/historian/`. Sessions sharing a
  * directory roll into the same bucket. Empty buckets are omitted.
  */
 export interface ProjectHistorianBucket {
@@ -373,7 +373,7 @@ function listDumpsInDir(
 /**
  * Group historian dumps by project directory using the recent-sessions list as
  * the lookup index. For each unique directory, opens
- * `<directory>/.opencode/magic-context/historian/` and lists dumps there.
+ * `<directory>/.cortexkit/magic-context/historian/` and lists dumps there.
  *
  * Falls back to the legacy harness-scoped tmp-dir layout when recentSessions
  * is empty (Node runs without bun:sqlite) OR when the project-local dir is
@@ -858,7 +858,7 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         "",
         "### Historian dumps",
         "(Metadata only — XML content is not included in this report.)",
-        "Dumps are stored per-project under `<project>/.opencode/magic-context/historian/`.",
+        "Dumps are stored per-project under `<project>/.cortexkit/magic-context/historian/`.",
         "```json",
         JSON.stringify(historianDumps, null, 2),
         "```",
