@@ -68,13 +68,22 @@ export async function evaluateSmartNotes(
         return { surfaced: 0, pending: 0, ran: false };
     }
 
+    let leaseLost = false;
+    const assertLeaseHeld = (phase: string): void => {
+        if (leaseLost || !peekLeaseHolderAndExpiry(args.db, args.holderId, args.leaseKey)) {
+            leaseLost = true;
+            throw new Error(`Dream lease lost during smart-notes ${phase}`);
+        }
+    };
     const leaseInterval = setInterval(() => {
         try {
             if (!renewLease(args.db, args.holderId, args.leaseKey)) {
+                leaseLost = true;
                 log("[dreamer] smart notes: lease renewal failed — aborting");
                 args.onLeaseLost?.("smart notes");
             }
         } catch (error) {
+            leaseLost = true;
             args.onLeaseLost?.("smart notes", error);
         }
     }, 60_000);
@@ -88,6 +97,8 @@ export async function evaluateSmartNotes(
             projectRoot,
             maxChecks: 10,
             sweepBudgetMs: 10_000,
+            leaseHeld: () =>
+                !leaseLost && peekLeaseHolderAndExpiry(args.db, args.holderId, args.leaseKey),
         });
         surfaced += dueRun.surfaced;
         didWork ||= dueRun.ran > 0;
@@ -95,12 +106,14 @@ export async function evaluateSmartNotes(
         const candidates = getSmartNotesNeedingCompilation(
             args.db,
             args.projectIdentity,
+            Date.now(),
             MAX_COMPILE_PER_RUN,
         );
         for (const note of candidates) {
             if (Date.now() >= args.deadline) break;
+            assertLeaseHeld("compile start");
             didWork = true;
-            const compiled = await compileNote(args, note, projectRoot);
+            const compiled = await compileNote(args, note, projectRoot, assertLeaseHeld);
             if (compiled) surfaced += 1;
         }
 
@@ -112,8 +125,9 @@ export async function evaluateSmartNotes(
         );
         for (const note of stale) {
             if (Date.now() >= args.deadline) break;
+            assertLeaseHeld("liveness start");
             didWork = true;
-            const met = await runLivenessCheck(args.db, note, projectRoot);
+            const met = await runLivenessCheck(args, note, projectRoot, assertLeaseHeld);
             if (met) surfaced += 1;
         }
 
@@ -122,8 +136,10 @@ export async function evaluateSmartNotes(
             .slice(0, MAX_FALLBACK_PER_RUN);
         for (const note of fallbackNotes) {
             if (Date.now() >= args.deadline) break;
+            assertLeaseHeld("fallback start");
             didWork = true;
             const met = await confirmReadOnly(args, note.id, note.content, note.surfaceCondition);
+            assertLeaseHeld("fallback commit");
             if (met) {
                 markNoteReady(
                     args.db,
@@ -137,13 +153,7 @@ export async function evaluateSmartNotes(
             }
         }
 
-        let leaseLostAtCommit = false;
-        args.db.transaction(() => {
-            if (!peekLeaseHolderAndExpiry(args.db, args.holderId, args.leaseKey)) {
-                leaseLostAtCommit = true;
-            }
-        })();
-        if (leaseLostAtCommit) throw new Error("Dream lease lost during smart-notes commit");
+        assertLeaseHeld("final commit");
 
         const pending = getPendingSmartNotes(args.db, args.projectIdentity).length;
         log(
@@ -159,6 +169,7 @@ async function compileNote(
     args: EvaluateSmartNotesArgs,
     note: SmartNoteCheckNote,
     projectRoot: string,
+    assertLeaseHeld: (phase: string) => void,
 ): Promise<boolean> {
     const controller = new AbortController();
     const timer = setTimeout(
@@ -179,6 +190,7 @@ async function compileNote(
             fallbackModels: args.fallbackModels,
         });
         const now = Date.now();
+        assertLeaseHeld("compile commit");
         if (!result.ok) {
             log(`[dreamer] smart note #${note.id}: compile failed — ${result.error}`);
             markSmartNoteCompilationFailure(args.db, note.id, now, MAX_COMPILATION_FAILURES);
@@ -214,9 +226,10 @@ async function compileNote(
 }
 
 async function runLivenessCheck(
-    db: Database,
+    args: EvaluateSmartNotesArgs,
     note: SmartNoteCheckNote,
     projectRoot: string,
+    assertLeaseHeld: (phase: string) => void,
 ): Promise<boolean> {
     if (!note.compiledCheck) return false;
     const controller = new AbortController();
@@ -232,10 +245,11 @@ async function runLivenessCheck(
             timeoutMs: 2_000,
         });
         const now = Date.now();
-        markSmartNoteLivenessChecked(db, note.id, now);
+        assertLeaseHeld("liveness commit");
+        markSmartNoteLivenessChecked(args.db, note.id, now);
         if (result.ok && result.result.met) {
             markNoteReady(
-                db,
+                args.db,
                 note.id,
                 `Smart note #${note.id}: max-staleness liveness check returned met=true`,
             );
@@ -243,7 +257,7 @@ async function runLivenessCheck(
         }
         if (result.ok) {
             markCompiledCheckFalse(
-                db,
+                args.db,
                 note.id,
                 nextSmartNoteCheckDueAt(note.checkCron, {
                     now,
@@ -253,7 +267,7 @@ async function runLivenessCheck(
                 now,
             );
         } else if (!result.network) {
-            markSmartNoteCheckStatus(db, note.id, "failing", now);
+            markSmartNoteCheckStatus(args.db, note.id, "failing", now);
         }
         return false;
     } finally {

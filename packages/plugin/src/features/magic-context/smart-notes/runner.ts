@@ -18,6 +18,7 @@ export interface RunDueCompiledSmartNoteChecksArgs {
     now?: number;
     maxChecks?: number;
     sweepBudgetMs?: number;
+    leaseHeld?: () => boolean;
 }
 
 export interface RunDueCompiledSmartNoteChecksResult {
@@ -71,6 +72,9 @@ export async function runDueCompiledSmartNoteChecks(
                 timeoutMs: Math.min(2_000, remaining),
             });
             const runFinishedAt = Date.now();
+            if (args.leaseHeld && !args.leaseHeld()) {
+                throw new Error("Dream lease lost during smart-note check commit");
+            }
             if (result.ok && result.result.met) {
                 markNoteReady(
                     args.db,

@@ -41,16 +41,18 @@ export function getDueCompiledSmartNoteChecks(
 export function getSmartNotesNeedingCompilation(
     db: Database,
     projectPath: string,
+    now: number,
     limit: number,
 ): SmartNoteCheckNote[] {
     return getPendingSmartNotes(db, projectPath)
         .map(toSmartNote)
         .filter(
             (note) =>
-                note.checkStatus === "uncompiled" ||
-                note.checkStatus === "failing" ||
-                note.compiledCheck === null ||
-                note.policyVersion !== SMART_NOTE_CHECK_POLICY_VERSION,
+                (note.checkNextDueAt === null || note.checkNextDueAt <= now) &&
+                (note.checkStatus === "uncompiled" ||
+                    note.checkStatus === "failing" ||
+                    note.compiledCheck === null ||
+                    note.policyVersion !== SMART_NOTE_CHECK_POLICY_VERSION),
         )
         .sort((a, b) => a.createdAt - b.createdAt || a.id - b.id)
         .slice(0, Math.max(1, limit));

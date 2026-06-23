@@ -136,7 +136,7 @@ export function evaluateTaskGate(task: DreamTaskName, ctx: TaskGateContext): boo
 
         case "evaluate-smart-notes":
             return (
-                getSmartNotesNeedingCompilation(db, project, 1).length > 0 ||
+                getSmartNotesNeedingCompilation(db, project, Date.now(), 1).length > 0 ||
                 getStaleCompiledSmartNotes(db, project, Date.now(), 1).length > 0 ||
                 getPendingSmartNotes(db, project).some((note) => note.checkStatus === "fallback")
             );
