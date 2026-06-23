@@ -51,9 +51,10 @@ import {
     buildDreamTaskPrompt,
     buildFrictionGatePrompt,
     buildRetrospectivePrompt,
+    CURATE_SYSTEM_PROMPT,
     type CuratePromptMemory,
-    DREAMER_SYSTEM_PROMPT,
     FRICTION_GATE_SYSTEM_PROMPT,
+    MAINTAIN_DOCS_SYSTEM_PROMPT,
     RETROSPECTIVE_SYSTEM_PROMPT,
     type RetrospectivePromptEvent,
 } from "./task-prompts";
@@ -880,7 +881,13 @@ async function runAgenticTask(
                 query: { directory: docsDir },
                 body: {
                     agent: DREAMER_AGENT,
-                    system: DREAMER_SYSTEM_PROMPT,
+                    // Each agentic task gets its OWN system prompt so it never sees
+                    // another task's tools/rules (curate has no codebase framing;
+                    // maintain-docs has no memory machinery).
+                    system:
+                        task === "maintain-docs"
+                            ? MAINTAIN_DOCS_SYSTEM_PROMPT
+                            : CURATE_SYSTEM_PROMPT,
                     ...modelBodyField(config.model),
                     parts: [{ type: "text", text: taskPrompt, synthetic: true }],
                 },

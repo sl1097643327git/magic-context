@@ -373,17 +373,26 @@ describe("system-prompt-hash skips OpenCode internal hidden agents (issue #52)",
 describe("system-prompt-hash skips Magic Context internal child agents", () => {
     const HISTORIAN_HEAD =
         "You are Historian — the hippocampus of a long-running coding agent. You and the primary agent are one mind.";
-    const DREAMER_HEAD = "You are a memory maintenance agent for the magic-context system.";
     const SIDEKICK_HEAD =
         "You are Sidekick, a focused memory-retrieval subagent for an AI coding assistant.";
-    const KEY_FILES_HEAD =
-        "You are a file importance evaluator. Given read statistics about files in a coding session, identify which are core.";
+    // Every dreamer task prompt shares "for the magic-context system"; each opener
+    // below must be detected so the guidance block is never injected into a dreamer
+    // child even in the title-flag race window.
+    const DREAMER_BASE_HEAD =
+        "You are a background maintenance agent for the magic-context system,";
+    const CURATE_HEAD = "You are a memory-pool curator for the magic-context system.";
+    const MAINTAIN_DOCS_HEAD = "You are a documentation maintainer for the magic-context system.";
+    const REVIEW_USER_HEAD = "You are a user-profile reviewer for the magic-context system.";
+    const PRIMER_HEAD = "You are a read-only code investigator for the magic-context system.";
 
     for (const [label, head] of [
         ["historian", HISTORIAN_HEAD],
-        ["dreamer", DREAMER_HEAD],
+        ["dreamer-base", DREAMER_BASE_HEAD],
+        ["curate", CURATE_HEAD],
+        ["maintain-docs", MAINTAIN_DOCS_HEAD],
+        ["review-user-memories", REVIEW_USER_HEAD],
+        ["primer-investigator", PRIMER_HEAD],
         ["sidekick", SIDEKICK_HEAD],
-        ["key-files", KEY_FILES_HEAD],
     ] as const) {
         it(`skips ALL injection for the ${label} agent (prompt signature)`, async () => {
             useTempDataHome(`sph-skip-mc-${label}-`);

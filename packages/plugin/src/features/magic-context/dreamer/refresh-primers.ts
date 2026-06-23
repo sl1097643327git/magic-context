@@ -22,7 +22,7 @@ import {
 import { recordChildInvocation } from "../subagent-token-capture";
 import { peekLeaseHolderAndExpiry, renewLease } from "./lease";
 import { buildPrimerSeed } from "./primer-seed";
-import { DREAMER_SYSTEM_PROMPT } from "./task-prompts";
+import { PRIMER_INVESTIGATOR_SYSTEM_PROMPT } from "./task-prompts";
 
 const REFRESH_PRIMERS_PER_RUN = 5;
 
@@ -256,7 +256,7 @@ async function refreshOnePrimer(
                 query: { directory: args.sessionDirectory },
                 body: {
                     agent: DREAMER_PRIMER_INVESTIGATOR_AGENT,
-                    system: DREAMER_SYSTEM_PROMPT,
+                    system: PRIMER_INVESTIGATOR_SYSTEM_PROMPT,
                     ...modelBodyField(args.model),
                     parts: [{ type: "text", text: prompt, synthetic: true }],
                 },

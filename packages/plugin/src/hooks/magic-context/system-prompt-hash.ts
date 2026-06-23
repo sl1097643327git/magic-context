@@ -94,17 +94,13 @@ function isMagicContextInternalAgent(systemPromptContent: string): boolean {
         systemPromptContent.includes(
             "You are Historian — the hippocampus of a long-running coding agent.",
         ) ||
-        // DREAMER_SYSTEM_PROMPT
-        systemPromptContent.includes(
-            "You are a memory maintenance agent for the magic-context system.",
-        ) ||
+        // Every dreamer task prompt (generic base + curate / maintain-docs /
+        // review-user-memories / primer-investigator) shares this identity phrase,
+        // so one substring covers them all even though their openers differ.
+        systemPromptContent.includes("for the magic-context system") ||
         // SIDEKICK_SYSTEM_PROMPT
         systemPromptContent.includes(
             "You are Sidekick, a focused memory-retrieval subagent for an AI coding assistant.",
-        ) ||
-        // KEY_FILES_SYSTEM_PROMPT (dreamer key-files task)
-        systemPromptContent.includes(
-            "You are a file importance evaluator. Given read statistics about files",
         )
     );
 }

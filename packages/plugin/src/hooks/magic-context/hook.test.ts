@@ -518,7 +518,7 @@ describe("magic-context hook", () => {
                 query: { directory: "/tmp" },
                 body: expect.objectContaining({
                     agent: "dreamer",
-                    system: expect.stringContaining("memory maintenance agent"),
+                    system: expect.stringContaining("memory-pool curator"),
                     parts: expect.arrayContaining([
                         expect.objectContaining({
                             text: expect.stringContaining("## Task: Curate Project Memory Pool"),

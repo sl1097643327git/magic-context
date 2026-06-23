@@ -8,7 +8,7 @@ import { log } from "../../../shared/logger";
 import { modelBodyField } from "../../../shared/resolve-fallbacks";
 import type { Database } from "../../../shared/sqlite";
 import { peekLeaseHolderAndExpiry, renewLease } from "../dreamer/lease";
-import { DREAMER_SYSTEM_PROMPT } from "../dreamer/task-prompts";
+import { REVIEW_USER_MEMORIES_SYSTEM_PROMPT } from "../dreamer/task-prompts";
 import { bumpProjectUserProfileVersion } from "../storage";
 import { recordChildInvocation } from "../subagent-token-capture";
 import {
@@ -197,7 +197,7 @@ If no promotions are warranted, return empty arrays. Always consume reviewed can
                 query: { directory: args.sessionDirectory },
                 body: {
                     agent: DREAMER_AGENT,
-                    system: DREAMER_SYSTEM_PROMPT,
+                    system: REVIEW_USER_MEMORIES_SYSTEM_PROMPT,
                     ...modelBodyField(args.model),
                     // synthetic: true hides the user-memory review prompt from the TUI
                     // subagent pane while still delivering it to the model. See issue #50.
