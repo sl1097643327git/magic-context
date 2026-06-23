@@ -12,8 +12,8 @@
  *
  *  Dreamer-only (gated on `allowDreamerActions: true`):
  *    - list: list active memories for the current project
- *    - verified: record COMPLETE backing-file sets in the side table
- *    - classify: write importance/scope/shareable columns without cache-visible mutation logs
+ *  (memory verification + classification are no longer tool actions — the verify
+ *   and classify dreamer tasks apply them host-side from a manifest.)
  *
  * Allowlist gating mirrors OpenCode's `allowedActions` deps field. In OpenCode,
  * the dreamer subagent gets the full action surface because `toolContext.agent
@@ -38,14 +38,13 @@ import {
 	getMemoriesByProject,
 	getMemoryByHash,
 	getMemoryById,
+	hasMemoryClassifiedAtColumn,
 	hasMemoryShareableColumn,
 	insertMemory,
 	type Memory,
 	type MemoryCategory,
-	type MemoryScope,
 	mergeMemoryStats,
 	saveEmbedding,
-	setMemoryClassification,
 	supersededMemory,
 	updateMemoryContent,
 	updateMemorySeenCount,
@@ -74,13 +73,8 @@ import {
 	storedPathBelongsToWorkspace,
 } from "@magic-context/core/features/magic-context/workspaces";
 import { log } from "@magic-context/core/shared/logger";
-import { hasShareabilitySensitiveText } from "@magic-context/core/shared/redaction";
 import { CTX_MEMORY_DESCRIPTION } from "@magic-context/core/tools/ctx-memory/constants";
-import {
-	prepareMemoryVerificationRecording,
-	runImmediateTransaction,
-	writePlannedMemoryVerificationRecords,
-} from "@magic-context/core/tools/ctx-memory/verification-recording";
+import { runImmediateTransaction } from "@magic-context/core/tools/ctx-memory/verification-recording";
 import { type Static, Type } from "typebox";
 
 const DEFAULT_LIST_LIMIT = 10;
@@ -89,36 +83,19 @@ const DEFAULT_LIST_LIMIT = 10;
 // exact alias of `archive` (both soft-archive); `archive` is the single
 // soft-remove action. Primary agents get write/archive/update/merge on the
 // memories they already see (with ids) in the injected project-memory block;
-// `list` (bulk enumeration), `verified` (backing-file side table), and
-// `classify` (dreamer metadata scoring) stay dreamer-only.
-const ALL_ACTIONS = [
-	"write",
-	"archive",
-	"update",
-	"merge",
-	"list",
-	"verified",
-	"classify",
-] as const;
+// `list` (bulk enumeration) stays dreamer-only. Memory verification (file
+// mapping) and classification are no longer tool actions — the verify and
+// classify dreamer tasks apply them host-side from a manifest.
+const ALL_ACTIONS = ["write", "archive", "update", "merge", "list"] as const;
 type CtxMemoryAction = (typeof ALL_ACTIONS)[number];
 
-const DREAMER_ONLY_ACTIONS: ReadonlySet<CtxMemoryAction> = new Set([
-	"list",
-	"verified",
-	"classify",
-]);
-const CLASSIFY_SCOPES: readonly MemoryScope[] = [
-	"project",
-	"ecosystem",
-	"universe",
-];
+const DREAMER_ONLY_ACTIONS: ReadonlySet<CtxMemoryAction> = new Set(["list"]);
 
 const ParamsSchema = Type.Object({
 	action: Type.Union(
 		ALL_ACTIONS.map((a) => Type.Literal(a)),
 		{
-			description:
-				"What to do: write, update, archive, merge, list, verified, or classify",
+			description: "What to do: write, update, archive, merge, or list",
 		},
 	),
 	content: Type.Optional(
@@ -150,38 +127,6 @@ const ParamsSchema = Type.Object({
 	reason: Type.Optional(
 		Type.String({
 			description: "Why the memory is being archived (optional, recommended)",
-		}),
-	),
-	files: Type.Optional(
-		Type.Array(Type.String(), {
-			description:
-				"verified: COMPLETE current backing-file set; [] records a file-independent memory",
-		}),
-	),
-	verified_files: Type.Optional(
-		Type.Array(Type.String(), {
-			description:
-				"update/archive: COMPLETE backing-file set to record with the mutation; [] records a file-independent memory",
-		}),
-	),
-	importance: Type.Optional(
-		Type.Number({
-			description: "classify: durable importance score (clamped 1-100)",
-		}),
-	),
-	scope: Type.Optional(
-		Type.Union(
-			[
-				Type.Literal("project"),
-				Type.Literal("ecosystem"),
-				Type.Literal("universe"),
-			],
-			{ description: "classify: memory scope" },
-		),
-	),
-	shareable: Type.Optional(
-		Type.Boolean({
-			description: "classify: whether this memory is safe to share with a team",
 		}),
 	),
 });
@@ -265,6 +210,12 @@ function updateMemoryContentInCurrentTransaction(
 	if (hasMemoryShareableColumn(db)) {
 		db.prepare("UPDATE memories SET shareable = 0 WHERE id = ?").run(memory.id);
 	}
+	// Clear the classify marker so the changed fact is re-scored next classify run.
+	if (hasMemoryClassifiedAtColumn(db)) {
+		db.prepare("UPDATE memories SET classified_at = NULL WHERE id = ?").run(
+			memory.id,
+		);
+	}
 	db.prepare("DELETE FROM memory_embeddings WHERE memory_id = ?").run(
 		memory.id,
 	);
@@ -321,7 +272,7 @@ export function createCtxMemoryTool(
 ): ToolDefinition<typeof ParamsSchema> {
 	const dreamerAllowed = deps.allowDreamerActions === true;
 	const description = dreamerAllowed
-		? `${CTX_MEMORY_DESCRIPTION}\n- list: enumerate stored memories (maintenance sessions).\n- verified: record COMPLETE backing-file sets.\n- classify: set importance/scope/shareable without mutating cached prompt state.`
+		? `${CTX_MEMORY_DESCRIPTION}\n- list: enumerate stored memories (maintenance sessions).`
 		: CTX_MEMORY_DESCRIPTION;
 
 	return {
@@ -466,103 +417,6 @@ export function createCtxMemoryTool(
 				return ok(formatMemoryList(filtered2.slice(0, limit)));
 			}
 
-			if (params.action === "verified") {
-				const ids = params.ids;
-				if (!ids || ids.length === 0 || !ids.every(Number.isInteger)) {
-					return err(
-						"Error: 'ids' must contain at least one integer memory ID when action is 'verified'.",
-					);
-				}
-				if (!Array.isArray(params.files)) {
-					return err(
-						"Error: 'files' is required when action is 'verified' (use [] for file-independent memories).",
-					);
-				}
-				const memoryIds = [...new Set(ids)];
-				for (const memoryId of memoryIds) {
-					const memory = getMemoryById(deps.db, memoryId);
-					if (!memory || !memoryVisibleToTool(memory)) {
-						return err(`Error: Memory with ID ${memoryId} was not found.`);
-					}
-				}
-
-				const plan = await prepareMemoryVerificationRecording({
-					db: deps.db,
-					cwd: ctx.cwd,
-					projectIdentity,
-					memoryIds,
-					rawFiles: params.files,
-				});
-				if (!plan.hasValidFilesOrSentinel) {
-					return err(
-						`Error: No valid verification files were recorded. Use files=[] only for genuinely file-independent memories.${plan.warnings.length ? `\nWarnings:\n- ${plan.warnings.join("\n- ")}` : ""}`,
-					);
-				}
-				const now = Date.now();
-				const recorded = runImmediateTransaction(deps.db, () =>
-					writePlannedMemoryVerificationRecords(deps.db, plan.records, now),
-				);
-				return ok(
-					JSON.stringify({
-						recorded,
-						memory_ids: memoryIds,
-						...(plan.warnings.length ? { warnings: plan.warnings } : {}),
-					}),
-				);
-			}
-
-			if (params.action === "classify") {
-				const ids = params.ids;
-				if (!ids || ids.length === 0 || !ids.every(Number.isInteger)) {
-					return err(
-						"Error: 'ids' must contain at least one integer memory ID when action is 'classify'.",
-					);
-				}
-				if (
-					params.importance === undefined &&
-					params.scope === undefined &&
-					params.shareable === undefined
-				) {
-					return err(
-						"Error: At least one of 'importance', 'scope', or 'shareable' is required when action is 'classify'.",
-					);
-				}
-				const importance =
-					params.importance === undefined
-						? undefined
-						: Math.max(1, Math.min(100, Math.round(params.importance)));
-				const scope = params.scope as MemoryScope | undefined;
-				if (scope !== undefined && !CLASSIFY_SCOPES.includes(scope)) {
-					return err(`Error: Unknown memory scope '${String(params.scope)}'.`);
-				}
-				const memoryIds = [...new Set(ids)];
-				let classified = 0;
-				for (const memoryId of memoryIds) {
-					const memory = getMemoryById(deps.db, memoryId);
-					if (
-						!memory ||
-						!storedPathBelongsToIdentity(memory.projectPath, projectIdentity)
-					) {
-						return err(`Error: Memory with ID ${memoryId} was not found.`);
-					}
-					const shareable =
-						params.shareable === true &&
-						hasShareabilitySensitiveText(memory.content)
-							? false
-							: params.shareable;
-					if (
-						setMemoryClassification(deps.db, memory.id, {
-							importance,
-							scope,
-							shareable,
-						})
-					) {
-						classified += 1;
-					}
-				}
-				return ok(JSON.stringify({ classified }));
-			}
-
 			if (params.action === "update") {
 				const updateIds = params.ids;
 				if (updateIds?.length !== 1 || !updateIds.every(Number.isInteger)) {
@@ -598,18 +452,7 @@ export function createCtxMemoryTool(
 					);
 				}
 
-				const verificationPlan = Array.isArray(params.verified_files)
-					? await prepareMemoryVerificationRecording({
-							db: deps.db,
-							cwd: ctx.cwd,
-							projectIdentity,
-							memoryIds: [memory.id],
-							rawFiles: params.verified_files,
-						})
-					: null;
-
-				const now = Date.now();
-				const recorded = runImmediateTransaction(deps.db, () => {
+				runImmediateTransaction(deps.db, () => {
 					updateMemoryContentInCurrentTransaction(
 						deps.db,
 						memory,
@@ -623,13 +466,6 @@ export function createCtxMemoryTool(
 						category: memory.category,
 						newContent: content,
 					});
-					return verificationPlan?.hasValidFilesOrSentinel
-						? writePlannedMemoryVerificationRecords(
-								deps.db,
-								verificationPlan.records,
-								now,
-							)
-						: 0;
 				});
 				queueEmbedding({
 					deps,
@@ -637,16 +473,7 @@ export function createCtxMemoryTool(
 					memoryId: memory.id,
 					content,
 				});
-				const verificationSuffix = verificationPlan
-					? ` Verification rows recorded: ${recorded}.${
-							verificationPlan.warnings.length
-								? ` Warnings: ${verificationPlan.warnings.join("; ")}`
-								: ""
-						}`
-					: "";
-				return ok(
-					`Updated memory [ID: ${memory.id}] in ${memory.category}.${verificationSuffix}`,
-				);
+				return ok(`Updated memory [ID: ${memory.id}] in ${memory.category}.`);
 			}
 
 			if (params.action === "merge") {
@@ -909,18 +736,7 @@ export function createCtxMemoryTool(
 						projectIdentity: targetIdentityForStoredPath(memory.projectPath),
 					};
 				});
-				const verificationPlan = Array.isArray(params.verified_files)
-					? await prepareMemoryVerificationRecording({
-							db: deps.db,
-							cwd: ctx.cwd,
-							projectIdentity,
-							memoryIds: targets.map((target) => target.memoryId),
-							rawFiles: params.verified_files,
-						})
-					: null;
-
-				const now = Date.now();
-				const recorded = runImmediateTransaction(deps.db, () => {
+				runImmediateTransaction(deps.db, () => {
 					for (const target of targets) {
 						archiveMemory(deps.db, target.memoryId, params.reason);
 						queueMemoryMutation(deps.db, {
@@ -929,27 +745,11 @@ export function createCtxMemoryTool(
 							targetMemoryId: target.memoryId,
 						});
 					}
-					return verificationPlan?.hasValidFilesOrSentinel
-						? writePlannedMemoryVerificationRecords(
-								deps.db,
-								verificationPlan.records,
-								now,
-							)
-						: 0;
 				});
 				const reasonSuffix = params.reason ? ` (${params.reason})` : "";
 				const idList = archiveIds.join(", ");
 				const plural = archiveIds.length > 1 ? "memories" : "memory";
-				const verificationSuffix = verificationPlan
-					? ` Verification rows recorded: ${recorded}.${
-							verificationPlan.warnings.length
-								? ` Warnings: ${verificationPlan.warnings.join("; ")}`
-								: ""
-						}`
-					: "";
-				return ok(
-					`Archived ${plural} [ID: ${idList}]${reasonSuffix}.${verificationSuffix}`,
-				);
+				return ok(`Archived ${plural} [ID: ${idList}]${reasonSuffix}.`);
 			}
 
 			return err("Error: Unknown action.");

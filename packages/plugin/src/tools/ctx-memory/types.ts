@@ -6,16 +6,13 @@ import type { Database } from "../../shared/sqlite";
 // can target a specific memory to archive/update/merge in-session without
 // waiting for the dreamer. `archive` is the single soft-remove action (sets
 // status='archived'); the former `delete` action was an exact alias of it and
-// was removed. `list` (bulk enumeration), `verified` (backing-file side table),
-// and `classify` (dreamer metadata scoring) stay dreamer-only.
+// was removed. `list` (bulk enumeration) stays dreamer-only. Memory
+// verification (file mapping) and classification (importance/scope/shareable)
+// are no longer tool actions — the verify and classify dreamer tasks apply them
+// host-side from a manifest, so the agent never calls a tool for them.
 export const CTX_MEMORY_ACTIONS = ["write", "archive", "update", "merge"] as const;
 
-export const CTX_MEMORY_DREAMER_ACTIONS = [
-    ...CTX_MEMORY_ACTIONS,
-    "list",
-    "verified",
-    "classify",
-] as const;
+export const CTX_MEMORY_DREAMER_ACTIONS = [...CTX_MEMORY_ACTIONS, "list"] as const;
 
 export type CtxMemoryAction = (typeof CTX_MEMORY_DREAMER_ACTIONS)[number];
 
@@ -31,14 +28,6 @@ export interface CtxMemoryArgs {
     ids?: number[];
     limit?: number;
     reason?: string;
-    /** COMPLETE backing-file set for action='verified'. Empty array writes the no-file sentinel. */
-    files?: string[];
-    /** COMPLETE backing-file set to record while updating/archiving a memory. */
-    verified_files?: string[];
-    /** Classification fields for dreamer-only action='classify'. */
-    importance?: number;
-    scope?: "project" | "ecosystem" | "universe";
-    shareable?: boolean;
 }
 
 export interface CtxMemoryToolDeps {

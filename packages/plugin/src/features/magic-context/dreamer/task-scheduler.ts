@@ -8,7 +8,6 @@ import {
     getTaskScheduleState,
     pruneNonCanonicalTaskRows,
     seedTaskScheduleState,
-    setTaskCommitWatermark,
     writeTaskScheduleState,
 } from "./storage-task-schedule";
 import { evaluateTaskGate } from "./task-gates";
@@ -39,14 +38,8 @@ export interface TaskExecOutcome {
     transient?: boolean;
     error?: string;
     schedulePatch?: {
-        lastCheckedCommit?: string;
         /** retrospective content watermark (max message ts scanned this run). */
         retrospectiveWatermarkMs?: number | null;
-        /** Write the watermark to THIS task's row instead of the running task's.
-         *  verify-broad runs under its own row but advances the `verify` row's
-         *  commit watermark (the incremental gate + verification-recording read
-         *  it there). Defaults to the running task. */
-        watermarkTask?: DreamTaskName;
     };
 }
 
@@ -182,21 +175,13 @@ function advanceAfterRun(
     error: string | null,
     schedulePatch?: TaskExecOutcome["schedulePatch"],
 ): void {
-    // A watermark targeted at ANOTHER task's row (verify-broad → verify) is
-    // written there, NOT onto this task's row.
-    const watermarkTarget = schedulePatch?.watermarkTask;
-    const ownWatermark =
-        watermarkTarget && watermarkTarget !== due.config.task
-            ? undefined
-            : schedulePatch?.lastCheckedCommit;
-
     writeTaskScheduleState(db, {
         projectPath: projectIdentity,
         task: due.config.task,
         // last_run_at means "last SUCCESSFUL run" — the cutoff for "changed since"
-        // gates (verify / maintain-docs). A failed or skipped run did NOT
-        // process the work, so the cutoff must NOT advance past it (mirrors v1,
-        // where last_dream_at only advanced when a task succeeded).
+        // gates (maintain-docs). A failed or skipped run did NOT process the
+        // work, so the cutoff must NOT advance past it (mirrors v1, where
+        // last_dream_at only advanced when a task succeeded).
         lastRunAt:
             status === "completed"
                 ? finishedAt
@@ -206,22 +191,8 @@ function advanceAfterRun(
         lastStatus: status,
         lastError: error,
         retryCount: 0,
-        lastCheckedCommit: ownWatermark,
         retrospectiveWatermarkMs: schedulePatch?.retrospectiveWatermarkMs,
     });
-
-    if (
-        watermarkTarget &&
-        watermarkTarget !== due.config.task &&
-        schedulePatch?.lastCheckedCommit
-    ) {
-        setTaskCommitWatermark(
-            db,
-            projectIdentity,
-            watermarkTarget,
-            schedulePatch.lastCheckedCommit,
-        );
-    }
 }
 
 function readLastRunAt(db: Database, projectIdentity: string, task: DreamTaskName): number | null {

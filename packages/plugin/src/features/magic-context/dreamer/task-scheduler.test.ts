@@ -287,43 +287,22 @@ describe("task-scheduler — runDueTasksForProject", () => {
         expect(state?.nextDueAt).toBeGreaterThan(now);
     });
 
-    it("completed verify runs persist schedule watermark patches", async () => {
+    it("completed runs persist the retrospective content watermark patch", async () => {
         db = freshDb();
         seedActiveMemory(db);
         const now = Date.now();
-        const tasks = [cfg("verify", "0 3 * * *")];
+        // curate is gateless, so the mocked executor (and its patch) always runs.
+        const tasks = [cfg("curate", "0 3 * * *")];
         planDueTasks(db, PROJECT, tasks, now);
-        forceDue(db, "verify", now);
+        forceDue(db, "curate", now);
 
         const executor = async (): Promise<TaskExecOutcome> => ({
             status: "completed",
-            schedulePatch: { lastCheckedCommit: "abc123" },
+            schedulePatch: { retrospectiveWatermarkMs: 1700000000000 },
         });
         await runDueTasksForProject({ db, projectIdentity: PROJECT, tasks, executor, now });
-        const state = getTaskScheduleState(db, PROJECT, "verify");
-        expect(state?.lastCheckedCommit).toBe("abc123");
-    });
-
-    it("verify-broad writes its commit watermark to the VERIFY row, not its own", async () => {
-        db = freshDb();
-        seedActiveMemory(db);
-        const now = Date.now();
-        const tasks = [cfg("verify-broad", "0 4 * * 0")];
-        planDueTasks(db, PROJECT, tasks, now);
-        forceDue(db, "verify-broad", now);
-
-        const executor = async (): Promise<TaskExecOutcome> => ({
-            status: "completed",
-            // verify-broad targets the verify row (the gate reads it there).
-            schedulePatch: { lastCheckedCommit: "broadhead", watermarkTask: "verify" },
-        });
-        await runDueTasksForProject({ db, projectIdentity: PROJECT, tasks, executor, now });
-
-        // verify row got the watermark; verify-broad's own row did NOT.
-        expect(getTaskScheduleState(db, PROJECT, "verify")?.lastCheckedCommit).toBe("broadhead");
-        expect(getTaskScheduleState(db, PROJECT, "verify-broad")?.lastCheckedCommit ?? null).toBe(
-            null,
-        );
+        const state = getTaskScheduleState(db, PROJECT, "curate");
+        expect(state?.retrospectiveWatermarkMs).toBe(1700000000000);
     });
 
     it("a busy domain lease defers its tasks (next_due unchanged, no run)", async () => {

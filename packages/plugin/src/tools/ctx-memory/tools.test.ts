@@ -1,18 +1,15 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { DREAMER_AGENT } from "../../agents/dreamer";
 import { SIDEKICK_AGENT } from "../../agents/sidekick";
 import {
     getMemoriesByProject,
     getMemoryById,
     getMemoryMutationsForRender,
-    getMemoryVerifications,
     getProjectState,
+    getUnclassifiedMemoryIds,
     insertMemory,
     normalizeStoredProjectPath,
+    setMemoryClassification,
 } from "../../features/magic-context";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
@@ -51,6 +48,7 @@ function createTestDb(): Database {
             expires_at              INTEGER,
             verification_status     TEXT    DEFAULT 'unverified',
             verified_at             INTEGER,
+            classified_at           INTEGER,
             superseded_by_memory_id INTEGER,
             merged_from             TEXT,
             metadata_json           TEXT,
@@ -169,26 +167,6 @@ function createTestDb(): Database {
 const toolContext = (sessionID = "ses-memory", agent = "general") =>
     ({ sessionID, agent, directory: "/repo/project" }) as never;
 
-function git(args: string[], cwd: string): string {
-    return execFileSync("git", args, {
-        cwd,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-    });
-}
-
-function makeGitRepo(): { dir: string; head: string } {
-    const dir = mkdtempSync(join(tmpdir(), "mc-ctx-memory-"));
-    git(["init"], dir);
-    git(["config", "user.email", "test@example.invalid"], dir);
-    git(["config", "user.name", "Magic Context Test"], dir);
-    writeFileSync(join(dir, "src.ts"), "export const value = 1;\n");
-    writeFileSync(join(dir, "keep.ts"), "export const keep = true;\n");
-    git(["add", "src.ts", "keep.ts"], dir);
-    git(["commit", "-m", "initial"], dir);
-    return { dir, head: git(["rev-parse", "HEAD"], dir).trim() };
-}
-
 const dreamerToolContext = (directory: string) =>
     ({ sessionID: "ses-dream", agent: DREAMER_AGENT, directory }) as never;
 
@@ -212,7 +190,6 @@ afterAll(() => {
 describe("createCtxMemoryTools", () => {
     let db: Database;
     let tools: ReturnType<typeof createCtxMemoryTools>;
-    let tempDirs: string[] = [];
 
     beforeEach(() => {
         db = createTestDb();
@@ -226,8 +203,6 @@ describe("createCtxMemoryTools", () => {
 
     afterEach(() => {
         closeQuietly(db);
-        for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
-        tempDirs = [];
     });
 
     describe("#given write action", () => {
@@ -1152,167 +1127,6 @@ describe("createCtxMemoryTools", () => {
         });
     });
 
-    describe("#given verified action", () => {
-        it("is dreamer-only and records complete tracked file sets", async () => {
-            const repo = makeGitRepo();
-            tempDirs.push(repo.dir);
-            const memory = insertMemory(db, {
-                projectPath: "/repo/project",
-                category: "CONFIG_VALUES",
-                content: "src.ts exports value.",
-            });
-
-            const primary = await tools.ctx_memory.execute(
-                { action: "verified", ids: [memory.id], files: ["src.ts"] },
-                toolContext("ses-primary", "general"),
-            );
-            expect(primary).toContain("not allowed");
-
-            const result = await tools.ctx_memory.execute(
-                { action: "verified", ids: [memory.id], files: ["src.ts"] },
-                dreamerToolContext(repo.dir),
-            );
-
-            expect(JSON.parse(result as string)).toMatchObject({
-                recorded: 1,
-                memory_ids: [memory.id],
-            });
-            expect(getMemoryVerifications(db, [memory.id]).get(memory.id)?.files).toEqual([
-                "src.ts",
-            ]);
-        });
-
-        it("writes the no-file sentinel only for explicit files=[]", async () => {
-            const repo = makeGitRepo();
-            tempDirs.push(repo.dir);
-            const memory = insertMemory(db, {
-                projectPath: "/repo/project",
-                category: "PROJECT_RULES",
-                content: "Prefer narrow tests.",
-            });
-
-            await tools.ctx_memory.execute(
-                { action: "verified", ids: [memory.id], files: [] },
-                dreamerToolContext(repo.dir),
-            );
-
-            const state = getMemoryVerifications(db, [memory.id]).get(memory.id);
-            expect(state?.files).toEqual([]);
-            expect(state?.hasSentinel).toBe(true);
-        });
-
-        it("normalizes from monorepo subdirectories and canonicalizes case-only paths", async () => {
-            const repo = makeGitRepo();
-            tempDirs.push(repo.dir);
-            mkdirSync(join(repo.dir, "packages", "app"), { recursive: true });
-            const memory = insertMemory(db, {
-                projectPath: "/repo/project",
-                category: "CONFIG_VALUES",
-                content: "src.ts exports value.",
-            });
-
-            const result = await tools.ctx_memory.execute(
-                { action: "verified", ids: [memory.id], files: ["../../SRC.ts"] },
-                dreamerToolContext(join(repo.dir, "packages", "app")),
-            );
-
-            expect(JSON.parse(result as string)).toMatchObject({ recorded: 1 });
-            expect(getMemoryVerifications(db, [memory.id]).get(memory.id)?.files).toEqual([
-                "src.ts",
-            ]);
-        });
-
-        it("rejects blank, escape, and untracked paths without collapsing to sentinel", async () => {
-            const repo = makeGitRepo();
-            tempDirs.push(repo.dir);
-            writeFileSync(join(repo.dir, "untracked.ts"), "export const x = 1;\n");
-            const memory = insertMemory(db, {
-                projectPath: "/repo/project",
-                category: "CONFIG_VALUES",
-                content: "untracked file backs this.",
-            });
-
-            const result = await tools.ctx_memory.execute(
-                {
-                    action: "verified",
-                    ids: [memory.id],
-                    files: ["", ".", "../escape.ts", "untracked.ts"],
-                },
-                dreamerToolContext(repo.dir),
-            );
-
-            expect(result).toContain("Error: No valid verification files");
-            expect(getMemoryVerifications(db, [memory.id]).has(memory.id)).toBe(false);
-        });
-
-        it("keeps unchanged live mappings when a complete-set call would drop them", async () => {
-            const repo = makeGitRepo();
-            tempDirs.push(repo.dir);
-            const memory = insertMemory(db, {
-                projectPath: "/repo/project",
-                category: "CONFIG_VALUES",
-                content: "src.ts and keep.ts back this memory.",
-            });
-            db.prepare(
-                "INSERT INTO task_schedule_state (project_path, task, last_checked_commit, last_broad_run_at, retry_count) VALUES (?, 'verify', ?, ?, 0)",
-            ).run("/repo/project", repo.head, Date.now());
-            await tools.ctx_memory.execute(
-                { action: "verified", ids: [memory.id], files: ["src.ts", "keep.ts"] },
-                dreamerToolContext(repo.dir),
-            );
-            writeFileSync(join(repo.dir, "src.ts"), "export const value = 2;\n");
-
-            const result = await tools.ctx_memory.execute(
-                { action: "verified", ids: [memory.id], files: ["src.ts"] },
-                dreamerToolContext(repo.dir),
-            );
-
-            expect(result).toContain("Kept existing verification mapping");
-            expect(getMemoryVerifications(db, [memory.id]).get(memory.id)?.files).toEqual([
-                "keep.ts",
-                "src.ts",
-            ]);
-        });
-
-        it("records verified_files on update and archive", async () => {
-            const repo = makeGitRepo();
-            tempDirs.push(repo.dir);
-            const updated = insertMemory(db, {
-                projectPath: "/repo/project",
-                category: "CONFIG_VALUES",
-                content: "Old wording.",
-            });
-            const archived = insertMemory(db, {
-                projectPath: "/repo/project",
-                category: "CONFIG_VALUES",
-                content: "Stale wording.",
-            });
-
-            await tools.ctx_memory.execute(
-                {
-                    action: "update",
-                    ids: [updated.id],
-                    content: "src.ts exports value.",
-                    verified_files: ["src.ts"],
-                },
-                dreamerToolContext(repo.dir),
-            );
-            await tools.ctx_memory.execute(
-                {
-                    action: "archive",
-                    ids: [archived.id],
-                    reason: "stale",
-                    verified_files: ["keep.ts"],
-                },
-                dreamerToolContext(repo.dir),
-            );
-
-            const states = getMemoryVerifications(db, [updated.id, archived.id]);
-            expect(states.get(updated.id)?.files).toEqual(["src.ts"]);
-            expect(states.get(archived.id)?.files).toEqual(["keep.ts"]);
-        });
-    });
-
     describe("#given archive action", () => {
         it("archives the memory and stores the archive reason in metadata", async () => {
             const memory = insertMemory(db, {
@@ -1399,8 +1213,10 @@ describe("createCtxMemoryTools", () => {
             // The shared schema must still accept `list` (the runtime gate, not
             // the schema, blocks it for primary agents).
             expect(actionSchema.safeParse("list").success).toBe(true);
-            expect(actionSchema.safeParse("classify").success).toBe(true);
             expect(actionSchema.safeParse("merge").success).toBe(true);
+            // verified/classify are no longer tool actions (host-applied tasks).
+            expect(actionSchema.safeParse("classify").success).toBe(false);
+            expect(actionSchema.safeParse("verified").success).toBe(false);
         });
 
         it("rejects the dreamer-only `list` action for primary-agent tool instances", async () => {
@@ -1463,154 +1279,20 @@ describe("createCtxMemoryTools", () => {
         });
     });
 
-    describe("#given classify action", () => {
-        it("is dreamer-only and writes classification columns without mutation log or epoch bump", async () => {
-            const memory = insertMemory(db, {
-                projectPath: "/repo/project",
-                category: "CONSTRAINTS",
-                content: "Provider requests must include x-trace-id.",
-            });
-
-            const primary = await tools.ctx_memory.execute(
-                {
-                    action: "classify",
-                    ids: [memory.id],
-                    importance: 120,
-                    scope: "ecosystem",
-                    shareable: true,
-                },
-                toolContext("ses-primary", "general"),
-            );
-            expect(primary).toContain("not allowed");
-
-            const result = await tools.ctx_memory.execute(
-                {
-                    action: "classify",
-                    ids: [memory.id],
-                    importance: 120,
-                    scope: "ecosystem",
-                    shareable: true,
-                },
-                toolContext("ses-dreamer", DREAMER_AGENT),
-            );
-
-            expect(JSON.parse(result as string)).toEqual({ classified: 1 });
-            expect(getMemoryById(db, memory.id)).toMatchObject({
-                importance: 100,
-                scope: "ecosystem",
-                shareable: 1,
-            });
-            expect(getProjectMemoryEpoch(db, "/repo/project")).toBe(0);
-            expect(getMutationRows(db, "/repo/project", [memory.id])).toHaveLength(0);
-        });
-
-        it("is project-scoped and refuses workspace-visible foreign memories", async () => {
-            const foreign = insertMemory(db, {
-                projectPath: "/repo/other",
-                category: "PROJECT_RULES",
-                content: "Foreign project fact.",
-            });
-
-            const result = await tools.ctx_memory.execute(
-                { action: "classify", ids: [foreign.id], importance: 90 },
-                toolContext("ses-dreamer", DREAMER_AGENT),
-            );
-
-            expect(result).toContain(`Memory with ID ${foreign.id} was not found`);
-            expect(getMemoryById(db, foreign.id)?.importance).toBe(50);
-        });
-
-        it("fails closed on shareability-sensitive paths and skips no-op writes", async () => {
-            const memory = insertMemory(db, {
-                projectPath: "/repo/project",
-                category: "PROJECT_RULES",
-                content: "Debug output lives under /Users/alice/private/repo/logs.",
-            });
-            db.exec(`
-                CREATE TABLE memory_update_audit (id INTEGER PRIMARY KEY AUTOINCREMENT);
-                CREATE TRIGGER memory_update_audit_trg AFTER UPDATE ON memories BEGIN
-                    INSERT INTO memory_update_audit (id) VALUES (NULL);
-                END;
-            `);
-            db.prepare("UPDATE memories SET updated_at = 123 WHERE id = ?").run(memory.id);
-
-            const result = await tools.ctx_memory.execute(
-                {
-                    action: "classify",
-                    ids: [memory.id],
-                    importance: -5,
-                    scope: "universe",
-                    shareable: true,
-                },
-                toolContext("ses-dreamer", DREAMER_AGENT),
-            );
-            expect(JSON.parse(result as string)).toEqual({ classified: 1 });
-            expect(getMemoryById(db, memory.id)).toMatchObject({
-                importance: 1,
-                scope: "universe",
-                shareable: 0,
-            });
-            const beforeNoop = db
-                .prepare("SELECT COUNT(*) AS cnt FROM memory_update_audit")
-                .get() as {
-                cnt: number;
-            };
-
-            const noop = await tools.ctx_memory.execute(
-                {
-                    action: "classify",
-                    ids: [memory.id],
-                    importance: 1,
-                    scope: "universe",
-                    shareable: true,
-                },
-                toolContext("ses-dreamer", DREAMER_AGENT),
-            );
-            expect(JSON.parse(noop as string)).toEqual({ classified: 0 });
-            const row = db
-                .prepare("SELECT updated_at FROM memories WHERE id = ?")
-                .get(memory.id) as {
-                updated_at: number;
-            };
-            expect(row.updated_at).toBe(123);
-            const afterNoop = db
-                .prepare("SELECT COUNT(*) AS cnt FROM memory_update_audit")
-                .get() as {
-                cnt: number;
-            };
-            expect(afterNoop.cnt).toBe(beforeNoop.cnt);
-            expect(getMutationRows(db, "/repo/project", [memory.id])).toHaveLength(0);
-        });
-
-        it("requires at least one classification field", async () => {
-            const memory = insertMemory(db, {
-                projectPath: "/repo/project",
-                category: "PROJECT_RULES",
-                content: "Use focused tests for changed code.",
-            });
-
-            const result = await tools.ctx_memory.execute(
-                { action: "classify", ids: [memory.id] },
-                toolContext("ses-dreamer", DREAMER_AGENT),
-            );
-
-            expect(result).toContain("At least one of 'importance', 'scope', or 'shareable'");
-        });
-
-        it("an `update` to content RESETS a prior shareable=1 (fail closed on re-edit)", async () => {
+    describe("#given content update invalidates classification", () => {
+        it("an `update` to content RESETS a prior shareable=1 and clears classified_at (fail closed on re-edit)", async () => {
             const memory = insertMemory(db, {
                 projectPath: "/repo/project",
                 category: "PROJECT_RULES",
                 content: "Historian runs as a hidden subagent.",
             });
-            // Dreamer marks it shareable.
-            await tools.ctx_memory.execute(
-                { action: "classify", ids: [memory.id], shareable: true },
-                toolContext("ses-dreamer", DREAMER_AGENT),
-            );
+            // The classify task (host-side) had marked it shareable + classified.
+            setMemoryClassification(db, memory.id, { shareable: true, importance: 70 });
             expect(getMemoryById(db, memory.id)).toMatchObject({ shareable: 1 });
+            expect(getUnclassifiedMemoryIds(db, [memory.id])).toEqual([]); // classified
 
-            // A later content edit (primary agent) must invalidate the stale flag.
+            // A later content edit (primary agent) must invalidate the stale flag
+            // AND clear classified_at so the changed fact is re-scored.
             const res = await tools.ctx_memory.execute(
                 {
                     action: "update",
@@ -1621,6 +1303,7 @@ describe("createCtxMemoryTools", () => {
             );
             expect(res).not.toContain("Error");
             expect(getMemoryById(db, memory.id)).toMatchObject({ shareable: 0 });
+            expect(getUnclassifiedMemoryIds(db, [memory.id])).toEqual([memory.id]); // re-scorable
         });
     });
 });

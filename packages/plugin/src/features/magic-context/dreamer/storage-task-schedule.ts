@@ -25,7 +25,11 @@ export interface TaskScheduleStateRow {
     lastStatus: "completed" | "failed" | "skipped" | null;
     lastError: string | null;
     retryCount: number;
-    /** verify commit watermark captured at run start. Undefined on writes preserves existing DB value. */
+    /** LEGACY/INERT: the old verify commit watermark. Verify now gates per-memory
+     *  on each memory's own `verified_at` (map records the file→memory mapping
+     *  first), so no global commit watermark is written. Column kept (v43) to
+     *  avoid a DROP-COLUMN migration; field kept for a faithful round-trip. Do
+     *  NOT read it for new logic. */
     lastCheckedCommit?: string | null;
     /** LEGACY/INERT: the old internal broad-pass cadence watermark. Broad is now
      *  its own scheduled task (`verify-broad`); nothing writes a meaningful value.
@@ -214,24 +218,4 @@ export function recordRetrospectiveWindowProcessed(
     db.prepare(
         "INSERT INTO retrospective_processed_windows (project_path, window_key, processed_at) VALUES (?, ?, ?) ON CONFLICT(project_path, window_key) DO NOTHING",
     ).run(projectPath, windowKey, Date.now());
-}
-
-/**
- * Set ONLY the commit watermark on a task's row, leaving all its other schedule
- * fields untouched. Used by `verify-broad` to advance the `verify` row's
- * watermark without clobbering verify's own schedule/status. Seeds a minimal row
- * if the target task has never been scheduled. Safe under the shared memory lease
- * (verify and verify-broad serialize, so this is never a concurrent write).
- */
-export function setTaskCommitWatermark(
-    db: Database,
-    projectPath: string,
-    task: string,
-    commit: string,
-): void {
-    db.prepare(
-        `INSERT INTO task_schedule_state (project_path, task, last_checked_commit, retry_count)
-         VALUES (?, ?, ?, 0)
-         ON CONFLICT(project_path, task) DO UPDATE SET last_checked_commit = excluded.last_checked_commit`,
-    ).run(projectPath, task, commit);
 }
