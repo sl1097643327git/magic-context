@@ -4,7 +4,11 @@
  * Run: bun scripts/test-semantic-search.ts "your query"
  */
 import { Database } from "../src/shared/sqlite";
-import { ensureEmbeddingModel, embedText } from "../src/features/magic-context/memory/embedding";
+import {
+    ensureEmbeddingModel,
+    embedText,
+    getEmbeddingModelId,
+} from "../src/features/magic-context/memory/embedding";
 import { loadAllEmbeddings } from "../src/features/magic-context/memory/storage-memory-embeddings";
 import { cosineSimilarity } from "../src/features/magic-context/memory/embedding";
 
@@ -34,7 +38,7 @@ async function main() {
     const projectPath = rootHash ? `git:${rootHash}` : "";
     console.log(`Project: ${projectPath}`);
 
-    const allEmbeddings = loadAllEmbeddings(db, projectPath);
+    const allEmbeddings = loadAllEmbeddings(db, projectPath, getEmbeddingModelId());
     console.log(`Loaded ${allEmbeddings.size} embeddings\n`);
 
     // Compute similarities

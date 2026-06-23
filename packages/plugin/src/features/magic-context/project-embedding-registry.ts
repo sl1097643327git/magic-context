@@ -13,7 +13,6 @@ import {
     clearChunkEmbeddingsForProject,
     countSessionCompartmentEmbedCoverage,
     countUnembeddedSessionCompartments,
-    getDistinctChunkEmbeddingModelIds,
     loadUnembeddedCompartmentChunkCandidates,
     loadUnembeddedSessionChunkCandidates,
     normalizeCompartmentChunkMaxInputTokens,
@@ -23,7 +22,6 @@ import {
 import {
     clearProjectCommitEmbeddings,
     countEmbeddedCommits,
-    getDistinctCommitEmbeddingModelIds,
     loadUnembeddedCommits,
     saveCommitEmbedding,
 } from "./git-commits/storage-git-commit-embeddings";
@@ -40,7 +38,6 @@ import { OpenAICompatibleEmbeddingProvider } from "./memory/embedding-openai";
 import type { EmbeddingProvider, EmbeddingPurpose } from "./memory/embedding-provider";
 import {
     clearEmbeddingsForProject,
-    getDistinctStoredModelIds,
     getMemoryEmbedCoverage,
     saveEmbedding,
 } from "./memory/storage-memory-embeddings";
@@ -61,6 +58,7 @@ const COMMIT_DRAIN_BATCH_SIZE = 16;
 const COMMIT_DRAIN_MAX_PER_SWEEP = 500;
 const CHUNK_DRAIN_BATCH_SIZE = 8;
 const CHUNK_DRAIN_MAX_PER_SWEEP = 200;
+const EMBEDDING_IDENTITY_GC_GRACE_MS = 14 * 24 * 60 * 60 * 1000;
 // Hard cap on embedding-window texts sent in ONE provider call. Deliberately
 // SMALL: a local embedding endpoint (LMStudio/Ollama) runs one forward pass per
 // input, so batching many max_input_tokens-sized windows into a single request
@@ -138,8 +136,24 @@ interface UnembeddedMemoryRow {
     content: string;
 }
 
+type EmbeddingIdentityScope = "memory" | "commit" | "chunk";
+
+interface StaleIdentityRow {
+    modelId: string;
+}
+
 const projectRegistrations = new Map<string, ProjectEmbeddingRegistration>();
 const loadUnembeddedMemoriesStatements = new WeakMap<Database, PreparedStatement>();
+const upsertActiveIdentityStatements = new WeakMap<Database, PreparedStatement>();
+const backfillActiveIdentityStatements = new Map<
+    EmbeddingIdentityScope,
+    WeakMap<Database, PreparedStatement>
+>();
+const staleIdentityStatements = new Map<
+    EmbeddingIdentityScope,
+    WeakMap<Database, PreparedStatement>
+>();
+const deleteActiveIdentityStatements = new WeakMap<Database, PreparedStatement>();
 let globalRegistrationGeneration = 0;
 let projectSweepInProgress = false;
 let testProviderFactory: ((config: EmbeddingConfig) => EmbeddingProvider | null) | null = null;
@@ -303,54 +317,99 @@ function disposeProvider(provider: EmbeddingProvider | null): void {
     });
 }
 
-function anyStoredModelIdIsStale(storedIds: Set<string | null>, currentId: string): boolean {
-    if (storedIds.size === 0) return false;
-    for (const id of storedIds) {
-        if (id === null || id !== currentId) {
-            return true;
-        }
+function getUpsertActiveIdentityStatement(db: Database): PreparedStatement {
+    let stmt = upsertActiveIdentityStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare(
+            `INSERT INTO embedding_identity_active (project_path, scope, model_id, last_active_at)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(project_path, scope, model_id) DO UPDATE SET
+                 last_active_at = excluded.last_active_at`,
+        );
+        upsertActiveIdentityStatements.set(db, stmt);
     }
-    return false;
+    return stmt;
 }
 
-function maybeWipeStaleEmbeddings(
+function statementMapFor<T extends string>(
+    maps: Map<T, WeakMap<Database, PreparedStatement>>,
+    key: T,
+): WeakMap<Database, PreparedStatement> {
+    let map = maps.get(key);
+    if (!map) {
+        map = new WeakMap<Database, PreparedStatement>();
+        maps.set(key, map);
+    }
+    return map;
+}
+
+function getBackfillActiveIdentityStatement(
+    db: Database,
+    scope: EmbeddingIdentityScope,
+): PreparedStatement {
+    const map = statementMapFor(backfillActiveIdentityStatements, scope);
+    let stmt = map.get(db);
+    if (!stmt) {
+        const selectByScope: Record<EmbeddingIdentityScope, string> = {
+            memory: `SELECT DISTINCT e.model_id AS model_id
+                     FROM memory_embeddings e
+                     JOIN memories m ON m.id = e.memory_id
+                     WHERE m.project_path = ?`,
+            commit: `SELECT DISTINCT e.model_id AS model_id
+                     FROM git_commit_embeddings e
+                     JOIN git_commits c ON c.sha = e.sha
+                     WHERE c.project_path = ?`,
+            chunk: `SELECT DISTINCT e.model_id AS model_id
+                    FROM compartment_chunk_embeddings e
+                    WHERE e.project_path = ?`,
+        };
+        stmt = db.prepare(
+            `INSERT OR IGNORE INTO embedding_identity_active (project_path, scope, model_id, last_active_at)
+             SELECT ?, ?, model_id, ?
+             FROM (${selectByScope[scope]})
+             WHERE model_id IS NOT NULL`,
+        );
+        map.set(db, stmt);
+    }
+    return stmt;
+}
+
+function recordScopeActiveIdentity(
+    db: Database,
+    projectIdentity: string,
+    scope: EmbeddingIdentityScope,
+    modelId: string,
+    now: number,
+): void {
+    getUpsertActiveIdentityStatement(db).run(projectIdentity, scope, modelId, now);
+    getBackfillActiveIdentityStatement(db, scope).run(projectIdentity, scope, now, projectIdentity);
+}
+
+function recordActiveEmbeddingIdentity(
     db: Database,
     projectIdentity: string,
     currentProviderIdentity: string,
     currentChunkIdentity: string,
     features: EmbeddingFeatures,
-): boolean {
+): void {
     if (currentProviderIdentity === OFF_PROVIDER_IDENTITY) {
-        return false;
+        return;
     }
 
-    let wiped = false;
+    const now = Date.now();
     db.exec("BEGIN IMMEDIATE");
     try {
         if (features.memoryEnabled) {
-            const memoryIds = getDistinctStoredModelIds(db, projectIdentity);
-            if (anyStoredModelIdIsStale(memoryIds, currentProviderIdentity)) {
-                clearEmbeddingsForProject(db, projectIdentity);
-                invalidateProject(projectIdentity);
-                wiped = true;
-            }
+            recordScopeActiveIdentity(db, projectIdentity, "memory", currentProviderIdentity, now);
         }
 
         if (features.gitCommitEnabled) {
-            const commitIds = getDistinctCommitEmbeddingModelIds(db, projectIdentity);
-            if (anyStoredModelIdIsStale(commitIds, currentProviderIdentity)) {
-                clearProjectCommitEmbeddings(db, projectIdentity);
-                wiped = true;
-            }
+            recordScopeActiveIdentity(db, projectIdentity, "commit", currentProviderIdentity, now);
         }
 
         if (features.memoryEnabled) {
             repairMisScopedCompartmentChunkEmbeddingsForProject(db, projectIdentity);
-            const chunkIds = getDistinctChunkEmbeddingModelIds(db, projectIdentity);
-            if (anyStoredModelIdIsStale(chunkIds, currentChunkIdentity)) {
-                clearChunkEmbeddingsForProject(db, projectIdentity);
-                wiped = true;
-            }
+            recordScopeActiveIdentity(db, projectIdentity, "chunk", currentChunkIdentity, now);
         }
         db.exec("COMMIT");
     } catch (error) {
@@ -361,11 +420,144 @@ function maybeWipeStaleEmbeddings(
         }
         throw error;
     }
-
-    return wiped;
 }
 
-export function registerProjectEmbeddingAndMaybeWipe(
+function getStaleIdentityStatement(db: Database, scope: EmbeddingIdentityScope): PreparedStatement {
+    const map = statementMapFor(staleIdentityStatements, scope);
+    let stmt = map.get(db);
+    if (!stmt) {
+        stmt = db.prepare(
+            `SELECT model_id AS modelId
+             FROM embedding_identity_active
+             WHERE project_path = ?
+               AND scope = ?
+               AND model_id <> ?
+               AND last_active_at < ?`,
+        );
+        map.set(db, stmt);
+    }
+    return stmt;
+}
+
+function getDeleteActiveIdentityStatement(db: Database): PreparedStatement {
+    let stmt = deleteActiveIdentityStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare(
+            `DELETE FROM embedding_identity_active
+             WHERE project_path = ? AND scope = ? AND model_id = ?`,
+        );
+        deleteActiveIdentityStatements.set(db, stmt);
+    }
+    return stmt;
+}
+
+function staleModelsForScope(
+    db: Database,
+    projectIdentity: string,
+    scope: EmbeddingIdentityScope,
+    currentModelId: string,
+    cutoff: number,
+): string[] {
+    const rows = getStaleIdentityStatement(db, scope).all(
+        projectIdentity,
+        scope,
+        currentModelId,
+        cutoff,
+    ) as StaleIdentityRow[];
+    return rows.map((row) => row.modelId).filter((modelId) => typeof modelId === "string");
+}
+
+export interface StaleEmbeddingSweepResult {
+    memoryRowsDeleted: number;
+    commitRowsDeleted: number;
+    chunkRowsDeleted: number;
+    trackingRowsDeleted: number;
+}
+
+export function sweepStaleEmbeddingIdentitiesForProject(
+    db: Database,
+    projectIdentity: string,
+    now = Date.now(),
+): StaleEmbeddingSweepResult {
+    const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
+    const result: StaleEmbeddingSweepResult = {
+        memoryRowsDeleted: 0,
+        commitRowsDeleted: 0,
+        chunkRowsDeleted: 0,
+        trackingRowsDeleted: 0,
+    };
+    if (!snapshot) return result;
+
+    const cutoff = now - EMBEDDING_IDENTITY_GC_GRACE_MS;
+    const deleteTracking = getDeleteActiveIdentityStatement(db);
+    db.transaction(() => {
+        if (snapshot.enabled && snapshot.modelId !== "off") {
+            for (const modelId of staleModelsForScope(
+                db,
+                projectIdentity,
+                "memory",
+                snapshot.modelId,
+                cutoff,
+            )) {
+                result.memoryRowsDeleted += clearEmbeddingsForProject(db, projectIdentity, modelId);
+                result.trackingRowsDeleted += deleteTracking.run(
+                    projectIdentity,
+                    "memory",
+                    modelId,
+                ).changes;
+            }
+        }
+
+        if (snapshot.gitCommitEnabled && snapshot.modelId !== "off") {
+            for (const modelId of staleModelsForScope(
+                db,
+                projectIdentity,
+                "commit",
+                snapshot.modelId,
+                cutoff,
+            )) {
+                result.commitRowsDeleted += clearProjectCommitEmbeddings(
+                    db,
+                    projectIdentity,
+                    modelId,
+                );
+                result.trackingRowsDeleted += deleteTracking.run(
+                    projectIdentity,
+                    "commit",
+                    modelId,
+                ).changes;
+            }
+        }
+
+        if (snapshot.enabled && snapshot.chunkModelId !== "off") {
+            for (const modelId of staleModelsForScope(
+                db,
+                projectIdentity,
+                "chunk",
+                snapshot.chunkModelId,
+                cutoff,
+            )) {
+                result.chunkRowsDeleted += clearChunkEmbeddingsForProject(
+                    db,
+                    projectIdentity,
+                    modelId,
+                );
+                result.trackingRowsDeleted += deleteTracking.run(
+                    projectIdentity,
+                    "chunk",
+                    modelId,
+                ).changes;
+            }
+        }
+    })();
+
+    if (result.memoryRowsDeleted > 0) {
+        invalidateProject(projectIdentity);
+    }
+    return result;
+}
+
+export function registerProjectEmbedding(
     db: Database,
     projectIdentity: string,
     config: EmbeddingConfig,
@@ -382,20 +574,13 @@ export function registerProjectEmbeddingAndMaybeWipe(
         !prior.observationMode &&
         prior.runtimeFingerprint === runtimeFingerprint &&
         prior.providerIdentity === providerIdentity;
-    const wiped = maybeWipeStaleEmbeddings(
-        db,
-        projectIdentity,
-        providerIdentity,
-        chunkModelId,
-        features,
-    );
+    recordActiveEmbeddingIdentity(db, projectIdentity, providerIdentity, chunkModelId, features);
     const generationChanged =
         prior === undefined ||
         prior.observationMode ||
         prior.runtimeFingerprint !== runtimeFingerprint ||
         prior.chunkModelId !== chunkModelId ||
-        !sameFeatures(prior.features, features) ||
-        wiped;
+        !sameFeatures(prior.features, features);
     const generation = generationChanged ? ++globalRegistrationGeneration : prior.generation;
     const registration: ProjectEmbeddingRegistration = {
         projectIdentity,
@@ -570,7 +755,7 @@ function getLoadUnembeddedMemoriesStatement(db: Database): PreparedStatement {
     let stmt = loadUnembeddedMemoriesStatements.get(db);
     if (!stmt) {
         stmt = db.prepare(
-            "SELECT m.id AS id, m.content AS content FROM memories m LEFT JOIN memory_embeddings me ON m.id = me.memory_id WHERE m.project_path = ? AND m.status = 'active' AND me.memory_id IS NULL LIMIT ?",
+            "SELECT m.id AS id, m.content AS content FROM memories m LEFT JOIN memory_embeddings me ON m.id = me.memory_id AND me.model_id = ? WHERE m.project_path = ? AND m.status = 'active' AND me.memory_id IS NULL LIMIT ?",
         );
         loadUnembeddedMemoriesStatements.set(db, stmt);
     }
@@ -587,7 +772,7 @@ export async function embedUnembeddedMemoriesForProject(
 
     const normalizedBatchSize = Math.max(1, Math.floor(batchSize));
     const memories = getLoadUnembeddedMemoriesStatement(db)
-        .all(projectIdentity, normalizedBatchSize)
+        .all(snapshot.modelId, projectIdentity, normalizedBatchSize)
         .filter(isUnembeddedMemoryRow);
     if (memories.length === 0) return 0;
 
@@ -620,7 +805,14 @@ async function embedCommitBatch(
     projectIdentity: string,
     batchSize: number,
 ): Promise<number> {
-    const commits = loadUnembeddedCommits(db, projectIdentity, Math.max(1, Math.floor(batchSize)));
+    const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
+    if (!snapshot?.gitCommitEnabled) return 0;
+    const commits = loadUnembeddedCommits(
+        db,
+        projectIdentity,
+        snapshot.modelId,
+        Math.max(1, Math.floor(batchSize)),
+    );
     if (commits.length === 0) return 0;
 
     const result = await embedBatchForProject(
@@ -1147,7 +1339,7 @@ export function getEmbeddingCoverageStatus(
     const gitEnabled = snapshot.gitCommitEnabled;
     const commits = gitEnabled
         ? {
-              embedded: countEmbeddedCommits(db, projectIdentity),
+              embedded: countEmbeddedCommits(db, projectIdentity, snapshot.modelId),
               total: getCommitCount(db, projectIdentity),
               gitEnabled: true,
           }

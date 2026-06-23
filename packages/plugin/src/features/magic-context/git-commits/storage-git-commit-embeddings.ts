@@ -29,6 +29,7 @@ const loadProjectStatements = new WeakMap<Database, PreparedStatement>();
 const loadUnembeddedStatements = new WeakMap<Database, PreparedStatement>();
 const countEmbeddedStatements = new WeakMap<Database, PreparedStatement>();
 const clearProjectStatements = new WeakMap<Database, PreparedStatement>();
+const clearProjectModelStatements = new WeakMap<Database, PreparedStatement>();
 const distinctModelIdStatements = new WeakMap<Database, PreparedStatement>();
 
 function getSaveStatement(db: Database): PreparedStatement {
@@ -37,10 +38,9 @@ function getSaveStatement(db: Database): PreparedStatement {
         stmt = db.prepare(
             `INSERT INTO git_commit_embeddings (sha, embedding, model_id, created_at)
              VALUES (?, ?, ?, ?)
-             ON CONFLICT(sha) DO UPDATE SET
-                 embedding = excluded.embedding,
-                 model_id = excluded.model_id,
-                 created_at = excluded.created_at`,
+             ON CONFLICT(sha, model_id) DO UPDATE SET
+                  embedding = excluded.embedding,
+                  created_at = excluded.created_at`,
         );
         saveStatements.set(db, stmt);
     }
@@ -54,7 +54,7 @@ function getLoadProjectStatement(db: Database): PreparedStatement {
             `SELECT e.sha AS sha, e.embedding AS embedding, e.model_id AS model_id
              FROM git_commit_embeddings e
              JOIN git_commits c ON c.sha = e.sha
-             WHERE c.project_path = ?`,
+             WHERE c.project_path = ? AND e.model_id = ?`,
         );
         loadProjectStatements.set(db, stmt);
     }
@@ -67,7 +67,7 @@ function getLoadUnembeddedStatement(db: Database): PreparedStatement {
         stmt = db.prepare(
             `SELECT c.sha AS sha, c.message AS message
              FROM git_commits c
-             LEFT JOIN git_commit_embeddings e ON c.sha = e.sha
+             LEFT JOIN git_commit_embeddings e ON c.sha = e.sha AND e.model_id = ?
              WHERE c.project_path = ? AND e.sha IS NULL
              ORDER BY c.committed_at DESC
              LIMIT ?`,
@@ -82,7 +82,7 @@ function getCountEmbeddedStatement(db: Database): PreparedStatement {
     if (!stmt) {
         stmt = db.prepare(
             `SELECT COUNT(*) AS count FROM git_commit_embeddings e
-             JOIN git_commits c ON c.sha = e.sha WHERE c.project_path = ?`,
+             JOIN git_commits c ON c.sha = e.sha WHERE c.project_path = ? AND e.model_id = ?`,
         );
         countEmbeddedStatements.set(db, stmt);
     }
@@ -97,6 +97,18 @@ function getClearProjectStatement(db: Database): PreparedStatement {
              WHERE sha IN (SELECT sha FROM git_commits WHERE project_path = ?)`,
         );
         clearProjectStatements.set(db, stmt);
+    }
+    return stmt;
+}
+
+function getClearProjectModelStatement(db: Database): PreparedStatement {
+    let stmt = clearProjectModelStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare(
+            `DELETE FROM git_commit_embeddings
+             WHERE model_id = ? AND sha IN (SELECT sha FROM git_commits WHERE project_path = ?)`,
+        );
+        clearProjectModelStatements.set(db, stmt);
     }
     return stmt;
 }
@@ -128,8 +140,9 @@ export function saveCommitEmbedding(
 export function loadProjectCommitEmbeddings(
     db: Database,
     projectPath: string,
+    modelId: string,
 ): Map<string, Float32Array> {
-    const rows = getLoadProjectStatement(db).all(projectPath) as CommitEmbeddingRow[];
+    const rows = getLoadProjectStatement(db).all(projectPath, modelId) as CommitEmbeddingRow[];
     const map = new Map<string, Float32Array>();
     for (const row of rows) {
         const buffer = row.embedding.buffer.slice(
@@ -144,17 +157,27 @@ export function loadProjectCommitEmbeddings(
 export function loadUnembeddedCommits(
     db: Database,
     projectPath: string,
+    modelId: string,
     limit: number,
 ): Array<{ sha: string; message: string }> {
-    return getLoadUnembeddedStatement(db).all(projectPath, limit) as UnembeddedRow[];
+    return getLoadUnembeddedStatement(db).all(modelId, projectPath, limit) as UnembeddedRow[];
 }
 
-export function countEmbeddedCommits(db: Database, projectPath: string): number {
-    const row = getCountEmbeddedStatement(db).get(projectPath) as { count: number } | undefined;
+export function countEmbeddedCommits(db: Database, projectPath: string, modelId: string): number {
+    const row = getCountEmbeddedStatement(db).get(projectPath, modelId) as
+        | { count: number }
+        | undefined;
     return row?.count ?? 0;
 }
 
-export function clearProjectCommitEmbeddings(db: Database, projectPath: string): number {
+export function clearProjectCommitEmbeddings(
+    db: Database,
+    projectPath: string,
+    modelId?: string,
+): number {
+    if (modelId) {
+        return getClearProjectModelStatement(db).run(modelId, projectPath).changes;
+    }
     return getClearProjectStatement(db).run(projectPath).changes;
 }
 

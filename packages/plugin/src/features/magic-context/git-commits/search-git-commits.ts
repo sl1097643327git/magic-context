@@ -99,6 +99,8 @@ export interface SearchGitCommitsOptions {
     singleSourcePenalty?: number;
     /** Pre-computed query embedding. When omitted, we skip the semantic pass. */
     queryEmbedding?: Float32Array | null;
+    /** ID of the model that generated queryEmbedding; commit vectors are read only from the same model space. */
+    queryModelId?: string | null;
 }
 
 function clamp01(value: number): number {
@@ -161,8 +163,8 @@ export function searchGitCommitsSync(
 
     // ---- Semantic pass --------------------------------------------------
     const semanticScores = new Map<string, number>();
-    if (options.queryEmbedding) {
-        const embeddings = loadProjectCommitEmbeddings(db, projectPath);
+    if (options.queryEmbedding && options.queryModelId && options.queryModelId !== "off") {
+        const embeddings = loadProjectCommitEmbeddings(db, projectPath, options.queryModelId);
         for (const [sha, embedding] of embeddings.entries()) {
             const similarity = clamp01(cosineSimilarity(options.queryEmbedding, embedding));
             if (similarity > 0) {

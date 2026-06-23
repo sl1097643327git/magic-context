@@ -144,7 +144,9 @@ function getExistingHashStatement(db: Database, scopedToProject: boolean): Prepa
 function getDeleteByCompartmentStatement(db: Database): PreparedStatement {
     let stmt = deleteByCompartmentStatements.get(db);
     if (!stmt) {
-        stmt = db.prepare("DELETE FROM compartment_chunk_embeddings WHERE compartment_id = ?");
+        stmt = db.prepare(
+            "DELETE FROM compartment_chunk_embeddings WHERE compartment_id = ? AND model_id = ?",
+        );
         deleteByCompartmentStatements.set(db, stmt);
     }
     return stmt;
@@ -553,9 +555,10 @@ export function replaceCompartmentChunkEmbeddings(
 ): void {
     if (rows.length === 0) return;
     const compartmentId = rows[0].compartmentId;
+    const modelId = rows[0].modelId;
     const now = Date.now();
     db.transaction(() => {
-        getDeleteByCompartmentStatement(db).run(compartmentId);
+        getDeleteByCompartmentStatement(db).run(compartmentId, modelId);
         const insert = getInsertEmbeddingStatement(db);
         for (const row of rows) {
             insert.run(
@@ -599,15 +602,16 @@ export function loadCompartmentChunkEmbeddingsForSearch(
     db: Database,
     sessionId: string,
     projectPath: string,
-    modelId?: string | null,
+    modelId: string,
 ): StoredCompartmentChunkEmbedding[] {
-    const rows = modelId
-        ? (getSearchRowsStatement(db, true).all(
-              sessionId,
-              projectPath,
-              modelId,
-          ) as SearchChunkRow[])
-        : (getSearchRowsStatement(db, false).all(sessionId, projectPath) as SearchChunkRow[]);
+    if (!modelId) {
+        throw new Error("loadCompartmentChunkEmbeddingsForSearch requires a current model id");
+    }
+    const rows = getSearchRowsStatement(db, true).all(
+        sessionId,
+        projectPath,
+        modelId,
+    ) as SearchChunkRow[];
     return rows
         .filter(
             (row) =>

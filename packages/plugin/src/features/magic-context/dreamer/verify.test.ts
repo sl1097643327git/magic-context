@@ -80,7 +80,7 @@ describe("applyVerifyManifest", () => {
             });
             recordMemoryVerifications(db, memory.id, ["src/old.ts"], 1_000);
             saveEmbedding(db, memory.id, new Float32Array([1, 2, 3, 4]), "model-a");
-            expect(getProjectEmbeddings(db, projectIdentity).has(memory.id)).toBe(true);
+            expect(getProjectEmbeddings(db, projectIdentity, "model-a").has(memory.id)).toBe(true);
 
             const result = await applyVerifyManifest(
                 verifyArgs(db, dir, projectIdentity),
@@ -98,8 +98,8 @@ describe("applyVerifyManifest", () => {
             expect(result).toEqual({ verified: 0, updated: 1, archived: 0 });
             expect(getMemoryById(db, memory.id)?.content).toBe("New value lives in src/new.ts.");
             expect(getMemoryVerifications(db, [memory.id]).has(memory.id)).toBe(false);
-            expect(loadAllEmbeddings(db, projectIdentity).has(memory.id)).toBe(false);
-            expect(peekProjectEmbeddings(projectIdentity)?.has(memory.id)).toBe(false);
+            expect(loadAllEmbeddings(db, projectIdentity, "model-a").has(memory.id)).toBe(false);
+            expect(peekProjectEmbeddings(projectIdentity, "model-a")?.has(memory.id)).toBe(false);
         } finally {
             closeQuietly(db);
         }

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { loadPluginConfig } from "./index";
+import { loadPluginConfig, loadPluginConfigDetailed } from "./index";
 
 /**
  * Writes a magic-context.jsonc file inside a fresh temp XDG_CONFIG_HOME tree
@@ -69,7 +69,11 @@ function loadWithUserAndProjectConfig(
     fs.mkdirSync(configDir, { recursive: true });
     fs.mkdirSync(join(projectDir, ".cortexkit"), { recursive: true });
     writeFileSync(join(configDir, "magic-context.jsonc"), userConfigText, "utf-8");
-    writeFileSync(join(projectDir, ".cortexkit", "magic-context.jsonc"), projectConfigText, "utf-8");
+    writeFileSync(
+        join(projectDir, ".cortexkit", "magic-context.jsonc"),
+        projectConfigText,
+        "utf-8",
+    );
 
     const origXdg = process.env.XDG_CONFIG_HOME;
     const savedEnv: Record<string, string | undefined> = {};
@@ -105,6 +109,34 @@ function loadWithUserAndProjectConfig(
 }
 
 describe("loadPluginConfig — secret redaction", () => {
+    it("marks an unmigrated legacy project config as an untrusted load", () => {
+        const xdg = mkdtempSync(join(tmpdir(), "mc-config-test-"));
+        const home = mkdtempSync(join(tmpdir(), "mc-config-home-"));
+        const projectDir = mkdtempSync(join(tmpdir(), "mc-config-legacy-proj-"));
+        const origXdg = process.env.XDG_CONFIG_HOME;
+        const origHome = process.env.HOME;
+        process.env.XDG_CONFIG_HOME = xdg;
+        process.env.HOME = home;
+        writeFileSync(join(projectDir, "magic-context.jsonc"), '{"embedding":{"provider":"off"}}');
+        try {
+            const result = loadPluginConfigDetailed(projectDir);
+
+            expect(result.sources.projectConfig).toBe("legacy-config-unmigrated");
+            expect(result.loadOutcome).toBe("legacy-config-unmigrated");
+            expect(result.config.configWarnings?.join("\n")).toContain(
+                "legacy Magic Context config",
+            );
+        } finally {
+            if (origXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+            else process.env.XDG_CONFIG_HOME = origXdg;
+            if (origHome === undefined) delete process.env.HOME;
+            else process.env.HOME = origHome;
+            rmSync(xdg, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+            rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+            rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        }
+    });
+
     it("does NOT leak resolved env values through Zod validation warnings", () => {
         const secret = "sk-live-CARDINAL-SIN-IF-THIS-APPEARS-IN-LOGS";
         const config = JSON.stringify({

@@ -32,7 +32,10 @@ import {
     embedUnembeddedMemoriesForProject,
     getProjectEmbeddingSnapshot,
 } from "../features/magic-context/memory/embedding";
-import { drainCommitBacklogForProject } from "../features/magic-context/project-embedding-registry";
+import {
+    drainCommitBacklogForProject,
+    sweepStaleEmbeddingIdentitiesForProject,
+} from "../features/magic-context/project-embedding-registry";
 import { runDueCompiledSmartNoteChecks } from "../features/magic-context/smart-notes/runner";
 import { openDatabase, runSqliteOptimize } from "../features/magic-context/storage";
 import { getErrorMessage } from "../shared/error-message";
@@ -225,9 +228,7 @@ function runTick(origin: "startup" | "interval"): void {
                     // historical backfill runs on demand via /ctx-embed-history.
                 }
 
-                await reg.ensureRegistered(reg.directory, db);
-                const gitSnapshot = getProjectEmbeddingSnapshot(reg.projectIdentity);
-                await sweepProject(reg, origin, db, gitSnapshot?.gitCommitEnabled === true);
+                await sweepProject(reg, origin, db);
             }
             // Refresh planner stats once per tick (after per-project work).
             // Self-gating: a no-op unless a table's row count drifted enough to
@@ -251,7 +252,7 @@ async function sweepProject(
     reg: ProjectRegistration,
     origin: "startup" | "interval",
     db: Database,
-    gitCommitEnabled = getProjectEmbeddingSnapshot(reg.projectIdentity)?.gitCommitEnabled === true,
+    gitCommitEnabled?: boolean,
 ): Promise<void> {
     // Dead-directory guard: a registration whose directory no longer exists
     // (e.g. a finalized mason worktree) can't have meaningful dreamer work —
@@ -280,9 +281,21 @@ async function sweepProject(
         return;
     }
 
+    await reg.ensureRegistered(reg.directory, db);
+    const embeddingSnapshot = getProjectEmbeddingSnapshot(reg.projectIdentity);
+    const commitIndexingEnabled = gitCommitEnabled ?? embeddingSnapshot?.gitCommitEnabled === true;
+    const gc = sweepStaleEmbeddingIdentitiesForProject(db, reg.projectIdentity);
+    const gcDeleted = gc.memoryRowsDeleted + gc.commitRowsDeleted + gc.chunkRowsDeleted;
+    if (gcDeleted > 0) {
+        log(
+            `[magic-context] GC'd ${gcDeleted} stale embedding row(s) for ${reg.projectIdentity} ` +
+                `(memory=${gc.memoryRowsDeleted} commit=${gc.commitRowsDeleted} chunk=${gc.chunkRowsDeleted})`,
+        );
+    }
+
     const dreamerConfig = reg.dreamerConfig;
     const dreamingEnabled = Boolean(dreamerConfig && dreamerConfig.disable !== true);
-    if (gitCommitEnabled && reg.gitCommitIndexing) {
+    if (commitIndexingEnabled && reg.gitCommitIndexing) {
         await sweepGitCommits({
             directory: reg.directory,
             gitCommitIndexing: reg.gitCommitIndexing,

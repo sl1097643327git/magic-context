@@ -19,6 +19,10 @@ import { appendCompartments, getCompartments, replaceSessionFacts } from "./comp
 import { getMemoryById, insertMemory, resetEmbeddingCacheForTests, saveEmbedding } from "./memory";
 import { ensureMessagesIndexed } from "./message-index";
 import { runMigrations } from "./migrations";
+import {
+    _resetProjectEmbeddingRegistryForTests,
+    registerProjectEmbedding,
+} from "./project-embedding-registry";
 import { unifiedSearch } from "./search";
 import { initializeDatabase } from "./storage-db";
 import { createPrimer } from "./storage-primers";
@@ -35,6 +39,7 @@ function seedCompartmentChunkEmbedding(
     sessionId: string,
     projectPath: string,
     vector: Float32Array,
+    modelId = "mock:model",
 ): number {
     appendCompartments(db, sessionId, [
         {
@@ -62,11 +67,21 @@ function seedCompartmentChunkEmbedding(
             sessionId,
             projectPath,
             window,
-            modelId: "mock:model",
+            modelId,
             vector,
         })),
     );
     return compartment.id;
+}
+
+function registerEmbeddingProject(db: Database, projectPath: string) {
+    return registerProjectEmbedding(
+        db,
+        projectPath,
+        { provider: "local", model: "mock-model" },
+        { memoryEnabled: true, gitCommitEnabled: true },
+        projectPath,
+    );
 }
 
 function createTestDb(): Database {
@@ -85,6 +100,7 @@ afterEach(() => {
     embeddingQueries.length = 0;
     rawMessagesBySession.clear();
     resetEmbeddingCacheForTests();
+    _resetProjectEmbeddingRegistryForTests();
 });
 
 describe("unifiedSearch", () => {
@@ -221,6 +237,45 @@ describe("unifiedSearch", () => {
             .sort((left, right) => left - right);
         expect(memoryIds).toEqual([own.id, foreignShared.id]);
         expect(memoryIds).not.toContain(foreignHidden.id);
+    });
+
+    it("ignores workspace memory vectors from inactive embedding models", async () => {
+        const snapshot = registerEmbeddingProject(db, "git:own");
+        db.exec(`
+            INSERT INTO workspaces (id, name, share_categories, created_at, updated_at)
+            VALUES (1, 'ws', NULL, 1, 1);
+            INSERT INTO workspace_members (workspace_id, project_path, display_name, display_path, added_at)
+            VALUES (1, 'git:own', 'Own', '/own', 1), (1, 'git:foreign', 'Foreign', '/foreign', 1);
+        `);
+        const own = insertMemory(db, {
+            projectPath: "git:own",
+            category: "NAMING",
+            content: "own semantic-only memory",
+        });
+        const foreign = insertMemory(db, {
+            projectPath: "git:foreign",
+            category: "NAMING",
+            content: "foreign stale-model memory",
+        });
+        saveEmbedding(db, own.id, new Float32Array([1, 0]), snapshot.modelId);
+        saveEmbedding(db, foreign.id, new Float32Array([1, 0]), "stale:model");
+        queryEmbedding = new Float32Array([1, 0]);
+
+        const results = await unifiedSearch(db, "ses-1", "git:own", "vector-only", {
+            limit: 10,
+            memoryEnabled: true,
+            embeddingEnabled: true,
+            readMessages,
+            embedQuery,
+            isEmbeddingRuntimeEnabled,
+            sources: ["memory"],
+        });
+
+        const memoryIds = results
+            .filter((result) => result.source === "memory")
+            .map((result) => result.memoryId);
+        expect(memoryIds).toContain(own.id);
+        expect(memoryIds).not.toContain(foreign.id);
     });
 
     it("maxMessageOrdinal=0 excludes every message (no compartment yet → whole tail is live)", async () => {
@@ -639,12 +694,13 @@ describe("unifiedSearch", () => {
     });
 
     it("falls back to full semantic search when FTS finds no matches", async () => {
+        const snapshot = registerEmbeddingProject(db, "/repo/project");
         const memory = insertMemory(db, {
             projectPath: "/repo/project",
             category: "ARCHITECTURE_DECISIONS",
             content: "alpha beta gamma",
         });
-        saveEmbedding(db, memory.id, new Float32Array([0, 1]), "mock:model");
+        saveEmbedding(db, memory.id, new Float32Array([0, 1]), snapshot.modelId);
         queryEmbedding = new Float32Array([0, 1]);
 
         const results = await unifiedSearch(
@@ -725,11 +781,13 @@ describe("unifiedSearch", () => {
             },
         ]);
         ensureMessagesIndexed(db, "ses-chunk", readMessages);
+        const snapshot = registerEmbeddingProject(db, "/repo/chunk");
         const compartmentId = seedCompartmentChunkEmbedding(
             db,
             "ses-chunk",
             "/repo/chunk",
             new Float32Array([0, 1]),
+            snapshot.chunkModelId,
         );
         queryEmbedding = new Float32Array([0, 1]);
 
@@ -770,7 +828,14 @@ describe("unifiedSearch", () => {
             },
         ]);
         ensureMessagesIndexed(db, "ses-dedup", readMessages);
-        seedCompartmentChunkEmbedding(db, "ses-dedup", "/repo/chunk", new Float32Array([0, 1]));
+        const snapshot = registerEmbeddingProject(db, "/repo/chunk");
+        seedCompartmentChunkEmbedding(
+            db,
+            "ses-dedup",
+            "/repo/chunk",
+            new Float32Array([0, 1]),
+            snapshot.chunkModelId,
+        );
         queryEmbedding = new Float32Array([0, 1]);
 
         const results = await unifiedSearch(db, "ses-dedup", "/repo/chunk", "bounded drains", {

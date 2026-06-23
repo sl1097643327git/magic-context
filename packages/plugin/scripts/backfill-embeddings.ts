@@ -15,7 +15,7 @@ import { loadPluginConfig } from "../src/config";
 import {
     embedBatchForProject,
     getProjectEmbeddingSnapshot,
-    registerProjectEmbeddingAndMaybeWipe,
+    registerProjectEmbedding,
 } from "../src/features/magic-context/memory/embedding";
 import { resolveProjectIdentity } from "../src/features/magic-context/memory/project-identity";
 import { saveEmbedding } from "../src/features/magic-context/memory/storage-memory-embeddings";
@@ -43,7 +43,7 @@ async function main() {
     const db = new Database(DB_PATH);
     db.exec("PRAGMA journal_mode=WAL");
     const config = loadPluginConfig(directory);
-    registerProjectEmbeddingAndMaybeWipe(
+    registerProjectEmbedding(
         db,
         projectIdentity,
         config.embedding,
@@ -54,20 +54,27 @@ async function main() {
         directory,
     );
 
-    // Find memories without embeddings (optionally filtered to one project)
+    const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
+    if (!snapshot?.enabled) {
+        console.error("Embedding is disabled for this project.");
+        db.close();
+        process.exit(1);
+    }
+
+    // Find memories without embeddings for the current model (optionally filtered to one project).
     const effectiveProject = projectFilter ?? projectIdentity;
     const query = effectiveProject
         ? `SELECT m.id, m.content, m.category, m.project_path
            FROM memories m
-           LEFT JOIN memory_embeddings me ON me.memory_id = m.id
+           LEFT JOIN memory_embeddings me ON me.memory_id = m.id AND me.model_id = ?
            WHERE m.status != 'deleted' AND me.memory_id IS NULL AND m.project_path = ?`
         : `SELECT m.id, m.content, m.category, m.project_path
            FROM memories m
-           LEFT JOIN memory_embeddings me ON me.memory_id = m.id
+           LEFT JOIN memory_embeddings me ON me.memory_id = m.id AND me.model_id = ?
            WHERE m.status != 'deleted' AND me.memory_id IS NULL`;
     const stmt = db.prepare(query);
     const allMemories = (
-        effectiveProject ? stmt.all(effectiveProject) : stmt.all()
+        effectiveProject ? stmt.all(snapshot.modelId, effectiveProject) : stmt.all(snapshot.modelId)
     ) as Array<{ id: number; content: string; category: string; project_path: string }>;
 
     console.log(
@@ -78,13 +85,6 @@ async function main() {
         console.log("Nothing to do.");
         db.close();
         return;
-    }
-
-    const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
-    if (!snapshot?.enabled) {
-        console.error("Embedding is disabled for this project.");
-        db.close();
-        process.exit(1);
     }
 
     // Batch embed for efficiency

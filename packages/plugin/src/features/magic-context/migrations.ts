@@ -29,6 +29,15 @@ function tableExists(db: Database, name: string): boolean {
     );
 }
 
+function assertForeignKeyIntegrity(db: Database): void {
+    const rows = db.prepare("PRAGMA foreign_key_check").all() as unknown[];
+    if (rows.length > 0) {
+        throw new Error(
+            `foreign_key_check failed after embedding table rebuild (${rows.length} violation(s))`,
+        );
+    }
+}
+
 const MIGRATIONS: Migration[] = [
     {
         version: 1,
@@ -1739,6 +1748,99 @@ const MIGRATIONS: Migration[] = [
             if (tableExists(db, "memories")) {
                 ensureColumn(db, "memories", "classified_at", "INTEGER");
             }
+        },
+    },
+    {
+        version: 49,
+        description: "per-model embedding coexistence and active identity tracking",
+        up: (db: Database) => {
+            if (tableExists(db, "memory_embeddings")) {
+                db.exec(`
+                    UPDATE memory_embeddings
+                    SET model_id = 'legacy:unknown'
+                    WHERE model_id IS NULL;
+
+                    DROP TABLE IF EXISTS memory_embeddings_v49_new;
+                    CREATE TABLE memory_embeddings_v49_new (
+                        memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+                        embedding BLOB NOT NULL,
+                        model_id TEXT NOT NULL,
+                        PRIMARY KEY(memory_id, model_id)
+                    );
+                    INSERT INTO memory_embeddings_v49_new (memory_id, embedding, model_id)
+                    SELECT memory_id, embedding, model_id
+                    FROM memory_embeddings;
+                    DROP TABLE memory_embeddings;
+                    ALTER TABLE memory_embeddings_v49_new RENAME TO memory_embeddings;
+                `);
+                assertForeignKeyIntegrity(db);
+            }
+
+            if (tableExists(db, "git_commit_embeddings")) {
+                db.exec(`
+                    DROP TABLE IF EXISTS git_commit_embeddings_v49_new;
+                    CREATE TABLE git_commit_embeddings_v49_new (
+                        sha TEXT NOT NULL,
+                        embedding BLOB NOT NULL,
+                        model_id TEXT NOT NULL,
+                        created_at INTEGER NOT NULL,
+                        PRIMARY KEY(sha, model_id),
+                        FOREIGN KEY(sha) REFERENCES git_commits(sha) ON DELETE CASCADE
+                    );
+                    INSERT INTO git_commit_embeddings_v49_new (sha, embedding, model_id, created_at)
+                    SELECT sha, embedding, model_id, created_at
+                    FROM git_commit_embeddings;
+                    DROP TABLE git_commit_embeddings;
+                    ALTER TABLE git_commit_embeddings_v49_new RENAME TO git_commit_embeddings;
+                `);
+                assertForeignKeyIntegrity(db);
+            }
+
+            if (tableExists(db, "compartment_chunk_embeddings")) {
+                db.exec(`
+                    DROP INDEX IF EXISTS idx_cce_session;
+                    DROP INDEX IF EXISTS idx_cce_project_model;
+                    DROP TABLE IF EXISTS compartment_chunk_embeddings_v49_new;
+                    CREATE TABLE compartment_chunk_embeddings_v49_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        compartment_id INTEGER NOT NULL REFERENCES compartments(id) ON DELETE CASCADE,
+                        session_id TEXT NOT NULL,
+                        project_path TEXT NOT NULL,
+                        harness TEXT NOT NULL DEFAULT 'opencode',
+                        window_index INTEGER NOT NULL DEFAULT 0,
+                        start_ordinal INTEGER NOT NULL,
+                        end_ordinal INTEGER NOT NULL,
+                        chunk_hash TEXT NOT NULL,
+                        model_id TEXT NOT NULL,
+                        dims INTEGER NOT NULL,
+                        vector BLOB NOT NULL,
+                        created_at INTEGER NOT NULL,
+                        UNIQUE(compartment_id, model_id, window_index)
+                    );
+                    INSERT INTO compartment_chunk_embeddings_v49_new (
+                        id, compartment_id, session_id, project_path, harness, window_index,
+                        start_ordinal, end_ordinal, chunk_hash, model_id, dims, vector, created_at
+                    )
+                    SELECT id, compartment_id, session_id, project_path, harness, window_index,
+                           start_ordinal, end_ordinal, chunk_hash, model_id, dims, vector, created_at
+                    FROM compartment_chunk_embeddings;
+                    DROP TABLE compartment_chunk_embeddings;
+                    ALTER TABLE compartment_chunk_embeddings_v49_new RENAME TO compartment_chunk_embeddings;
+                    CREATE INDEX IF NOT EXISTS idx_cce_session ON compartment_chunk_embeddings(session_id);
+                    CREATE INDEX IF NOT EXISTS idx_cce_project_model ON compartment_chunk_embeddings(project_path, model_id);
+                `);
+                assertForeignKeyIntegrity(db);
+            }
+
+            db.exec(`
+                CREATE TABLE IF NOT EXISTS embedding_identity_active (
+                    project_path TEXT NOT NULL,
+                    scope TEXT NOT NULL CHECK(scope IN ('memory', 'commit', 'chunk')),
+                    model_id TEXT NOT NULL,
+                    last_active_at INTEGER NOT NULL,
+                    PRIMARY KEY(project_path, scope, model_id)
+                );
+            `);
         },
     },
 ];

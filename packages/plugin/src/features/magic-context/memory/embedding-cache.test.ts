@@ -43,17 +43,17 @@ describe("embedding-cache", () => {
 
         saveEmbedding(db, memory.id, new Float32Array([1, 0]), "mock:model");
 
-        const initial = getProjectEmbeddings(db, "/repo/project");
+        const initial = getProjectEmbeddings(db, "/repo/project", "mock:model");
         expect(toNumbers(initial.get(memory.id))).toEqual([1, 0]);
 
         saveEmbedding(db, memory.id, new Float32Array([0, 1]), "mock:model");
 
-        const beforeExpiry = getProjectEmbeddings(db, "/repo/project");
+        const beforeExpiry = getProjectEmbeddings(db, "/repo/project", "mock:model");
         expect(toNumbers(beforeExpiry.get(memory.id))).toEqual([1, 0]);
 
         await Bun.sleep(20);
 
-        const afterExpiry = getProjectEmbeddings(db, "/repo/project");
+        const afterExpiry = getProjectEmbeddings(db, "/repo/project", "mock:model");
         expect(toNumbers(afterExpiry.get(memory.id))).toEqual([0, 1]);
     });
 });

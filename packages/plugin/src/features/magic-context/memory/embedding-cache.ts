@@ -12,14 +12,21 @@ const projectEmbeddingCache = new Map<string, ProjectEmbeddingCacheEntry>();
 
 let embeddingCacheTtlMs = DEFAULT_EMBEDDING_CACHE_TTL_MS;
 
-function getValidCacheEntry(projectPath: string): ProjectEmbeddingCacheEntry | null {
-    const entry = projectEmbeddingCache.get(projectPath);
+function cacheKey(projectPath: string, modelId: string): string {
+    return `${projectPath}\0${modelId}`;
+}
+
+function getValidCacheEntry(
+    projectPath: string,
+    modelId: string,
+): ProjectEmbeddingCacheEntry | null {
+    const entry = projectEmbeddingCache.get(cacheKey(projectPath, modelId));
     if (!entry) {
         return null;
     }
 
     if (entry.expiresAt <= Date.now()) {
-        projectEmbeddingCache.delete(projectPath);
+        projectEmbeddingCache.delete(cacheKey(projectPath, modelId));
         return null;
     }
 
@@ -29,14 +36,15 @@ function getValidCacheEntry(projectPath: string): ProjectEmbeddingCacheEntry | n
 export function getProjectEmbeddings(
     db: Database,
     projectPath: string,
+    modelId: string,
 ): Map<number, StoredMemoryEmbedding> {
-    const cached = getValidCacheEntry(projectPath);
+    const cached = getValidCacheEntry(projectPath, modelId);
     if (cached) {
         return cached.embeddings;
     }
 
-    const embeddings = loadAllEmbeddings(db, projectPath);
-    projectEmbeddingCache.set(projectPath, {
+    const embeddings = loadAllEmbeddings(db, projectPath, modelId);
+    projectEmbeddingCache.set(cacheKey(projectPath, modelId), {
         embeddings,
         expiresAt: Date.now() + embeddingCacheTtlMs,
     });
@@ -45,17 +53,29 @@ export function getProjectEmbeddings(
 
 export function peekProjectEmbeddings(
     projectPath: string,
+    modelId: string,
 ): Map<number, StoredMemoryEmbedding> | null {
-    return getValidCacheEntry(projectPath)?.embeddings ?? null;
+    return getValidCacheEntry(projectPath, modelId)?.embeddings ?? null;
 }
 
 export function invalidateProject(projectPath: string): void {
-    projectEmbeddingCache.delete(projectPath);
+    for (const key of projectEmbeddingCache.keys()) {
+        if (key.startsWith(`${projectPath}\0`)) {
+            projectEmbeddingCache.delete(key);
+        }
+    }
 }
 
 export function invalidateMemory(projectPath: string, memoryId: number): void {
-    const cached = getValidCacheEntry(projectPath);
-    cached?.embeddings.delete(memoryId);
+    for (const key of projectEmbeddingCache.keys()) {
+        if (!key.startsWith(`${projectPath}\0`)) continue;
+        const entry = projectEmbeddingCache.get(key);
+        if (!entry || entry.expiresAt <= Date.now()) {
+            projectEmbeddingCache.delete(key);
+            continue;
+        }
+        entry.embeddings.delete(memoryId);
+    }
 }
 
 export function resetEmbeddingCacheForTests(): void {

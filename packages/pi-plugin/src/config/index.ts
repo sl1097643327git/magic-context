@@ -1,6 +1,7 @@
 import {
 	cortexKitProjectConfigBasePath,
 	cortexKitUserConfigBasePath,
+	resolveLegacyConfigSources,
 } from "@magic-context/core/config/migrate-config-location";
 import "@magic-context/core/config/prune-config-leaf";
 import { existsSync, readFileSync } from "node:fs";
@@ -34,6 +35,7 @@ export type LoadOutcome =
 	| "ok"
 	| "project-file-parse-error"
 	| "project-file-io-error"
+	| "legacy-config-unmigrated"
 	| "schema-recovery"
 	| "substitution-failure";
 
@@ -269,17 +271,35 @@ export function loadPiConfig(
 	const cwd = opts.cwd ?? process.cwd();
 	const loadedFiles: LoadedConfigFile[] = [];
 	const warnings: string[] = [];
+	const legacySources = resolveLegacyConfigSources(cwd);
 
 	const projectPath = resolveFirstExisting(getProjectConfigPaths(cwd));
 	if (projectPath) {
 		const loaded = loadConfigFile(projectPath, "project");
 		if (loaded) loadedFiles.push(loaded);
 	}
+	const legacyProjectUnmigrated =
+		!projectPath &&
+		legacySources.project.some((source) => existsSync(source.path));
 
 	const userPath = resolveFirstExisting(getUserConfigPaths());
 	if (userPath) {
 		const loaded = loadConfigFile(userPath, "user");
 		if (loaded) loadedFiles.push(loaded);
+	}
+	const legacyUserUnmigrated =
+		!userPath && legacySources.user.some((source) => existsSync(source.path));
+
+	if (legacyUserUnmigrated) {
+		warnings.push(
+			"[user config] legacy Magic Context config exists but the shared CortexKit config is absent; embedding registration is paused until config migration completes.",
+		);
+	}
+
+	if (legacyProjectUnmigrated) {
+		warnings.push(
+			"[project config] legacy Magic Context config exists but the shared CortexKit config is absent; embedding registration is paused until config migration completes.",
+		);
 	}
 
 	let rawConfig: Record<string, unknown> = {};
@@ -380,6 +400,8 @@ function combinedOutcome(args: {
 		return "project-file-parse-error";
 	if (sourceOutcomes.includes("project-file-io-error"))
 		return "project-file-io-error";
+	if (sourceOutcomes.includes("legacy-config-unmigrated"))
+		return "legacy-config-unmigrated";
 	if (args.recoveredTopLevelKeys.length > 0) return "schema-recovery";
 	if (args.substitutionFailures.length > 0) return "substitution-failure";
 	return "ok";
@@ -391,17 +413,35 @@ export function loadPiConfigDetailed(
 	const cwd = opts.cwd ?? process.cwd();
 	const loadedFiles: LoadedConfigFile[] = [];
 	const warnings: string[] = [];
+	const legacySources = resolveLegacyConfigSources(cwd);
 
 	const projectPath = resolveFirstExisting(getProjectConfigPaths(cwd));
 	if (projectPath) {
 		const loaded = loadConfigFile(projectPath, "project");
 		if (loaded) loadedFiles.push(loaded);
 	}
+	const legacyProjectUnmigrated =
+		!projectPath &&
+		legacySources.project.some((source) => existsSync(source.path));
 
 	const userPath = resolveFirstExisting(getUserConfigPaths());
 	if (userPath) {
 		const loaded = loadConfigFile(userPath, "user");
 		if (loaded) loadedFiles.push(loaded);
+	}
+	const legacyUserUnmigrated =
+		!userPath && legacySources.user.some((source) => existsSync(source.path));
+
+	if (legacyUserUnmigrated) {
+		warnings.push(
+			"[user config] legacy Magic Context config exists but the shared CortexKit config is absent; embedding registration is paused until config migration completes.",
+		);
+	}
+
+	if (legacyProjectUnmigrated) {
+		warnings.push(
+			"[project config] legacy Magic Context config exists but the shared CortexKit config is absent; embedding registration is paused until config migration completes.",
+		);
 	}
 
 	let rawConfig: Record<string, unknown> = {};
@@ -445,8 +485,16 @@ export function loadPiConfigDetailed(
 		(loaded) => loaded.scope === "project",
 	);
 	const sources = {
-		userConfig: userLoaded?.loadOutcome ?? ("ok" as LoadOutcome),
-		projectConfig: projectLoaded?.loadOutcome ?? ("ok" as LoadOutcome),
+		userConfig:
+			userLoaded?.loadOutcome ??
+			(legacyUserUnmigrated
+				? "legacy-config-unmigrated"
+				: ("ok" as LoadOutcome)),
+		projectConfig:
+			projectLoaded?.loadOutcome ??
+			(legacyProjectUnmigrated
+				? "legacy-config-unmigrated"
+				: ("ok" as LoadOutcome)),
 	};
 
 	return {

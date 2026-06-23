@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { getProjectEmbeddingSnapshot } from "@magic-context/core/features/magic-context/memory/embedding";
 import {
 	getProjectEmbeddings,
 	peekProjectEmbeddings,
@@ -24,15 +25,18 @@ describe("ensureProjectRegisteredFromPiDirectory", () => {
 			const projectIdentity = resolveProjectIdentity(directory);
 
 			await ensureProjectRegisteredFromPiDirectory(directory, db);
-			const cached = getProjectEmbeddings(db, projectIdentity);
-			cached.set(42, new Float32Array([1, 2, 3]));
+			const modelId =
+				getProjectEmbeddingSnapshot(projectIdentity)?.modelId ?? "off";
+			const cached = getProjectEmbeddings(db, projectIdentity, modelId);
+			cached.set(42, { embedding: new Float32Array([1, 2, 3]), modelId });
 
 			await ensureProjectRegisteredFromPiDirectory(directory, db);
 
-			expect(peekProjectEmbeddings(projectIdentity)).toBe(cached);
-			expect(peekProjectEmbeddings(projectIdentity)?.get(42)).toEqual(
-				new Float32Array([1, 2, 3]),
-			);
+			expect(peekProjectEmbeddings(projectIdentity, modelId)).toBe(cached);
+			expect(peekProjectEmbeddings(projectIdentity, modelId)?.get(42)).toEqual({
+				embedding: new Float32Array([1, 2, 3]),
+				modelId,
+			});
 		} finally {
 			resetEmbeddingCacheForTests();
 			if (oldHome === undefined) {

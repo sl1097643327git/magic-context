@@ -152,7 +152,7 @@ export async function embedUnembeddedCommits(db: Database, projectPath: string):
 
     try {
         while (Date.now() < deadline && total < EMBED_MAX_PER_SWEEP) {
-            const rows = loadUnembeddedCommits(db, projectPath, EMBED_BATCH_SIZE);
+            const rows = loadUnembeddedCommits(db, projectPath, snapshot.modelId, EMBED_BATCH_SIZE);
             if (rows.length === 0) break;
 
             let embeddedThisBatch = 0;
@@ -184,7 +184,7 @@ export async function embedUnembeddedCommits(db: Database, projectPath: string):
         }
 
         if (total > 0) {
-            const totalEmbedded = countEmbeddedCommits(db, projectPath);
+            const totalEmbedded = countEmbeddedCommits(db, projectPath, snapshot.modelId);
             log(
                 `[git-commits] embedded ${total} commits for ${projectPath} (total embedded: ${totalEmbedded})`,
             );

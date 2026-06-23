@@ -5,6 +5,7 @@ import { migrateLegacyAgentEnabledInMemory } from "./agent-disable";
 import {
     cortexKitProjectConfigBasePath,
     cortexKitUserConfigBasePath,
+    resolveLegacyConfigSources,
 } from "./migrate-config-location";
 import { migrateDreamerV2 } from "./migrate-dreamer-v2";
 import { migrateLegacyExperimental } from "./migrate-experimental";
@@ -52,6 +53,7 @@ export type LoadOutcome =
     | "ok"
     | "project-file-parse-error"
     | "project-file-io-error"
+    | "legacy-config-unmigrated"
     | "schema-recovery"
     | "substitution-failure";
 
@@ -504,6 +506,7 @@ function combinedOutcome(args: {
     const sourceOutcomes = Object.values(args.sources);
     if (sourceOutcomes.includes("project-file-parse-error")) return "project-file-parse-error";
     if (sourceOutcomes.includes("project-file-io-error")) return "project-file-io-error";
+    if (sourceOutcomes.includes("legacy-config-unmigrated")) return "legacy-config-unmigrated";
     if (args.recoveredTopLevelKeys.length > 0) return "schema-recovery";
     if (args.substitutionFailures.length > 0) return "substitution-failure";
     return "ok";
@@ -513,6 +516,13 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
     // Hard cutover — CortexKit paths only (see loadPluginConfig).
     const userDetected = detectConfigFile(getUserConfigBasePath());
     const projectDetected = detectConfigFile(getProjectConfigBasePath(directory));
+    const legacySources = resolveLegacyConfigSources(directory);
+    const legacyUserUnmigrated =
+        userDetected.format === "none" &&
+        legacySources.user.some((source) => existsSync(source.path));
+    const legacyProjectUnmigrated =
+        projectDetected.format === "none" &&
+        legacySources.project.some((source) => existsSync(source.path));
 
     const userLoaded =
         userDetected.format === "none" ? null : loadConfigFileDetailed(userDetected.path, "user");
@@ -523,6 +533,18 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
 
     const allWarnings: string[] = [];
     let mergedRaw: Record<string, unknown> = {};
+
+    if (legacyUserUnmigrated) {
+        allWarnings.push(
+            "[user config] legacy Magic Context config exists but the shared CortexKit config is absent; embedding registration is paused until config migration completes.",
+        );
+    }
+
+    if (legacyProjectUnmigrated) {
+        allWarnings.push(
+            "[project config] legacy Magic Context config exists but the shared CortexKit config is absent; embedding registration is paused until config migration completes.",
+        );
+    }
 
     if (userLoaded) {
         allWarnings.push(...userLoaded.warnings.map((w) => `[user config] ${w}`));
@@ -567,8 +589,12 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
         ...bindSubstitutionFailures(projectLoaded),
     ];
     const sources = {
-        userConfig: userLoaded?.outcome ?? ("ok" as LoadOutcome),
-        projectConfig: projectLoaded?.outcome ?? ("ok" as LoadOutcome),
+        userConfig:
+            userLoaded?.outcome ??
+            (legacyUserUnmigrated ? "legacy-config-unmigrated" : ("ok" as LoadOutcome)),
+        projectConfig:
+            projectLoaded?.outcome ??
+            (legacyProjectUnmigrated ? "legacy-config-unmigrated" : ("ok" as LoadOutcome)),
     };
 
     return {

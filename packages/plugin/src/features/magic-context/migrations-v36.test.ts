@@ -73,24 +73,52 @@ describe("migration v36 — session project ownership", () => {
             db.exec(`
                 CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, description TEXT NOT NULL, applied_at INTEGER NOT NULL);
                 INSERT INTO schema_migrations (version, description, applied_at) VALUES (35, 'pre-v36 fixture', 1);
-                CREATE TABLE compartment_chunk_embeddings (
-                    compartment_id INTEGER NOT NULL,
+                CREATE TABLE compartments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
                     session_id TEXT NOT NULL,
-                    harness TEXT NOT NULL DEFAULT 'opencode',
+                    sequence INTEGER NOT NULL,
+                    start_message INTEGER NOT NULL,
+                    end_message INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    UNIQUE(session_id, sequence)
+                );
+                INSERT INTO compartments (id, session_id, sequence, start_message, end_message, title, content, created_at)
+                VALUES
+                    (1, 'sesA', 0, 1, 2, 'A1', 'content', 1),
+                    (2, 'sesA', 1, 3, 4, 'A2', 'content', 1),
+                    (3, 'sesB', 0, 1, 2, 'B1', 'content', 1),
+                    (4, 'sesB', 1, 3, 4, 'B2', 'content', 1);
+                CREATE TABLE compartment_chunk_embeddings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    compartment_id INTEGER NOT NULL REFERENCES compartments(id) ON DELETE CASCADE,
+                    session_id TEXT NOT NULL,
                     project_path TEXT NOT NULL,
+                    harness TEXT NOT NULL DEFAULT 'opencode',
                     window_index INTEGER NOT NULL,
+                    start_ordinal INTEGER NOT NULL,
+                    end_ordinal INTEGER NOT NULL,
                     chunk_hash TEXT NOT NULL,
                     model_id TEXT NOT NULL,
-                    vector BLOB NOT NULL
+                    dims INTEGER NOT NULL,
+                    vector BLOB NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    UNIQUE(compartment_id, window_index)
                 );
                 -- clean single-project session (two windows, same project): seed it
-                INSERT INTO compartment_chunk_embeddings VALUES (1,'sesA','opencode','git:alpha',0,'h1','m',x'00');
-                INSERT INTO compartment_chunk_embeddings VALUES (1,'sesA','opencode','git:alpha',1,'h2','m',x'00');
+                INSERT INTO compartment_chunk_embeddings (compartment_id, session_id, project_path, harness, window_index, start_ordinal, end_ordinal, chunk_hash, model_id, dims, vector, created_at)
+                VALUES (1,'sesA','git:alpha','opencode',0,1,2,'h1','m',1,x'00',1);
+                INSERT INTO compartment_chunk_embeddings (compartment_id, session_id, project_path, harness, window_index, start_ordinal, end_ordinal, chunk_hash, model_id, dims, vector, created_at)
+                VALUES (1,'sesA','git:alpha','opencode',1,1,2,'h2','m',1,x'00',1);
                 -- same session id under a DIFFERENT harness: independent ownership row
-                INSERT INTO compartment_chunk_embeddings VALUES (2,'sesA','pi','git:beta',0,'h3','m',x'00');
+                INSERT INTO compartment_chunk_embeddings (compartment_id, session_id, project_path, harness, window_index, start_ordinal, end_ordinal, chunk_hash, model_id, dims, vector, created_at)
+                VALUES (2,'sesA','git:beta','pi',0,3,4,'h3','m',1,x'00',1);
                 -- ambiguous session (pre-scope bug split across two projects): skip
-                INSERT INTO compartment_chunk_embeddings VALUES (3,'sesB','opencode','git:gamma',0,'h4','m',x'00');
-                INSERT INTO compartment_chunk_embeddings VALUES (3,'sesB','opencode','git:delta',0,'h5','m',x'00');
+                INSERT INTO compartment_chunk_embeddings (compartment_id, session_id, project_path, harness, window_index, start_ordinal, end_ordinal, chunk_hash, model_id, dims, vector, created_at)
+                VALUES (3,'sesB','git:gamma','opencode',0,1,2,'h4','m',1,x'00',1);
+                INSERT INTO compartment_chunk_embeddings (compartment_id, session_id, project_path, harness, window_index, start_ordinal, end_ordinal, chunk_hash, model_id, dims, vector, created_at)
+                VALUES (4,'sesB','git:delta','opencode',0,3,4,'h5','m',1,x'00',1);
             `);
 
             runMigrations(db);

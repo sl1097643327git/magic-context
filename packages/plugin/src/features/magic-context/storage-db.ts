@@ -38,7 +38,7 @@ export function getSchemaFenceRejection(): {
     return lastSchemaFenceRejection;
 }
 
-export const LATEST_SUPPORTED_VERSION = 48;
+export const LATEST_SUPPORTED_VERSION = 49;
 
 // chmod is meaningless on Windows (POSIX modes are not honored), so all
 // permission tightening is skipped there. mkdir's `mode` is likewise ignored.
@@ -430,7 +430,7 @@ export function initializeDatabase(db: Database): void {
       dims INTEGER NOT NULL,
       vector BLOB NOT NULL,
       created_at INTEGER NOT NULL,
-      UNIQUE(compartment_id, window_index)
+      UNIQUE(compartment_id, model_id, window_index)
     );
     CREATE INDEX IF NOT EXISTS idx_cce_session ON compartment_chunk_embeddings(session_id);
     CREATE INDEX IF NOT EXISTS idx_cce_project_model ON compartment_chunk_embeddings(project_path, model_id);
@@ -594,9 +594,18 @@ export function initializeDatabase(db: Database): void {
       -- FK-cascade audit (v12): memory_embeddings.memory_id -> memories.id
       -- uses ON DELETE CASCADE, so SQLite PRAGMA foreign_keys must be ON on
       -- every connection and v12 cleans historical orphan rows.
-      memory_id INTEGER PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+      memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
       embedding BLOB NOT NULL,
-      model_id TEXT
+      model_id TEXT NOT NULL,
+      PRIMARY KEY(memory_id, model_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS embedding_identity_active (
+      project_path TEXT NOT NULL,
+      scope TEXT NOT NULL CHECK(scope IN ('memory', 'commit', 'chunk')),
+      model_id TEXT NOT NULL,
+      last_active_at INTEGER NOT NULL,
+      PRIMARY KEY(project_path, scope, model_id)
     );
 
     CREATE TABLE IF NOT EXISTS memory_verifications (

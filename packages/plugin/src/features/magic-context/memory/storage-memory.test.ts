@@ -62,9 +62,10 @@ function makeMemoryDatabase(): Database {
     );
 
     CREATE TABLE IF NOT EXISTS memory_embeddings (
-      memory_id INTEGER PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+      memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
       embedding BLOB NOT NULL,
-      model_id TEXT
+      model_id TEXT NOT NULL,
+      PRIMARY KEY(memory_id, model_id)
     );
 
     CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
@@ -239,7 +240,7 @@ describe("storage-memory", () => {
             const updated = getMemoryById(db, memory.id);
             expect(updated?.content).toBe("cache_ttl=10m");
             expect(updated?.normalizedHash).toBe(computeNormalizedHash("cache_ttl=10m"));
-            expect(loadAllEmbeddings(db, "/repo/project")).toEqual(new Map());
+            expect(loadAllEmbeddings(db, "/repo/project", "local:model-a")).toEqual(new Map());
         });
 
         it("#when cache-sensitive writes occur #then embedding cache invalidates updated project entries", () => {
@@ -252,7 +253,7 @@ describe("storage-memory", () => {
             });
             saveEmbedding(db, memory.id, new Float32Array([0.1, 0.2]), "local:model-a");
 
-            const initialCache = getProjectEmbeddings(db, "/repo/project");
+            const initialCache = getProjectEmbeddings(db, "/repo/project", "local:model-a");
             expect(Array.from(initialCache.get(memory.id)?.embedding ?? [])).toEqual(
                 Array.from(new Float32Array([0.1, 0.2])),
             );
@@ -264,7 +265,7 @@ describe("storage-memory", () => {
                 computeNormalizedHash("cache_ttl=10m"),
             );
 
-            const cacheAfterUpdate = getProjectEmbeddings(db, "/repo/project");
+            const cacheAfterUpdate = getProjectEmbeddings(db, "/repo/project", "local:model-a");
             expect(cacheAfterUpdate.has(memory.id)).toBeFalse();
 
             const secondMemory = insertMemory(db, {
@@ -274,12 +275,12 @@ describe("storage-memory", () => {
             });
             saveEmbedding(db, secondMemory.id, new Float32Array([0.3, 0.4]), "local:model-a");
 
-            const cacheAfterInsert = getProjectEmbeddings(db, "/repo/project");
+            const cacheAfterInsert = getProjectEmbeddings(db, "/repo/project", "local:model-a");
             expect(Array.from(cacheAfterInsert.keys())).toEqual([secondMemory.id]);
 
             deleteMemory(db, secondMemory.id);
 
-            expect(getProjectEmbeddings(db, "/repo/project")).toEqual(new Map());
+            expect(getProjectEmbeddings(db, "/repo/project", "local:model-a")).toEqual(new Map());
         });
     });
 
@@ -427,7 +428,7 @@ describe("storage-memory", () => {
             saveEmbedding(db, memoryA.id, new Float32Array([0.25, 0.5, 0.75]), "local:model-a");
             saveEmbedding(db, memoryB.id, new Float32Array([1, 2, 3]), "local:model-a");
 
-            const embeddings = loadAllEmbeddings(db, "/repo/project");
+            const embeddings = loadAllEmbeddings(db, "/repo/project", "local:model-a");
 
             expect(Array.from(embeddings.keys())).toEqual([memoryA.id]);
             expect(Array.from(embeddings.get(memoryA.id)?.embedding ?? [])).toEqual([
@@ -437,7 +438,7 @@ describe("storage-memory", () => {
 
             deleteEmbedding(db, memoryA.id);
 
-            expect(loadAllEmbeddings(db, "/repo/project")).toEqual(new Map());
+            expect(loadAllEmbeddings(db, "/repo/project", "local:model-a")).toEqual(new Map());
         });
 
         it("#when clearing all embeddings #then stored vectors and model id are removed", () => {
@@ -452,7 +453,7 @@ describe("storage-memory", () => {
 
             clearEmbeddingsForProject(db, "/repo/project");
 
-            expect(loadAllEmbeddings(db, "/repo/project")).toEqual(new Map());
+            expect(loadAllEmbeddings(db, "/repo/project", "local:model-b")).toEqual(new Map());
             expect(getStoredModelId(db, "/repo/project")).toBeNull();
         });
 
@@ -474,9 +475,9 @@ describe("storage-memory", () => {
 
             clearEmbeddingsForProject(db, "/repo/project-a");
 
-            expect(loadAllEmbeddings(db, "/repo/project-a")).toEqual(new Map());
+            expect(loadAllEmbeddings(db, "/repo/project-a", "local:model-x")).toEqual(new Map());
             expect(getStoredModelId(db, "/repo/project-a")).toBeNull();
-            expect(loadAllEmbeddings(db, "/repo/project-b").size).toBe(1);
+            expect(loadAllEmbeddings(db, "/repo/project-b", "local:model-x").size).toBe(1);
             expect(getStoredModelId(db, "/repo/project-b")).toBe("local:model-x");
         });
     });

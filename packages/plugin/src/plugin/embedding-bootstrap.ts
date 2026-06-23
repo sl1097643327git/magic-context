@@ -1,7 +1,7 @@
 import { loadPluginConfigDetailed } from "../config";
 import {
     type EmbeddingFeatures,
-    registerProjectEmbeddingAndMaybeWipe,
+    registerProjectEmbedding,
 } from "../features/magic-context/memory/embedding";
 import { invalidateProject } from "../features/magic-context/memory/embedding-cache";
 import { resolveProjectIdentity } from "../features/magic-context/memory/project-identity";
@@ -25,11 +25,5 @@ export async function ensureProjectRegisteredFromOpenCodeDirectory(
         memoryEnabled: detailed.config.memory.enabled,
         gitCommitEnabled: detailed.config.memory.git_commit_indexing.enabled,
     };
-    registerProjectEmbeddingAndMaybeWipe(
-        db,
-        projectIdentity,
-        detailed.config.embedding,
-        features,
-        directory,
-    );
+    registerProjectEmbedding(db, projectIdentity, detailed.config.embedding, features, directory);
 }

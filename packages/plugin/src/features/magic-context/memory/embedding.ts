@@ -22,7 +22,7 @@ export {
     embedUnembeddedCompartmentChunksForProject,
     embedUnembeddedMemoriesForProject,
     getProjectEmbeddingSnapshot,
-    registerProjectEmbeddingAndMaybeWipe,
+    registerProjectEmbedding,
     registerProjectInObservationMode,
     sweepAllRegisteredProjects,
     unregisterProjectEmbedding,
@@ -56,7 +56,7 @@ function getLoadUnembeddedMemoriesStatement(db: Database): PreparedStatement {
     let stmt = loadUnembeddedMemoriesStatements.get(db);
     if (!stmt) {
         stmt = db.prepare(
-            "SELECT m.id AS id, m.content AS content FROM memories m LEFT JOIN memory_embeddings me ON m.id = me.memory_id WHERE m.project_path = ? AND m.status = 'active' AND me.memory_id IS NULL LIMIT ?",
+            "SELECT m.id AS id, m.content AS content FROM memories m LEFT JOIN memory_embeddings me ON m.id = me.memory_id AND me.model_id = ? WHERE m.project_path = ? AND m.status = 'active' AND me.memory_id IS NULL LIMIT ?",
         );
         loadUnembeddedMemoriesStatements.set(db, stmt);
     }
@@ -247,7 +247,7 @@ let sweepInProgress = false;
  *     15-min tick fires, that tick is a no-op.
  *
  * Used by the dream timer for proactive embedding coverage. After a
- * provider change wipes embeddings, this path drains the full backlog on
+ *  provider change creates a model-specific backlog, this path drains the full backlog on
  * a single tick (bounded by wall clock) instead of trickling 10/15min.
  */
 export async function embedAllUnembeddedMemories(
@@ -266,6 +266,7 @@ export async function embedAllUnembeddedMemories(
     try {
         const resolvedConfig = resolveEmbeddingConfig(config);
         if (resolvedConfig.provider === "off") return 0;
+        const modelId = resolveProviderIdentity(resolvedConfig);
 
         // Order projects by most-recent memory activity so the live project
         // drains first. `updated_at` reflects both new writes and existing
@@ -275,12 +276,15 @@ export async function embedAllUnembeddedMemories(
                 `SELECT m.project_path, MAX(m.updated_at) AS latest
                  FROM memories m
                  WHERE m.status IN ('active', 'permanent')
-                 AND m.id NOT IN (SELECT memory_id FROM memory_embeddings)
+                 AND NOT EXISTS (
+                     SELECT 1 FROM memory_embeddings me
+                     WHERE me.memory_id = m.id AND me.model_id = ?
+                 )
                  GROUP BY m.project_path
                  ORDER BY latest DESC
                  LIMIT 20`,
             )
-            .all() as Array<{ project_path: string; latest: number }>;
+            .all(modelId) as Array<{ project_path: string; latest: number }>;
 
         let total = 0;
         let consecutiveEmpty = 0;
@@ -345,9 +349,13 @@ async function embedUnembeddedMemoriesWithConfig(
     }
 
     initializeEmbedding(resolvedConfig);
+    const modelId = getEmbeddingModelId();
+    if (modelId === "off") {
+        return 0;
+    }
 
     const memories = getLoadUnembeddedMemoriesStatement(db)
-        .all(projectPath, normalizedBatchSize)
+        .all(modelId, projectPath, normalizedBatchSize)
         .filter(isUnembeddedMemoryRow);
     if (memories.length === 0) {
         return 0;
@@ -355,11 +363,6 @@ async function embedUnembeddedMemoriesWithConfig(
 
     try {
         const embeddings = await embedBatch(memories.map((memory) => memory.content));
-        const modelId = getEmbeddingModelId();
-        if (modelId === "off") {
-            return 0;
-        }
-
         let embeddedCount = 0;
         db.transaction(() => {
             for (const [index, memory] of memories.entries()) {

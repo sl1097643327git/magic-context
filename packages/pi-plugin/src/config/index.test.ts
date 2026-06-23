@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { MagicContextConfigSchema } from "@magic-context/core/config/schema/magic-context";
-import { loadPiConfig } from "./index";
+import { loadPiConfig, loadPiConfigDetailed } from "./index";
 
 const tempRoots: string[] = [];
 const originalHome = process.env.HOME;
@@ -62,6 +62,23 @@ afterEach(() => {
 });
 
 describe("loadPiConfig", () => {
+	it("marks an unmigrated legacy project config as an untrusted load", () => {
+		const cwd = makeTempRoot("mc-pi-cwd-");
+		const home = makeTempRoot("mc-pi-home-");
+		withHome(home);
+		writeFileSync(
+			join(cwd, "magic-context.jsonc"),
+			'{"embedding":{"provider":"off"}}',
+			"utf-8",
+		);
+
+		const result = loadPiConfigDetailed({ cwd });
+
+		expect(result.sources.projectConfig).toBe("legacy-config-unmigrated");
+		expect(result.loadOutcome).toBe("legacy-config-unmigrated");
+		expect(result.warnings.join("\n")).toContain("legacy Magic Context config");
+	});
+
 	it("returns defaults with no config files", () => {
 		const cwd = makeTempRoot("mc-pi-cwd-");
 		const home = makeTempRoot("mc-pi-home-");

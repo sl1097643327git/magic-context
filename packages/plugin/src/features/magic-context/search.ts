@@ -345,12 +345,17 @@ async function getSemanticScores(args: {
 }): Promise<Map<number, number>> {
     const semanticScores = new Map<number, number>();
 
-    if (!args.queryEmbedding || args.memories.length === 0) {
+    if (
+        !args.queryEmbedding ||
+        args.memories.length === 0 ||
+        !args.queryModelId ||
+        args.queryModelId === "off"
+    ) {
         return semanticScores;
     }
 
     if (!args.workspace?.isWorkspaced) {
-        const cachedEmbeddings = getProjectEmbeddings(args.db, args.projectPath);
+        const cachedEmbeddings = getProjectEmbeddings(args.db, args.projectPath, args.queryModelId);
         const embeddings = await ensureMemoryEmbeddings({
             db: args.db,
             projectIdentity: args.projectPath,
@@ -375,10 +380,6 @@ async function getSemanticScores(args: {
         return semanticScores;
     }
 
-    if (!args.queryModelId || args.queryModelId === "off") {
-        return semanticScores;
-    }
-
     const workspace = args.workspace;
     const memoriesByIdentity = new Map<string, Memory[]>();
     for (const memory of args.memories) {
@@ -391,7 +392,7 @@ async function getSemanticScores(args: {
 
     const ownMemories = memoriesByIdentity.get(args.projectPath) ?? [];
     if (ownMemories.length > 0) {
-        const ownEmbeddings = getProjectEmbeddings(args.db, args.projectPath);
+        const ownEmbeddings = getProjectEmbeddings(args.db, args.projectPath, args.queryModelId);
         await ensureMemoryEmbeddings({
             db: args.db,
             projectIdentity: args.projectPath,
@@ -403,7 +404,7 @@ async function getSemanticScores(args: {
     for (const identity of workspace.identities) {
         const memberMemories = memoriesByIdentity.get(identity) ?? [];
         if (memberMemories.length === 0) continue;
-        const cachedEmbeddings = getProjectEmbeddings(args.db, identity);
+        const cachedEmbeddings = getProjectEmbeddings(args.db, identity, args.queryModelId);
         for (const memory of memberMemories) {
             const memoryEmbedding = cachedEmbeddings.get(memory.id);
             if (!memoryEmbedding || memoryEmbedding.modelId !== args.queryModelId) continue;
@@ -453,6 +454,7 @@ function selectSemanticCandidates(args: {
     memories: Memory[];
     projectPath: string;
     ftsMatches: Memory[];
+    queryModelId?: string | null;
     workspace?: SearchWorkspaceContext;
 }): Memory[] {
     if (args.ftsMatches.length === 0) {
@@ -460,14 +462,16 @@ function selectSemanticCandidates(args: {
     }
 
     const candidateIds = new Set(args.ftsMatches.map((memory) => memory.id));
-    const embeddingProjects = args.workspace?.isWorkspaced
-        ? args.workspace.identities
-        : [args.projectPath];
-    for (const projectPath of embeddingProjects) {
-        const cachedEmbeddings = peekProjectEmbeddings(projectPath);
-        if (!cachedEmbeddings) continue;
-        for (const memoryId of cachedEmbeddings.keys()) {
-            candidateIds.add(memoryId);
+    if (args.queryModelId && args.queryModelId !== "off") {
+        const embeddingProjects = args.workspace?.isWorkspaced
+            ? args.workspace.identities
+            : [args.projectPath];
+        for (const projectPath of embeddingProjects) {
+            const cachedEmbeddings = peekProjectEmbeddings(projectPath, args.queryModelId);
+            if (!cachedEmbeddings) continue;
+            for (const memoryId of cachedEmbeddings.keys()) {
+                candidateIds.add(memoryId);
+            }
         }
     }
 
@@ -584,6 +588,7 @@ async function searchMemories(args: {
         memories,
         projectPath: args.projectPath,
         ftsMatches,
+        queryModelId: args.queryModelId,
         workspace: args.workspace,
     });
     const semanticScores = await getSemanticScores({
@@ -833,7 +838,8 @@ function searchCompartmentChunks(args: {
     maxOrdinal?: number;
     modelId?: string | null;
 }): CompartmentSearchResult[] {
-    if (!args.queryEmbedding || args.limit <= 0) return [];
+    if (!args.queryEmbedding || args.limit <= 0 || !args.modelId || args.modelId === "off")
+        return [];
     const cutoff = args.maxOrdinal != null && args.maxOrdinal >= 0 ? args.maxOrdinal : null;
     const rows = loadCompartmentChunkEmbeddingsForSearch(
         args.db,
@@ -1032,12 +1038,14 @@ function searchGitCommits(args: {
      *  unifiedSearch embeds once and passes the same vector here and to
      *  searchMemories — never embed twice for one query. */
     queryEmbedding: Float32Array | null;
+    queryModelId?: string | null;
 }): GitCommitSearchResult[] {
     if (args.limit <= 0) return [];
 
     const hits = searchGitCommitsSync(args.db, args.projectPath, args.query, {
         limit: args.limit,
         queryEmbedding: args.queryEmbedding,
+        queryModelId: args.queryModelId,
     });
     return hits.map(toGitCommitResult);
 }
@@ -1259,6 +1267,8 @@ export async function unifiedSearch(
                       query: trimmedQuery,
                       limit: tierLimit,
                       queryEmbedding,
+                      queryModelId:
+                          embeddingModelId && embeddingModelId !== "off" ? embeddingModelId : null,
                   }),
               )
             : Promise.resolve([] as GitCommitSearchResult[]),

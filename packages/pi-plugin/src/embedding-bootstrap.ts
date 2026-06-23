@@ -1,6 +1,6 @@
 import {
 	type EmbeddingFeatures,
-	registerProjectEmbeddingAndMaybeWipe,
+	registerProjectEmbedding,
 } from "@magic-context/core/features/magic-context/memory/embedding";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
@@ -26,7 +26,7 @@ export async function ensureProjectRegisteredFromPiDirectory(
 		memoryEnabled: detailed.config.memory.enabled,
 		gitCommitEnabled: detailed.config.memory.git_commit_indexing.enabled,
 	};
-	registerProjectEmbeddingAndMaybeWipe(
+	registerProjectEmbedding(
 		db,
 		projectIdentity,
 		detailed.config.embedding,

@@ -18,7 +18,8 @@ import { runMigrations } from "./migrations";
 import {
     _resetProjectEmbeddingRegistryForTests,
     _setTestProviderFactoryForProject,
-    registerProjectEmbeddingAndMaybeWipe,
+    getProjectEmbeddingSnapshot,
+    registerProjectEmbedding,
 } from "./project-embedding-registry";
 import { initializeDatabase } from "./storage-db";
 import { clearSession } from "./storage-meta-session";
@@ -78,6 +79,10 @@ function insertFtsRow(
     db.prepare(
         "INSERT INTO message_history_fts (session_id, message_ordinal, message_id, role, content) VALUES (?, ?, ?, ?, ?)",
     ).run(sessionId, ordinal, `${role}-${ordinal}`, role, content);
+}
+
+function currentChunkModelId(projectIdentity: string): string {
+    return getProjectEmbeddingSnapshot(projectIdentity)?.chunkModelId ?? "off";
 }
 
 describe("compartment chunk embedding core", () => {
@@ -223,7 +228,7 @@ describe("compartment chunk embedding core", () => {
         const embeddedTexts: string[] = [];
         try {
             _setTestProviderFactoryForProject(() => new CapturingEmbeddingProvider(embeddedTexts));
-            registerProjectEmbeddingAndMaybeWipe(
+            registerProjectEmbedding(
                 db,
                 "/repo/publish",
                 { provider: "local", model: "mock-local" },
@@ -255,7 +260,12 @@ describe("compartment chunk embedding core", () => {
 
             expect(embeddedTexts).toEqual(["[1] U: Keep this line"]);
             expect(
-                loadCompartmentChunkEmbeddingsForSearch(db, "ses-publish", "/repo/publish"),
+                loadCompartmentChunkEmbeddingsForSearch(
+                    db,
+                    "ses-publish",
+                    "/repo/publish",
+                    currentChunkModelId("/repo/publish"),
+                ),
             ).toHaveLength(1);
         } finally {
             _resetProjectEmbeddingRegistryForTests();
@@ -268,7 +278,7 @@ describe("compartment chunk embedding core", () => {
         const embeddedTexts: string[] = [];
         try {
             _setTestProviderFactoryForProject(() => new CapturingEmbeddingProvider(embeddedTexts));
-            registerProjectEmbeddingAndMaybeWipe(
+            registerProjectEmbedding(
                 db,
                 "/repo/fallback",
                 { provider: "local", model: "mock-local" },
@@ -306,7 +316,12 @@ describe("compartment chunk embedding core", () => {
                 "Executed background oracle audit for oxc engine\nRan the background oracle audit to verify the oxc cutover.",
             ]);
             expect(
-                loadCompartmentChunkEmbeddingsForSearch(db, "ses-fallback", "/repo/fallback"),
+                loadCompartmentChunkEmbeddingsForSearch(
+                    db,
+                    "ses-fallback",
+                    "/repo/fallback",
+                    currentChunkModelId("/repo/fallback"),
+                ),
             ).toHaveLength(1);
         } finally {
             _resetProjectEmbeddingRegistryForTests();

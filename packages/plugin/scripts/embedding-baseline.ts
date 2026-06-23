@@ -290,7 +290,7 @@ async function run() {
     console.log(`[baseline] project_identity: ${projectIdentity}`);
 
     const memories = getMemoriesByProject(db, projectIdentity, ["active", "permanent"]);
-    const embeddings = loadAllEmbeddings(db, projectIdentity);
+    const embeddings = loadAllEmbeddings(db, projectIdentity, modelId);
     console.log(
         `[baseline] memories_considered=${memories.length} embeddings_loaded=${embeddings.size}`,
     );

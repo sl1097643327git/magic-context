@@ -12,6 +12,7 @@ export type LoadOutcome =
     | "ok"
     | "project-file-parse-error"
     | "project-file-io-error"
+    | "legacy-config-unmigrated"
     | "schema-recovery"
     | "substitution-failure";
 
@@ -67,8 +68,10 @@ export function isConfigLoadUntrusted(
     if (
         detailed.sources.userConfig === "project-file-parse-error" ||
         detailed.sources.userConfig === "project-file-io-error" ||
+        detailed.sources.userConfig === "legacy-config-unmigrated" ||
         detailed.sources.projectConfig === "project-file-parse-error" ||
-        detailed.sources.projectConfig === "project-file-io-error"
+        detailed.sources.projectConfig === "project-file-io-error" ||
+        detailed.sources.projectConfig === "legacy-config-unmigrated"
     ) {
         return true;
     }
