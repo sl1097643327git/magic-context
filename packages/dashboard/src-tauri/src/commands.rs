@@ -1,5 +1,5 @@
 use crate::embedding_probe::{
-    probe_embedding_endpoint, substitute_value, EmbeddingProbeOptions, EmbeddingProbeOutcome,
+    find_substitution_token, probe_embedding_endpoint, EmbeddingProbeOptions, EmbeddingProbeOutcome,
 };
 use crate::process_ext::NoWindowExtTokio;
 use crate::{config, db, log_parser, AppState};
@@ -894,19 +894,13 @@ pub async fn get_available_pi_models() -> Vec<String> {
 
 /// Probe an OpenAI-compatible embedding endpoint and classify the outcome.
 ///
-/// This mirrors `doctor`'s behavior (see
-/// packages/plugin/src/cli/doctor.ts > checkEmbeddingConfig). The frontend
-/// uses the structured outcome kind to render provider-specific guidance
-/// rather than a raw HTTP status. Key behaviors:
+/// The frontend uses the structured outcome kind to render provider-specific
+/// guidance rather than a raw HTTP status. Key behaviors:
 ///
-/// 1. `{env:VAR}` / `{file:path}` substitution runs on endpoint, model, and
-///    api_key before the probe so users who stored their API key as
-///    `{env:EMBED_KEY}` in `magic-context.jsonc` get the same result in the
-///    dashboard as they do in doctor. If a token doesn't resolve (the env
-///    var isn't set in the dashboard's process environment, which on macOS
-///    often differs from the terminal environment), we return
-///    `UnresolvedToken` with the failing token so the UI can point users to
-///    launch OpenCode from the shell or run `doctor`.
+/// 1. `{env:VAR}` / `{file:path}` tokens are refused, not expanded. The probe
+///    contacts a user-configured endpoint, so expanding a local file or env var
+///    before the request would turn the “Test endpoint” button into a secret
+///    exfiltration primitive.
 ///
 /// 2. Body inspection on 2xx — `data[0].embedding` must be a non-empty float
 ///    array. OpenRouter and similar proxies return 200 for `/embeddings` but
@@ -915,53 +909,30 @@ pub async fn get_available_pi_models() -> Vec<String> {
 ///
 /// 3. 401/403 → `AuthFailed` (specific "credentials rejected" message).
 ///    404/405 → `EndpointUnsupported` (wrong URL / no embeddings API).
-#[tauri::command]
-pub async fn test_embedding_endpoint(
+fn reject_probe_token(field: &str, value: &str) -> Option<EmbeddingProbeOutcome> {
+    find_substitution_token(value).map(|token| EmbeddingProbeOutcome::UnresolvedToken {
+        field: field.to_string(),
+        token,
+    })
+}
+
+fn prepare_embedding_probe_options(
     endpoint: String,
     model: String,
     api_key: Option<String>,
     input_type: Option<String>,
     truncate: Option<String>,
-) -> EmbeddingProbeOutcome {
-    // Substitute each field. None of these values are emitted to logs, so
-    // resolved values are safe to carry through the probe. We deliberately
-    // pass `None` for config_dir because the dashboard renders parsed form
-    // values that have already stripped JSONC context — relative file paths
-    // therefore resolve against cwd, which is the best we can do without
-    // knowing which config file the values came from.
-    let (endpoint, endpoint_residual) = substitute_value(&endpoint, None);
-    let (model, model_residual) = substitute_value(&model, None);
-    let (api_key_val, api_key_residual) = match api_key.as_deref() {
-        Some(s) => {
-            let (v, r) = substitute_value(s, None);
-            (Some(v), r)
+) -> Result<EmbeddingProbeOptions, EmbeddingProbeOutcome> {
+    if let Some(outcome) = reject_probe_token("endpoint", &endpoint) {
+        return Err(outcome);
+    }
+    if let Some(outcome) = reject_probe_token("model", &model) {
+        return Err(outcome);
+    }
+    if let Some(key) = api_key.as_deref() {
+        if let Some(outcome) = reject_probe_token("api_key", key) {
+            return Err(outcome);
         }
-        None => (None, None),
-    };
-
-    // If any residual tokens survived substitution, surface the first one
-    // so the user sees exactly which variable is missing. The dashboard may
-    // be running from a GUI launcher (e.g., macOS Dock) whose environment
-    // doesn't inherit shell rc files — users setting EMBED_API_KEY in
-    // ~/.zshrc won't see it in the dashboard process unless they launch
-    // OpenCode from the terminal.
-    if let Some(token) = endpoint_residual {
-        return EmbeddingProbeOutcome::UnresolvedToken {
-            field: "endpoint".to_string(),
-            token,
-        };
-    }
-    if let Some(token) = model_residual {
-        return EmbeddingProbeOutcome::UnresolvedToken {
-            field: "model".to_string(),
-            token,
-        };
-    }
-    if let Some(token) = api_key_residual {
-        return EmbeddingProbeOutcome::UnresolvedToken {
-            field: "api_key".to_string(),
-            token,
-        };
     }
 
     let input_type = input_type
@@ -971,15 +942,30 @@ pub async fn test_embedding_endpoint(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
-    probe_embedding_endpoint(EmbeddingProbeOptions {
+    Ok(EmbeddingProbeOptions {
         endpoint,
         model,
-        api_key: api_key_val,
+        api_key,
         input_type,
         truncate,
         timeout_ms: 10_000,
     })
-    .await
+}
+
+#[tauri::command]
+pub async fn test_embedding_endpoint(
+    endpoint: String,
+    model: String,
+    api_key: Option<String>,
+    input_type: Option<String>,
+    truncate: Option<String>,
+) -> EmbeddingProbeOutcome {
+    let options =
+        match prepare_embedding_probe_options(endpoint, model, api_key, input_type, truncate) {
+            Ok(options) => options,
+            Err(outcome) => return outcome,
+        };
+    probe_embedding_endpoint(options).await
 }
 
 // ── User Memory commands ────────────────────────────────────
@@ -1060,7 +1046,11 @@ pub fn get_db_health(state: State<'_, AppState>) -> db::DbHealth {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_pi_models_output, pick_first_line, run_bounded_binary};
+    use super::{
+        parse_pi_models_output, pick_first_line, prepare_embedding_probe_options,
+        run_bounded_binary,
+    };
+    use crate::embedding_probe::EmbeddingProbeOutcome;
     use std::time::Instant;
 
     #[tokio::test]
@@ -1143,5 +1133,55 @@ mod tests {
             pick_first_line("  C:\\bin\\opencode.exe  \n"),
             Some("C:\\bin\\opencode.exe".to_string())
         );
+    }
+
+    #[test]
+    fn embedding_probe_refuses_file_api_key_without_reading_secret() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let secret_path = dir.path().join("embedding-secret.txt");
+        std::fs::write(&secret_path, "super-secret-token").expect("write secret");
+        let token = format!("{{file:{}}}", secret_path.display());
+
+        let outcome = prepare_embedding_probe_options(
+            "https://example.com/v1".to_string(),
+            "text-embedding-3-small".to_string(),
+            Some(token.clone()),
+            None,
+            None,
+        )
+        .expect_err("file token must be refused before any network probe");
+
+        match outcome {
+            EmbeddingProbeOutcome::UnresolvedToken {
+                field,
+                token: reported,
+            } => {
+                assert_eq!(field, "api_key");
+                assert_eq!(reported, token);
+            }
+            other => panic!("expected unresolved token, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn embedding_probe_refuses_env_model_token_without_expanding() {
+        std::env::set_var("MC_DASHBOARD_TEST_MODEL", "secret-model");
+        let outcome = prepare_embedding_probe_options(
+            "https://example.com/v1".to_string(),
+            "{env:MC_DASHBOARD_TEST_MODEL}".to_string(),
+            Some("literal-key".to_string()),
+            None,
+            None,
+        )
+        .expect_err("env token must be refused before any network probe");
+        std::env::remove_var("MC_DASHBOARD_TEST_MODEL");
+
+        match outcome {
+            EmbeddingProbeOutcome::UnresolvedToken { field, token } => {
+                assert_eq!(field, "model");
+                assert_eq!(token, "{env:MC_DASHBOARD_TEST_MODEL}");
+            }
+            other => panic!("expected unresolved token, got {other:?}"),
+        }
     }
 }

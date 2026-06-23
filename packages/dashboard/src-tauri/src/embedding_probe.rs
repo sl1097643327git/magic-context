@@ -1,14 +1,13 @@
-//! OpenAI-compatible embedding endpoint probe + config-variable substitution.
+//! OpenAI-compatible embedding endpoint probe + literal config-token detection.
 //!
 //! Mirrors the Node implementations in
 //!   packages/plugin/src/features/magic-context/memory/embedding-probe.ts
-//!   packages/plugin/src/config/variable.ts
 //!
-//! The dashboard and doctor perform the same network probe and classification,
-//! so a failure seen in one tool looks the same in the other. Users pick
-//! whichever tool they prefer without running into "it works in doctor but
-//! fails in the dashboard" surprises.
+//! The dashboard intentionally does not expand `{env:...}` or `{file:...}`
+//! values before probing a user-provided endpoint: expanding secrets and then
+//! sending them to that endpoint would allow one-click exfiltration from the UI.
 
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 use std::time::Duration;
 
@@ -35,11 +34,11 @@ pub enum EmbeddingProbeOutcome {
     NetworkError { message: String },
     /// Request took longer than `timeout_ms`.
     Timeout { timeout_ms: u64 },
-    /// Endpoint URL is missing `http://` or `https://` prefix.
+    /// Endpoint URL is missing or is not HTTPS.
     InvalidScheme { endpoint: String },
-    /// Config contains `{env:VAR}` / `{file:path}` tokens that did not
-    /// resolve — the dashboard runs its own process with its own environment,
-    /// so env vars set only in the user's shell won't be visible here.
+    /// Config contains `{env:VAR}` / `{file:path}` tokens. The dashboard
+    /// refuses to expand those tokens before contacting a user-supplied
+    /// endpoint, because doing so could leak local secrets.
     UnresolvedToken {
         /// Which field carries the token (e.g., "api_key", "endpoint").
         field: String,
@@ -64,126 +63,42 @@ pub struct EmbeddingProbeOptions {
 
 const MAX_PREVIEW_CHARS: usize = 240;
 
-/// Substitute `{env:VAR}` and `{file:path}` tokens in a single value string.
+/// Return the first `{env:VAR}` or `{file:path}` token embedded in a value.
 ///
-/// The plugin's Node substitution operates on raw config text before JSONC
-/// parsing; the dashboard operates on individual already-parsed field values
-/// directly from the form. Both semantics are the same: missing env vars
-/// resolve to the empty string (we don't know whether the user *wanted* an
-/// empty auth header or forgot to export the var), and missing files do the
-/// same. We report whether any substitution left a residual token so the
-/// probe can classify `{env:X}` residue as an actionable outcome.
-///
-/// `config_dir` is used to resolve relative `{file:./path}` references. For
-/// virtual/unit-test callers pass `None` — `~/...` paths still work.
-///
-/// Returns `(substituted_value, residual_token)`. If any token failed to
-/// resolve, `residual_token` holds the first one (for error reporting) —
-/// otherwise `None`.
-pub fn substitute_value(raw: &str, config_dir: Option<&Path>) -> (String, Option<String>) {
-    let mut out = String::with_capacity(raw.len());
-    let mut residual: Option<String> = None;
+/// The dashboard probe treats these tokens as unresolved instead of expanding
+/// them. Expanding `{file:...}` or `{env:...}` and then sending the result to a
+/// user-configured endpoint would let a malicious project config exfiltrate
+/// local secrets through the one-click “Test embedding endpoint” button.
+pub fn find_substitution_token(raw: &str) -> Option<String> {
     let bytes = raw.as_bytes();
     let mut i = 0;
-
     while i < bytes.len() {
-        // Look for `{env:` or `{file:` at this position.
-        if bytes[i] == b'{' {
-            if bytes[i..].starts_with(b"{env:") {
-                let start = i + b"{env:".len();
-                if let Some(rel_end) = raw[start..].find('}') {
-                    let end = start + rel_end;
-                    let var_name = raw[start..end].trim();
-                    let token = &raw[i..=end]; // includes closing }
-                    match std::env::var(var_name) {
-                        Ok(val) if !val.is_empty() => {
-                            out.push_str(&val);
-                        }
-                        _ => {
-                            // Unresolved — leave the token in place so the
-                            // caller can detect it and surface a specific
-                            // "export your env var" message.
-                            if residual.is_none() {
-                                residual = Some(token.to_string());
-                            }
-                            out.push_str(token);
-                        }
-                    }
-                    i = end + 1;
-                    continue;
-                }
-            } else if bytes[i..].starts_with(b"{file:") {
-                let start = i + b"{file:".len();
-                if let Some(rel_end) = raw[start..].find('}') {
-                    let end = start + rel_end;
-                    let raw_path = raw[start..end].trim();
-                    let token = &raw[i..=end];
-                    match resolve_and_read_file(raw_path, config_dir) {
-                        Some(contents) => {
-                            // Escape for safe embedding. Because we're
-                            // operating on a parsed field (not raw JSON), we
-                            // don't need JSON-escape here — the value will be
-                            // sent as-is over the wire (e.g., as a bearer
-                            // token). Trim for parity with the Node
-                            // implementation which trims file contents.
-                            out.push_str(contents.trim());
-                        }
-                        None => {
-                            if residual.is_none() {
-                                residual = Some(token.to_string());
-                            }
-                            out.push_str(token);
-                        }
-                    }
-                    i = end + 1;
-                    continue;
-                }
+        if bytes[i] == b'{'
+            && (bytes[i..].starts_with(b"{env:") || bytes[i..].starts_with(b"{file:"))
+        {
+            if let Some(rel_end) = raw[i..].find('}') {
+                return Some(raw[i..=i + rel_end].to_string());
             }
         }
-
-        // Not a token start — copy byte verbatim. Using bytes keeps this
-        // O(n); we reassemble a valid UTF-8 string at the end because
-        // tokens never straddle UTF-8 boundaries (they're ASCII-only).
         let ch = raw[i..].chars().next().expect("in-range char");
-        out.push(ch);
         i += ch.len_utf8();
     }
-
-    (out, residual)
+    None
 }
 
-fn resolve_and_read_file(raw_path: &str, config_dir: Option<&Path>) -> Option<String> {
-    use std::path::PathBuf;
-
-    let path: PathBuf = if let Some(rest) = raw_path.strip_prefix("~/") {
-        let home = dirs::home_dir()?;
-        home.join(rest)
-    } else if Path::new(raw_path).is_absolute() {
-        PathBuf::from(raw_path)
-    } else {
-        match config_dir {
-            Some(dir) => dir.join(raw_path),
-            None => PathBuf::from(raw_path),
-        }
-    };
-
-    if !path.exists() {
-        return None;
-    }
-    std::fs::read_to_string(&path).ok()
+/// Legacy helper kept for tests and callers that need token detection semantics.
+/// It never resolves tokens to local file contents or environment values.
+pub fn substitute_value(raw: &str, _config_dir: Option<&Path>) -> (String, Option<String>) {
+    (raw.to_string(), find_substitution_token(raw))
 }
 
 /// POST `{model, input}` to `${endpoint}/embeddings` and classify the outcome.
 pub async fn probe_embedding_endpoint(options: EmbeddingProbeOptions) -> EmbeddingProbeOutcome {
-    let endpoint = options.endpoint.trim().trim_end_matches('/').to_string();
-    if endpoint.is_empty() || !(endpoint.starts_with("https://") || endpoint.starts_with("http://"))
-    {
-        return EmbeddingProbeOutcome::InvalidScheme {
-            endpoint: options.endpoint.clone(),
-        };
-    }
-
-    let url = format!("{}/embeddings", endpoint);
+    let validated = match validate_probe_endpoint(&options.endpoint).await {
+        Ok(endpoint) => endpoint,
+        Err(outcome) => return outcome,
+    };
+    let url = format!("{}/embeddings", validated.endpoint);
 
     // `.no_proxy()` is deliberate: by default reqwest auto-detects macOS
     // / Windows system proxy settings, which produces a confusing failure
@@ -198,6 +113,10 @@ pub async fn probe_embedding_endpoint(options: EmbeddingProbeOptions) -> Embeddi
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_millis(options.timeout_ms))
         .no_proxy()
+        // Pin reqwest to the public addresses we already validated so DNS
+        // cannot re-resolve the hostname to a private or metadata address after
+        // the SSRF guard has passed.
+        .resolve_to_addrs(&validated.host, &validated.addrs)
         .build()
     {
         Ok(c) => c,
@@ -322,6 +241,100 @@ pub async fn probe_embedding_endpoint(options: EmbeddingProbeOptions) -> Embeddi
     }
 }
 
+struct ValidatedEndpoint {
+    endpoint: String,
+    host: String,
+    addrs: Vec<SocketAddr>,
+}
+
+async fn validate_probe_endpoint(
+    raw_endpoint: &str,
+) -> Result<ValidatedEndpoint, EmbeddingProbeOutcome> {
+    let endpoint = raw_endpoint.trim().trim_end_matches('/').to_string();
+    let parsed = match reqwest::Url::parse(&endpoint) {
+        Ok(url) => url,
+        Err(_) => {
+            return Err(EmbeddingProbeOutcome::InvalidScheme {
+                endpoint: raw_endpoint.to_string(),
+            });
+        }
+    };
+
+    if parsed.scheme() != "https" {
+        return Err(EmbeddingProbeOutcome::InvalidScheme {
+            endpoint: raw_endpoint.to_string(),
+        });
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(EmbeddingProbeOutcome::NetworkError {
+            message: "Embedding endpoint URLs must not include usernames or passwords".to_string(),
+        });
+    }
+    let Some(host) = parsed.host_str().map(str::to_string) else {
+        return Err(EmbeddingProbeOutcome::InvalidScheme {
+            endpoint: raw_endpoint.to_string(),
+        });
+    };
+    let port = parsed.port_or_known_default().unwrap_or(443);
+    let addrs: Vec<SocketAddr> = match tokio::net::lookup_host((host.as_str(), port)).await {
+        Ok(iter) => iter.collect(),
+        Err(e) => {
+            return Err(EmbeddingProbeOutcome::NetworkError {
+                message: format!("Failed to resolve embedding endpoint host: {e}"),
+            });
+        }
+    };
+    if addrs.is_empty() {
+        return Err(EmbeddingProbeOutcome::NetworkError {
+            message: "Embedding endpoint host resolved to no addresses".to_string(),
+        });
+    }
+    if let Some(blocked) = addrs.iter().find(|addr| is_disallowed_probe_ip(addr.ip())) {
+        return Err(EmbeddingProbeOutcome::NetworkError {
+            message: format!(
+                "Embedding endpoint host resolves to a private, local, or metadata address ({}) and was blocked",
+                blocked.ip()
+            ),
+        });
+    }
+
+    Ok(ValidatedEndpoint {
+        endpoint,
+        host,
+        addrs,
+    })
+}
+
+fn is_disallowed_probe_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => is_disallowed_probe_ipv4(ip),
+        IpAddr::V6(ip) => is_disallowed_probe_ipv6(ip),
+    }
+}
+
+fn is_disallowed_probe_ipv4(ip: Ipv4Addr) -> bool {
+    ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.octets()[0] == 0
+}
+
+fn is_disallowed_probe_ipv6(ip: Ipv6Addr) -> bool {
+    ip.is_loopback()
+        || ip.is_unspecified()
+        || is_unique_local_ipv6(ip)
+        || is_unicast_link_local_ipv6(ip)
+}
+
+fn is_unique_local_ipv6(ip: Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xfe00) == 0xfc00
+}
+
+fn is_unicast_link_local_ipv6(ip: Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xffc0) == 0xfe80
+}
+
 fn extract_dimensions(body: &serde_json::Value) -> Option<usize> {
     let data = body.get("data")?.as_array()?;
     let first = data.first()?;
@@ -388,11 +401,12 @@ mod tests {
     }
 
     #[test]
-    fn substitute_resolves_env_tokens() {
+    fn substitute_reports_env_tokens_without_resolving() {
         std::env::set_var("MC_TEST_SUBST_KEY", "resolved-value");
-        let (out, residual) = substitute_value("prefix-{env:MC_TEST_SUBST_KEY}-suffix", None);
-        assert_eq!(out, "prefix-resolved-value-suffix");
-        assert!(residual.is_none());
+        let raw = "prefix-{env:MC_TEST_SUBST_KEY}-suffix";
+        let (out, residual) = substitute_value(raw, None);
+        assert_eq!(out, raw);
+        assert_eq!(residual.as_deref(), Some("{env:MC_TEST_SUBST_KEY}"));
         std::env::remove_var("MC_TEST_SUBST_KEY");
     }
 
@@ -400,8 +414,7 @@ mod tests {
     fn substitute_reports_unresolved_env_tokens() {
         std::env::remove_var("MC_TEST_NONEXISTENT_VAR_FOR_PROBE");
         let (out, residual) = substitute_value("{env:MC_TEST_NONEXISTENT_VAR_FOR_PROBE}", None);
-        // Unresolved token is preserved so the caller can detect it; the
-        // probe will then surface it as UnresolvedToken.
+        // Tokens are preserved so the caller can refuse to expand them.
         assert_eq!(out, "{env:MC_TEST_NONEXISTENT_VAR_FOR_PROBE}");
         assert_eq!(
             residual.as_deref(),
@@ -412,9 +425,10 @@ mod tests {
     #[test]
     fn substitute_trims_env_var_name_whitespace() {
         std::env::set_var("MC_TEST_SUBST_TRIM", "trimmed");
-        let (out, residual) = substitute_value("{env: MC_TEST_SUBST_TRIM }", None);
-        assert_eq!(out, "trimmed");
-        assert!(residual.is_none());
+        let raw = "{env: MC_TEST_SUBST_TRIM }";
+        let (out, residual) = substitute_value(raw, None);
+        assert_eq!(out, raw);
+        assert_eq!(residual.as_deref(), Some(raw));
         std::env::remove_var("MC_TEST_SUBST_TRIM");
     }
 
@@ -423,30 +437,19 @@ mod tests {
         std::env::set_var("MC_TEST_EMPTY_VAR", "");
         let (out, residual) = substitute_value("{env:MC_TEST_EMPTY_VAR}", None);
         assert_eq!(out, "{env:MC_TEST_EMPTY_VAR}");
-        assert!(residual.is_some());
+        assert_eq!(residual.as_deref(), Some("{env:MC_TEST_EMPTY_VAR}"));
         std::env::remove_var("MC_TEST_EMPTY_VAR");
     }
 
     #[test]
-    fn substitute_resolves_file_tokens_absolute() {
+    fn substitute_preserves_file_tokens_without_reading() {
         let tmp_dir = std::env::temp_dir();
         let tmp_path = tmp_dir.join("mc-embedding-probe-test.txt");
         std::fs::write(&tmp_path, "file-contents-here").unwrap();
         let raw = format!("{{file:{}}}", tmp_path.display());
         let (out, residual) = substitute_value(&raw, None);
-        assert_eq!(out, "file-contents-here");
-        assert!(residual.is_none());
-        std::fs::remove_file(&tmp_path).ok();
-    }
-
-    #[test]
-    fn substitute_trims_file_contents() {
-        let tmp_dir = std::env::temp_dir();
-        let tmp_path = tmp_dir.join("mc-embedding-probe-trim-test.txt");
-        std::fs::write(&tmp_path, "  whitespace-wrapped  \n").unwrap();
-        let raw = format!("{{file:{}}}", tmp_path.display());
-        let (out, _) = substitute_value(&raw, None);
-        assert_eq!(out, "whitespace-wrapped");
+        assert_eq!(out, raw);
+        assert_eq!(residual.as_deref(), Some(raw.as_str()));
         std::fs::remove_file(&tmp_path).ok();
     }
 
@@ -461,12 +464,10 @@ mod tests {
     fn substitute_handles_multiple_tokens_preserving_order() {
         std::env::set_var("MC_TEST_TOK_A", "A");
         std::env::set_var("MC_TEST_TOK_B", "B");
-        let (out, residual) = substitute_value(
-            "start-{env:MC_TEST_TOK_A}-mid-{env:MC_TEST_TOK_B}-end",
-            None,
-        );
-        assert_eq!(out, "start-A-mid-B-end");
-        assert!(residual.is_none());
+        let raw = "start-{env:MC_TEST_TOK_A}-mid-{env:MC_TEST_TOK_B}-end";
+        let (out, residual) = substitute_value(raw, None);
+        assert_eq!(out, raw);
+        assert_eq!(residual.as_deref(), Some("{env:MC_TEST_TOK_A}"));
         std::env::remove_var("MC_TEST_TOK_A");
         std::env::remove_var("MC_TEST_TOK_B");
     }
@@ -516,6 +517,68 @@ mod tests {
         assert!(preview.ends_with('…'));
         // MAX_PREVIEW_CHARS chars followed by the ellipsis.
         assert_eq!(preview.chars().count(), MAX_PREVIEW_CHARS + 1);
+    }
+
+    #[tokio::test]
+    async fn probe_rejects_metadata_endpoint_before_connecting() {
+        let outcome = probe_embedding_endpoint(EmbeddingProbeOptions {
+            endpoint: "https://169.254.169.254/latest/meta-data".to_string(),
+            model: "text-embedding-3-small".to_string(),
+            api_key: Some("literal-key".to_string()),
+            input_type: None,
+            truncate: None,
+            timeout_ms: 100,
+        })
+        .await;
+        match outcome {
+            EmbeddingProbeOutcome::NetworkError { message } => {
+                assert!(message.contains("blocked"), "unexpected message: {message}");
+                assert!(
+                    message.contains("169.254.169.254"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected blocked network error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_rejects_loopback_endpoint_before_connecting() {
+        let outcome = probe_embedding_endpoint(EmbeddingProbeOptions {
+            endpoint: "https://127.0.0.1:4444".to_string(),
+            model: "text-embedding-3-small".to_string(),
+            api_key: None,
+            input_type: None,
+            truncate: None,
+            timeout_ms: 100,
+        })
+        .await;
+        assert!(matches!(
+            outcome,
+            EmbeddingProbeOutcome::NetworkError { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn probe_rejects_credentials_in_endpoint_url() {
+        let outcome = probe_embedding_endpoint(EmbeddingProbeOptions {
+            endpoint: "https://user:pass@example.com".to_string(),
+            model: "text-embedding-3-small".to_string(),
+            api_key: None,
+            input_type: None,
+            truncate: None,
+            timeout_ms: 100,
+        })
+        .await;
+        match outcome {
+            EmbeddingProbeOutcome::NetworkError { message } => {
+                assert!(
+                    message.contains("must not include"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected credentials rejection, got {other:?}"),
+        }
     }
 
     #[test]
