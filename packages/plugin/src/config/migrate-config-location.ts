@@ -142,6 +142,49 @@ export function resolveLegacyConfigSources(directory: string): {
     };
 }
 
+export type ConfigHarness = "opencode" | "pi";
+
+/**
+ * Legacy sources owned by ONE harness, most-specific first. Used by the loaders
+ * as a NON-DESTRUCTIVE read fallback: when the shared CortexKit base is absent
+ * (migration not yet run, or refused because OpenCode and Pi legacy configs
+ * differ), the running harness reads its OWN legacy config rather than silently
+ * falling back to schema defaults — which would re-enable features the legacy
+ * config disabled. Each harness reads only its own files, so a differing pair
+ * stays correct per-harness until the user consolidates. The bare project-root
+ * `<root>/magic-context.*` was OpenCode-only historically.
+ */
+export function resolveLegacyConfigSourcesForHarness(
+    directory: string,
+    harness: ConfigHarness,
+): { user: LegacyConfigSource[]; project: LegacyConfigSource[] } {
+    if (harness === "pi") {
+        return {
+            user: legacySourcesForBase(
+                join(homeDir(), ".pi", "agent", CONFIG_FILE_BASENAME),
+                "Pi user",
+            ),
+            project: legacySourcesForBase(
+                join(directory, ".pi", CONFIG_FILE_BASENAME),
+                "Pi project",
+            ),
+        };
+    }
+    return {
+        user: legacySourcesForBase(
+            join(configHome(), "opencode", CONFIG_FILE_BASENAME),
+            "OpenCode user",
+        ),
+        project: [
+            ...legacySourcesForBase(join(directory, CONFIG_FILE_BASENAME), "project root"),
+            ...legacySourcesForBase(
+                join(directory, ".opencode", CONFIG_FILE_BASENAME),
+                "OpenCode project",
+            ),
+        ],
+    };
+}
+
 // ── JSONC semantics comparison (dependency-free, ported from AFT) ─────────────
 // A legacy source that semantically MATCHES an existing target is moved aside
 // (target wins); one that DIFFERS triggers refuse-and-warn (never auto-clobber).

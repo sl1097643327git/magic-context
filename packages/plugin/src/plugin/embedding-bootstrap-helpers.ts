@@ -39,7 +39,29 @@ export const EMBEDDING_AFFECTING_KEYS = new Set([
     // not let a broken value re-register mid-session.
     "embedding.input_type",
     "embedding.truncate",
+    // max_input_tokens + query_input_type fold into the chunk-embedding identity
+    // (getChunkEmbeddingModelId); a failed substitution on either would otherwise
+    // register as trusted and could drive a bogus chunk identity / GC.
+    "embedding.max_input_tokens",
+    "embedding.query_input_type",
 ]);
+
+// A `{env:VAR}` / `{file:path}` token left LITERAL in the resolved config.
+// Project-level config never expands these (security), so a project that puts a
+// token in an embedding field produces a literal string the registry would hash
+// into a BOGUS provider/chunk identity — registering it would clear the untrusted
+// latch and let GC reap the real model's vectors. Detect and treat as untrusted.
+const LITERAL_CONFIG_TOKEN_RE = /\{(?:env|file):[^}]+\}/;
+
+function embeddingConfigHasLiteralTokens(embedding: EmbeddingConfig | undefined): boolean {
+    if (!embedding) return false;
+    for (const value of Object.values(embedding)) {
+        if (typeof value === "string" && LITERAL_CONFIG_TOKEN_RE.test(value)) {
+            return true;
+        }
+    }
+    return false;
+}
 
 export const EMBEDDING_AFFECTING_TOP_LEVEL_KEYS = new Set(["embedding", "memory", "experimental"]);
 
@@ -90,6 +112,14 @@ export function isConfigLoadUntrusted(
         if (EMBEDDING_AFFECTING_TOP_LEVEL_KEYS.has(recoveredKey)) {
             return true;
         }
+    }
+
+    // A literal {env:}/{file:} token survived into an embedding field — only
+    // possible from an unexpanded project-config token (user tokens expand). The
+    // string would hash into a bogus identity, so treat the load as untrusted
+    // regardless of how the substitution warning happened to be worded.
+    if (embeddingConfigHasLiteralTokens(detailed.config.embedding)) {
+        return true;
     }
 
     return false;

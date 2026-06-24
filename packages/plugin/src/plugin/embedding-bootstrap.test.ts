@@ -36,22 +36,27 @@ afterEach(() => {
 });
 
 describe("ensureProjectRegisteredFromOpenCodeDirectory", () => {
-    it("uses observation mode without recording active embeddings when only legacy config exists", async () => {
+    it("reads the legacy config and registers the real identity (not observation) when only legacy config exists", async () => {
         const projectDir = tempDir("mc-legacy-boot-");
         process.env.HOME = tempDir("mc-legacy-home-");
         process.env.XDG_CONFIG_HOME = tempDir("mc-legacy-config-");
         process.env.XDG_DATA_HOME = tempDir("mc-legacy-data-");
-        writeFileSync(join(projectDir, "magic-context.jsonc"), '{"embedding":{"provider":"off"}}');
+        // Read-legacy-on-conflict: the CortexKit base is absent but THIS harness's
+        // legacy project config exists, so it is read and trusted — NOT treated as
+        // an untrusted/observation load that would suppress registration. The real
+        // embedding identity is registered so the project is fully functional
+        // before the user consolidates.
+        writeFileSync(
+            join(projectDir, "magic-context.jsonc"),
+            '{"embedding":{"provider":"openai-compatible","model":"qwen3","endpoint":"http://localhost:1234/v1"}}',
+        );
         const db = openDatabase();
         const projectIdentity = resolveProjectIdentity(projectDir);
 
         await ensureProjectRegisteredFromOpenCodeDirectory(projectDir, db);
 
         const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
-        expect(snapshot?.enabled).toBe(false);
-        expect(snapshot?.runtimeFingerprint).toStartWith("observation:");
-        expect(db.prepare("SELECT COUNT(*) AS count FROM embedding_identity_active").get()).toEqual(
-            { count: 0 },
-        );
+        expect(snapshot?.enabled).toBe(true);
+        expect(snapshot?.runtimeFingerprint).not.toStartWith("observation:");
     });
 });

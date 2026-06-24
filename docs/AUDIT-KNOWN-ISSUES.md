@@ -792,3 +792,19 @@ corroborated by the other 8 members):**
   stale dashboard `MemoryCategory` TS union; `RAW_QUOTE_REGEX` misses curly
   single quotes; dedup key collapses same-ms messages (1-message boundary
   re-read is covered by idempotence). All cosmetic / self-healing.
+
+### A. Embedding untrusted-load latch is process-local (not persisted)
+The per-model embedding GC consults an in-memory `untrustedLoadProjects` Set to
+skip GC for a project whose latest config load was degraded/untrusted. An audit
+recurringly flags this as cross-process-unsafe on the shared OpenCode+Pi DB ("a
+sibling process could GC a project another process latched untrusted"). Verified
+not reachable: `sweepStaleEmbeddingIdentitiesForProject` has exactly ONE caller
+(`dream-timer.ts` `sweepProject`), and the line immediately before it
+(`await reg.ensureRegistered(...)` → `ensureProjectRegisteredFromOpenCodeDirectory`)
+re-reads the on-disk config and re-derives `isConfigLoadUntrusted` → re-latches
+in the SAME process before that process's GC runs. So a process only ever GCs
+when its own fresh read of the same on-disk config was trusted; there is no
+window where it GCs off a stale trusted registration. Pi never calls the GC at
+all. Persisting the latch (a migration + cross-process write coordination) would
+add complexity for a window that does not exist given this ordering. If the
+ensureRegistered-before-GC pairing is ever broken, revisit this.

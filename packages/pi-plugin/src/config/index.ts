@@ -1,7 +1,9 @@
 import {
 	cortexKitProjectConfigBasePath,
 	cortexKitUserConfigBasePath,
+	type LegacyConfigSource,
 	resolveLegacyConfigSources,
+	resolveLegacyConfigSourcesForHarness,
 } from "@magic-context/core/config/migrate-config-location";
 import "@magic-context/core/config/prune-config-leaf";
 import { existsSync, readFileSync } from "node:fs";
@@ -79,6 +81,17 @@ function getUserConfigPaths(): string[] {
 
 function resolveFirstExisting(paths: string[]): string | undefined {
 	return paths.find((path) => existsSync(path));
+}
+
+// When the shared CortexKit base is absent (migration refused on a differing
+// OpenCode/Pi pair, or not yet run), read Pi's OWN legacy file as a
+// non-destructive fallback rather than silently using schema defaults — which
+// would re-enable features the user's real config disabled. Pi reads only Pi
+// legacy paths so a differing pair stays correct per-harness.
+function resolvePiLegacyFallback(
+	sources: readonly LegacyConfigSource[],
+): LegacyConfigSource | null {
+	return sources.find((source) => existsSync(source.path)) ?? null;
 }
 
 function loadConfigFile(
@@ -272,31 +285,51 @@ export function loadPiConfig(
 	const loadedFiles: LoadedConfigFile[] = [];
 	const warnings: string[] = [];
 	const legacySources = resolveLegacyConfigSources(cwd);
+	const harnessLegacy = resolveLegacyConfigSourcesForHarness(cwd, "pi");
 
 	const projectPath = resolveFirstExisting(getProjectConfigPaths(cwd));
-	if (projectPath) {
-		const loaded = loadConfigFile(projectPath, "project");
+	const projectLegacyFallback = projectPath
+		? null
+		: resolvePiLegacyFallback(harnessLegacy.project);
+	const projectReadPath = projectPath ?? projectLegacyFallback?.path;
+	if (projectReadPath) {
+		const loaded = loadConfigFile(projectReadPath, "project");
 		if (loaded) loadedFiles.push(loaded);
 	}
 	const legacyProjectUnmigrated =
 		!projectPath &&
+		!projectLegacyFallback &&
 		legacySources.project.some((source) => existsSync(source.path));
 
 	const userPath = resolveFirstExisting(getUserConfigPaths());
-	if (userPath) {
-		const loaded = loadConfigFile(userPath, "user");
+	const userLegacyFallback = userPath
+		? null
+		: resolvePiLegacyFallback(harnessLegacy.user);
+	const userReadPath = userPath ?? userLegacyFallback?.path;
+	if (userReadPath) {
+		const loaded = loadConfigFile(userReadPath, "user");
 		if (loaded) loadedFiles.push(loaded);
 	}
 	const legacyUserUnmigrated =
-		!userPath && legacySources.user.some((source) => existsSync(source.path));
+		!userPath &&
+		!userLegacyFallback &&
+		legacySources.user.some((source) => existsSync(source.path));
 
-	if (legacyUserUnmigrated) {
+	if (userLegacyFallback) {
+		warnings.push(
+			`[user config] reading legacy config from ${userLegacyFallback.path} until migration completes; run \`npx @cortexkit/magic-context doctor\` to consolidate into the shared CortexKit location.`,
+		);
+	} else if (legacyUserUnmigrated) {
 		warnings.push(
 			"[user config] legacy Magic Context config exists but the shared CortexKit config is absent; embedding registration is paused until config migration completes.",
 		);
 	}
 
-	if (legacyProjectUnmigrated) {
+	if (projectLegacyFallback) {
+		warnings.push(
+			`[project config] reading legacy config from ${projectLegacyFallback.path} until migration completes; run \`npx @cortexkit/magic-context doctor\` to consolidate into the shared CortexKit location.`,
+		);
+	} else if (legacyProjectUnmigrated) {
 		warnings.push(
 			"[project config] legacy Magic Context config exists but the shared CortexKit config is absent; embedding registration is paused until config migration completes.",
 		);
@@ -414,31 +447,51 @@ export function loadPiConfigDetailed(
 	const loadedFiles: LoadedConfigFile[] = [];
 	const warnings: string[] = [];
 	const legacySources = resolveLegacyConfigSources(cwd);
+	const harnessLegacy = resolveLegacyConfigSourcesForHarness(cwd, "pi");
 
 	const projectPath = resolveFirstExisting(getProjectConfigPaths(cwd));
-	if (projectPath) {
-		const loaded = loadConfigFile(projectPath, "project");
+	const projectLegacyFallback = projectPath
+		? null
+		: resolvePiLegacyFallback(harnessLegacy.project);
+	const projectReadPath = projectPath ?? projectLegacyFallback?.path;
+	if (projectReadPath) {
+		const loaded = loadConfigFile(projectReadPath, "project");
 		if (loaded) loadedFiles.push(loaded);
 	}
 	const legacyProjectUnmigrated =
 		!projectPath &&
+		!projectLegacyFallback &&
 		legacySources.project.some((source) => existsSync(source.path));
 
 	const userPath = resolveFirstExisting(getUserConfigPaths());
-	if (userPath) {
-		const loaded = loadConfigFile(userPath, "user");
+	const userLegacyFallback = userPath
+		? null
+		: resolvePiLegacyFallback(harnessLegacy.user);
+	const userReadPath = userPath ?? userLegacyFallback?.path;
+	if (userReadPath) {
+		const loaded = loadConfigFile(userReadPath, "user");
 		if (loaded) loadedFiles.push(loaded);
 	}
 	const legacyUserUnmigrated =
-		!userPath && legacySources.user.some((source) => existsSync(source.path));
+		!userPath &&
+		!userLegacyFallback &&
+		legacySources.user.some((source) => existsSync(source.path));
 
-	if (legacyUserUnmigrated) {
+	if (userLegacyFallback) {
+		warnings.push(
+			`[user config] reading legacy config from ${userLegacyFallback.path} until migration completes; run \`npx @cortexkit/magic-context doctor\` to consolidate into the shared CortexKit location.`,
+		);
+	} else if (legacyUserUnmigrated) {
 		warnings.push(
 			"[user config] legacy Magic Context config exists but the shared CortexKit config is absent; embedding registration is paused until config migration completes.",
 		);
 	}
 
-	if (legacyProjectUnmigrated) {
+	if (projectLegacyFallback) {
+		warnings.push(
+			`[project config] reading legacy config from ${projectLegacyFallback.path} until migration completes; run \`npx @cortexkit/magic-context doctor\` to consolidate into the shared CortexKit location.`,
+		);
+	} else if (legacyProjectUnmigrated) {
 		warnings.push(
 			"[project config] legacy Magic Context config exists but the shared CortexKit config is absent; embedding registration is paused until config migration completes.",
 		);

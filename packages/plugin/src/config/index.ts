@@ -5,7 +5,9 @@ import { migrateLegacyAgentEnabledInMemory } from "./agent-disable";
 import {
     cortexKitProjectConfigBasePath,
     cortexKitUserConfigBasePath,
+    type LegacyConfigSource,
     resolveLegacyConfigSources,
+    resolveLegacyConfigSourcesForHarness,
 } from "./migrate-config-location";
 import { migrateDreamerV2 } from "./migrate-dreamer-v2";
 import { migrateLegacyExperimental } from "./migrate-experimental";
@@ -31,16 +33,36 @@ export interface MagicContextPluginConfig extends MagicContextConfig {
     >;
 }
 
-// Config is read ONLY from the shared CortexKit location (hard cutover). The
-// legacy per-harness paths are touched only by the location migrator
-// (migrate-config-location.ts), which runs at plugin init and moves them to the
-// CortexKit path before the loader runs. They are never a read-fallback.
+// Config is read from the shared CortexKit location. The location migrator
+// (migrate-config-location.ts) runs at plugin init and moves legacy per-harness
+// files to the CortexKit path before the loader runs. When the migration could
+// NOT complete (it refuses on an OpenCode-vs-Pi config that differs, or it never
+// ran in this process), the CortexKit base is absent — in that case the loader
+// reads THIS harness's own legacy file as a non-destructive fallback rather than
+// silently using schema defaults (which would re-enable features the user's real
+// config disabled). See resolveLegacyReadFallback.
 function getUserConfigBasePath(): string {
     return cortexKitUserConfigBasePath();
 }
 
 function getProjectConfigBasePath(directory: string): string {
     return cortexKitProjectConfigBasePath(directory);
+}
+
+interface LegacyReadFallback {
+    /** The legacy file we read, or null if no harness-owned legacy file exists. */
+    source: LegacyConfigSource | null;
+}
+
+/**
+ * First existing legacy source owned by the OpenCode harness, for the read
+ * fallback when the CortexKit base is absent. Pi has its own loader with the
+ * symmetric Pi-scoped fallback.
+ */
+function resolveLegacyReadFallback(
+    sources: readonly LegacyConfigSource[],
+): LegacyReadFallback {
+    return { source: sources.find((s) => existsSync(s.path)) ?? null };
 }
 
 interface LoadedConfigFile {
@@ -513,34 +535,71 @@ function combinedOutcome(args: {
 }
 
 export function loadPluginConfigDetailed(directory: string): LoadResultDetailed {
-    // Hard cutover — CortexKit paths only (see loadPluginConfig).
     const userDetected = detectConfigFile(getUserConfigBasePath());
     const projectDetected = detectConfigFile(getProjectConfigBasePath(directory));
+    // Both-harness sources drive the GC-suppression signal; this-harness sources
+    // (OpenCode) drive the non-destructive read fallback when the base is absent.
     const legacySources = resolveLegacyConfigSources(directory);
+    const harnessLegacy = resolveLegacyConfigSourcesForHarness(directory, "opencode");
+
+    // When the CortexKit base is absent (migration refused on a differing
+    // OpenCode/Pi pair, or hasn't run), read THIS harness's own legacy file
+    // instead of falling to schema defaults that would silently re-enable
+    // features the user disabled.
+    const userLegacyFallback =
+        userDetected.format === "none"
+            ? resolveLegacyReadFallback(harnessLegacy.user)
+            : { source: null };
+    const projectLegacyFallback =
+        projectDetected.format === "none"
+            ? resolveLegacyReadFallback(harnessLegacy.project)
+            : { source: null };
+
+    // "Unmigrated" (→ untrusted, GC suppressed) ONLY when the base is absent,
+    // some legacy config exists, AND we did NOT read this harness's own legacy.
+    // If we read our own legacy the config is real → trusted. If only the OTHER
+    // harness's legacy exists we fell to defaults → keep GC suppressed so a
+    // default-config start can't reap the other harness's embedding vectors.
     const legacyUserUnmigrated =
         userDetected.format === "none" &&
+        !userLegacyFallback.source &&
         legacySources.user.some((source) => existsSync(source.path));
     const legacyProjectUnmigrated =
         projectDetected.format === "none" &&
+        !projectLegacyFallback.source &&
         legacySources.project.some((source) => existsSync(source.path));
 
     const userLoaded =
-        userDetected.format === "none" ? null : loadConfigFileDetailed(userDetected.path, "user");
+        userDetected.format !== "none"
+            ? loadConfigFileDetailed(userDetected.path, "user")
+            : userLegacyFallback.source
+              ? loadConfigFileDetailed(userLegacyFallback.source.path, "user")
+              : null;
     const projectLoaded =
-        projectDetected.format === "none"
-            ? null
-            : loadConfigFileDetailed(projectDetected.path, "project");
+        projectDetected.format !== "none"
+            ? loadConfigFileDetailed(projectDetected.path, "project")
+            : projectLegacyFallback.source
+              ? loadConfigFileDetailed(projectLegacyFallback.source.path, "project")
+              : null;
 
     const allWarnings: string[] = [];
     let mergedRaw: Record<string, unknown> = {};
 
-    if (legacyUserUnmigrated) {
+    if (userLegacyFallback.source) {
+        allWarnings.push(
+            `[user config] reading legacy config from ${userLegacyFallback.source.path} until migration completes; run \`npx @cortexkit/magic-context doctor\` to consolidate into the shared CortexKit location.`,
+        );
+    } else if (legacyUserUnmigrated) {
         allWarnings.push(
             "[user config] legacy Magic Context config exists but the shared CortexKit config is absent; embedding registration is paused until config migration completes.",
         );
     }
 
-    if (legacyProjectUnmigrated) {
+    if (projectLegacyFallback.source) {
+        allWarnings.push(
+            `[project config] reading legacy config from ${projectLegacyFallback.source.path} until migration completes; run \`npx @cortexkit/magic-context doctor\` to consolidate into the shared CortexKit location.`,
+        );
+    } else if (legacyProjectUnmigrated) {
         allWarnings.push(
             "[project config] legacy Magic Context config exists but the shared CortexKit config is absent; embedding registration is paused until config migration completes.",
         );

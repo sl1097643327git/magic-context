@@ -19,6 +19,7 @@ export function getEmbeddingProviderIdentity(config: EmbeddingConfig): string {
         return "embedding-provider:off";
     }
 
+    const truncate = config.provider === "openai-compatible" ? config.truncate?.trim() : undefined;
     const identityInput =
         config.provider === "openai-compatible"
             ? {
@@ -28,9 +29,18 @@ export function getEmbeddingProviderIdentity(config: EmbeddingConfig): string {
                   apiKeyPresent: Boolean(config.api_key?.trim()),
                   // input_type changes the embedding vector space (e.g. NIM
                   // 'query' vs 'passage'), so it participates in identity — a
-                  // change must re-embed. truncate only affects over-long inputs
-                  // and does not change the space, so it is intentionally omitted.
+                  // change must re-embed. truncate changes which text an over-long
+                  // input actually embeds, so a change can shift those vectors and
+                  // it participates too. (query_input_type shapes only per-call
+                  // query requests, never the stored passage vectors, so it stays
+                  // out.) truncate is spread CONDITIONALLY: omitting it when unset
+                  // keeps the identity byte-identical for the common no-truncate
+                  // config, so adding this term does not force a global re-embed —
+                  // only configs that actually set truncate get a new identity
+                  // (and under per-model coexistence even that just coexists +
+                  // lazily GCs, never a destructive wipe).
                   inputType: config.input_type?.trim() || "",
+                  ...(truncate ? { truncate } : {}),
               }
             : {
                   provider: "local",

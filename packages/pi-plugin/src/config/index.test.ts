@@ -79,6 +79,26 @@ describe("loadPiConfig", () => {
 		expect(result.warnings.join("\n")).toContain("legacy Magic Context config");
 	});
 
+	it("reads Pi's own legacy config instead of falling to defaults when the base is absent", () => {
+		const cwd = makeTempRoot("mc-pi-cwd-");
+		const home = makeTempRoot("mc-pi-home-");
+		withHome(home);
+		// Legacy Pi user config (~/.pi/agent/magic-context.jsonc) with a disabled
+		// setting. The CortexKit base is absent (migration refused/not run), so the
+		// loader must READ this real config — not silently default the setting on.
+		writeConfig(
+			join(home, ".pi", "agent", "magic-context.jsonc"),
+			'{"memory":{"enabled":false}}',
+		);
+
+		const result = loadPiConfigDetailed({ cwd });
+
+		expect(result.sources.userConfig).toBe("ok");
+		expect(result.loadOutcome).toBe("ok");
+		expect(result.config.memory.enabled).toBe(false);
+		expect(result.warnings.join("\n")).toContain("reading legacy config from");
+	});
+
 	it("returns defaults with no config files", () => {
 		const cwd = makeTempRoot("mc-pi-cwd-");
 		const home = makeTempRoot("mc-pi-home-");

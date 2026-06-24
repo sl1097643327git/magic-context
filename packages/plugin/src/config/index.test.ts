@@ -109,7 +109,7 @@ function loadWithUserAndProjectConfig(
 }
 
 describe("loadPluginConfig — secret redaction", () => {
-    it("marks an unmigrated legacy project config as an untrusted load", () => {
+    it("reads an unmigrated legacy project config instead of falling to defaults", () => {
         const xdg = mkdtempSync(join(tmpdir(), "mc-config-test-"));
         const home = mkdtempSync(join(tmpdir(), "mc-config-home-"));
         const projectDir = mkdtempSync(join(tmpdir(), "mc-config-legacy-proj-"));
@@ -117,15 +117,24 @@ describe("loadPluginConfig — secret redaction", () => {
         const origHome = process.env.HOME;
         process.env.XDG_CONFIG_HOME = xdg;
         process.env.HOME = home;
-        writeFileSync(join(projectDir, "magic-context.jsonc"), '{"embedding":{"provider":"off"}}');
+        // A real setting the user disabled: it MUST survive the unmigrated window,
+        // not be silently re-enabled by schema defaults (memory defaults to on).
+        writeFileSync(
+            join(projectDir, "magic-context.jsonc"),
+            '{"embedding":{"provider":"off"},"memory":{"enabled":false}}',
+        );
         try {
             const result = loadPluginConfigDetailed(projectDir);
 
-            expect(result.sources.projectConfig).toBe("legacy-config-unmigrated");
-            expect(result.loadOutcome).toBe("legacy-config-unmigrated");
-            expect(result.config.configWarnings?.join("\n")).toContain(
-                "legacy Magic Context config",
-            );
+            // Read-legacy-on-conflict: the legacy file is the source of truth
+            // until migration completes, so the load is trusted ("ok") and the
+            // real (disabled) setting is honored, not silently defaulted on.
+            // (embedding.* is intentionally stripped from project-scope config for
+            // security, so we assert a non-embedding setting survives.)
+            expect(result.sources.projectConfig).toBe("ok");
+            expect(result.loadOutcome).toBe("ok");
+            expect(result.config.memory.enabled).toBe(false);
+            expect(result.config.configWarnings?.join("\n")).toContain("reading legacy config from");
         } finally {
             if (origXdg === undefined) delete process.env.XDG_CONFIG_HOME;
             else process.env.XDG_CONFIG_HOME = origXdg;

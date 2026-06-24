@@ -1760,6 +1760,14 @@ const MIGRATIONS: Migration[] = [
                     SET model_id = 'legacy:unknown'
                     WHERE model_id IS NULL;
 
+                    -- Drop rows orphaned from their parent BEFORE the rebuild.
+                    -- The new table re-declares the FK and assertForeignKeyIntegrity
+                    -- runs after; a pre-existing orphan (parent deleted without the
+                    -- cascade firing) would otherwise fail the migration closed and
+                    -- disable the plugin. Mirrors the v12 orphan pre-clean.
+                    DELETE FROM memory_embeddings
+                    WHERE memory_id NOT IN (SELECT id FROM memories);
+
                     DROP TABLE IF EXISTS memory_embeddings_v49_new;
                     CREATE TABLE memory_embeddings_v49_new (
                         memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
@@ -1778,6 +1786,9 @@ const MIGRATIONS: Migration[] = [
 
             if (tableExists(db, "git_commit_embeddings")) {
                 db.exec(`
+                    DELETE FROM git_commit_embeddings
+                    WHERE sha NOT IN (SELECT sha FROM git_commits);
+
                     DROP TABLE IF EXISTS git_commit_embeddings_v49_new;
                     CREATE TABLE git_commit_embeddings_v49_new (
                         sha TEXT NOT NULL,
@@ -1798,6 +1809,9 @@ const MIGRATIONS: Migration[] = [
 
             if (tableExists(db, "compartment_chunk_embeddings")) {
                 db.exec(`
+                    DELETE FROM compartment_chunk_embeddings
+                    WHERE compartment_id NOT IN (SELECT id FROM compartments);
+
                     DROP INDEX IF EXISTS idx_cce_session;
                     DROP INDEX IF EXISTS idx_cce_project_model;
                     DROP TABLE IF EXISTS compartment_chunk_embeddings_v49_new;
