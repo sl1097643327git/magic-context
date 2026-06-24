@@ -134,7 +134,9 @@ describe("loadPluginConfig — secret redaction", () => {
             expect(result.sources.projectConfig).toBe("ok");
             expect(result.loadOutcome).toBe("ok");
             expect(result.config.memory.enabled).toBe(false);
-            expect(result.config.configWarnings?.join("\n")).toContain("reading legacy config from");
+            expect(result.config.configWarnings?.join("\n")).toContain(
+                "reading legacy config from",
+            );
         } finally {
             if (origXdg === undefined) delete process.env.XDG_CONFIG_HOME;
             else process.env.XDG_CONFIG_HOME = origXdg;

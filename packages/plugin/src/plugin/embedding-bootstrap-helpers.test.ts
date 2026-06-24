@@ -1,7 +1,10 @@
 import { describe, expect, it } from "bun:test";
 
 import type { EmbeddingConfig } from "../config/schema/magic-context";
-import { type EmbeddingLoadResultDetailed, isConfigLoadUntrusted } from "./embedding-bootstrap-helpers";
+import {
+    type EmbeddingLoadResultDetailed,
+    isConfigLoadUntrusted,
+} from "./embedding-bootstrap-helpers";
 
 type Detailed = EmbeddingLoadResultDetailed<{ embedding: EmbeddingConfig }>;
 

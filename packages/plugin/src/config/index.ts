@@ -59,9 +59,7 @@ interface LegacyReadFallback {
  * fallback when the CortexKit base is absent. Pi has its own loader with the
  * symmetric Pi-scoped fallback.
  */
-function resolveLegacyReadFallback(
-    sources: readonly LegacyConfigSource[],
-): LegacyReadFallback {
+function resolveLegacyReadFallback(sources: readonly LegacyConfigSource[]): LegacyReadFallback {
     return { source: sources.find((s) => existsSync(s.path)) ?? null };
 }
 
