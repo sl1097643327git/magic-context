@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import type { EmbeddingConfig } from "../config/schema/magic-context";
 import {
     getProjectEmbeddingSnapshot,
+    markProjectLoadUntrusted,
     registerProjectInObservationMode,
 } from "../features/magic-context/memory/embedding";
 import { log } from "../shared/logger";
@@ -144,6 +145,13 @@ export function handleUntrustedLoad(
     directory: string,
     detailed: EmbeddingLoadResultDetailed<{ embedding: EmbeddingConfig }>,
 ): boolean {
+    // Latch the project as untrusted so the stale-identity GC is suppressed for
+    // it until a trusted config re-registers. This holds whether we keep the
+    // prior last-known-good registration or fall through to observation mode —
+    // in both states the on-disk config is broken/mid-migration and must not
+    // drive embedding deletion.
+    markProjectLoadUntrusted(projectIdentity);
+
     const prior = getProjectEmbeddingSnapshot(projectIdentity);
     if (prior && !prior.runtimeFingerprint.startsWith("observation:")) {
         logConfigFailureOnce(projectIdentity, detailed);

@@ -155,6 +155,21 @@ const staleIdentityStatements = new Map<
 >();
 const deleteActiveIdentityStatements = new WeakMap<Database, PreparedStatement>();
 let globalRegistrationGeneration = 0;
+
+/**
+ * Projects whose most-recent config load was untrusted (parse/IO error, legacy
+ * config unmigrated, or an embedding-affecting substitution/recovery failure).
+ * While a project is latched here we keep serving its last-known-good provider
+ * for reads/writes but SUPPRESS the destructive stale-identity GC — a degraded
+ * load must never delete embedding rows off a config we don't trust. The latch
+ * clears the next time a trusted config successfully registers the project.
+ */
+const untrustedLoadProjects = new Set<string>();
+
+/** Latch a project as currently loaded from an untrusted config (suppresses GC). */
+export function markProjectLoadUntrusted(projectIdentity: string): void {
+    untrustedLoadProjects.add(projectIdentity);
+}
 let projectSweepInProgress = false;
 let testProviderFactory: ((config: EmbeddingConfig) => EmbeddingProvider | null) | null = null;
 
@@ -488,9 +503,22 @@ export function sweepStaleEmbeddingIdentitiesForProject(
     };
     if (!snapshot) return result;
 
+    // A degraded/untrusted config load must never drive deletion: the snapshot
+    // we'd GC against may be last-known-good while the on-disk config is broken
+    // or mid-migration. Reads keep serving the cached vectors; GC waits until a
+    // trusted register clears the latch.
+    if (untrustedLoadProjects.has(projectIdentity)) return result;
+
     const cutoff = now - EMBEDDING_IDENTITY_GC_GRACE_MS;
     const deleteTracking = getDeleteActiveIdentityStatement(db);
-    db.transaction(() => {
+    // Atomic select+delete under one write lock: registration commits the
+    // current model's last_active_at inside BEGIN IMMEDIATE, so GC must hold the
+    // same lock across its stale-select → delete window. A deferred transaction
+    // could select a stale id, lose the lock to a concurrent re-registration of
+    // that exact model (which refreshes last_active_at), then delete the
+    // freshly-reactivated rows anyway.
+    db.exec("BEGIN IMMEDIATE");
+    try {
         if (snapshot.enabled && snapshot.modelId !== "off") {
             for (const modelId of staleModelsForScope(
                 db,
@@ -549,7 +577,15 @@ export function sweepStaleEmbeddingIdentitiesForProject(
                 ).changes;
             }
         }
-    })();
+        db.exec("COMMIT");
+    } catch (error) {
+        try {
+            db.exec("ROLLBACK");
+        } catch {
+            // The transaction may already be closed by SQLite after a fatal error.
+        }
+        throw error;
+    }
 
     if (result.memoryRowsDeleted > 0) {
         invalidateProject(projectIdentity);
@@ -575,6 +611,9 @@ export function registerProjectEmbedding(
         prior.runtimeFingerprint === runtimeFingerprint &&
         prior.providerIdentity === providerIdentity;
     recordActiveEmbeddingIdentity(db, projectIdentity, providerIdentity, chunkModelId, features);
+    // A trusted registration just landed — clear any prior untrusted-load latch
+    // so GC can resume for this project.
+    untrustedLoadProjects.delete(projectIdentity);
     const generationChanged =
         prior === undefined ||
         prior.observationMode ||
@@ -1440,6 +1479,7 @@ export function _resetProjectEmbeddingRegistryForTests(): void {
         disposeProvider(registration.provider);
     }
     projectRegistrations.clear();
+    untrustedLoadProjects.clear();
     globalRegistrationGeneration = 0;
     projectSweepInProgress = false;
     testProviderFactory = null;

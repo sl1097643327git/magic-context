@@ -22,6 +22,7 @@ export {
     embedUnembeddedCompartmentChunksForProject,
     embedUnembeddedMemoriesForProject,
     getProjectEmbeddingSnapshot,
+    markProjectLoadUntrusted,
     registerProjectEmbedding,
     registerProjectInObservationMode,
     sweepAllRegisteredProjects,

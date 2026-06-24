@@ -32,6 +32,7 @@ import {
     embedTextForProject,
     embedUnembeddedCompartmentChunksForProject,
     getProjectEmbeddingSnapshot,
+    markProjectLoadUntrusted,
     registerProjectEmbedding,
     registerProjectInObservationMode,
     sweepAllRegisteredProjects,
@@ -580,6 +581,64 @@ describe("project embedding registry", () => {
         const withinGrace = sweepStaleEmbeddingIdentitiesForProject(db, projectIdentity, now);
         expect(withinGrace.memoryRowsDeleted).toBe(0);
         expect(loadAllEmbeddings(db, projectIdentity, first.modelId).size).toBe(1);
+    });
+
+    it("suppresses GC while a project's last config load was untrusted", () => {
+        const db = useTempDb();
+        const projectIdentity = "git:untrusted-gc";
+        const memory = insertMemory(db, {
+            projectPath: projectIdentity,
+            category: "CONSTRAINTS",
+            content: "Do not GC off a degraded config load.",
+        });
+        const now = Date.now();
+
+        const first = registerProjectEmbedding(
+            db,
+            projectIdentity,
+            localConfig("model-a"),
+            { memoryEnabled: true, gitCommitEnabled: false },
+            "/tmp/untrusted-gc",
+        );
+        saveEmbedding(db, memory.id, new Float32Array([1, 0]), first.modelId);
+
+        const second = registerProjectEmbedding(
+            db,
+            projectIdentity,
+            localConfig("model-b"),
+            { memoryEnabled: true, gitCommitEnabled: false },
+            "/tmp/untrusted-gc",
+        );
+        saveEmbedding(db, memory.id, new Float32Array([0, 1]), second.modelId);
+        // Age model-a past the grace window so it is a genuine GC candidate.
+        db.prepare(
+            "UPDATE embedding_identity_active SET last_active_at = ? WHERE project_path = ? AND model_id = ?",
+        ).run(now - 15 * 24 * 60 * 60 * 1000, projectIdentity, first.modelId);
+
+        // A subsequent untrusted config load latches the project: GC must no-op
+        // even though model-a is a valid stale candidate, because the snapshot it
+        // would delete against is last-known-good rather than a trusted config.
+        markProjectLoadUntrusted(projectIdentity);
+        const suppressed = sweepStaleEmbeddingIdentitiesForProject(db, projectIdentity, now);
+        expect(suppressed.memoryRowsDeleted).toBe(0);
+        expect(loadAllEmbeddings(db, projectIdentity, first.modelId).size).toBe(1);
+
+        // A trusted re-register clears the latch; GC resumes and reaps model-a.
+        const third = registerProjectEmbedding(
+            db,
+            projectIdentity,
+            localConfig("model-b"),
+            { memoryEnabled: true, gitCommitEnabled: false },
+            "/tmp/untrusted-gc",
+        );
+        expect(third.modelId).toBe(second.modelId);
+        db.prepare(
+            "UPDATE embedding_identity_active SET last_active_at = ? WHERE project_path = ? AND model_id = ?",
+        ).run(now - 15 * 24 * 60 * 60 * 1000, projectIdentity, first.modelId);
+        const resumed = sweepStaleEmbeddingIdentitiesForProject(db, projectIdentity, now);
+        expect(resumed.memoryRowsDeleted).toBe(1);
+        expect(loadAllEmbeddings(db, projectIdentity, first.modelId).size).toBe(0);
+        expect(loadAllEmbeddings(db, projectIdentity, second.modelId).size).toBe(1);
     });
 
     it("keeps old-model compartment chunk embeddings inert on provider change", () => {
