@@ -5,11 +5,21 @@ description: The Magic Context desktop app for memories, session history, cache 
 
 The **Magic Context Dashboard** is a Tauri desktop app that reads and writes the same SQLite store and config files as the plugin. Use it when you want to browse or fix memories, inspect compartment history, debug provider cache behavior, inspect dreamer schedules and runs, or edit `magic-context.jsonc` without hand-editing JSON in an editor.
 
-## Install and updates
+## Download
 
-Build from source: see the dashboard `README` in the [magic-context](https://github.com/cortexkit/magic-context) repo (`packages/dashboard`). Production builds use Tauri’s updater against the project release manifest (`latest.json` on the project GitHub Pages site).
+Prebuilt installers for every release are on the [dashboard releases page](https://github.com/cortexkit/magic-context/releases?q=dashboard&expanded=true). Each release ships builds for:
 
-When an update is available, the app shows an **Update available** toast with **Install & Restart**. You can also use the tray **Check for Updates** action for an interactive download-and-install flow.
+- **macOS**: Apple Silicon (`darwin-arm64`) and Intel (`darwin-x64`) `.dmg` (signed and notarized)
+- **Windows**: x64 and ARM64 `.exe` (and an `.msi` for x64)
+- **Linux**: x64 and ARM64 `.AppImage`, `.deb`, and `.rpm`
+
+Grab the file for your platform from the newest `dashboard-vX.Y.Z` release. The dashboard reads the same SQLite store as the plugin, so it is safe to run alongside any plugin version (it degrades gracefully if your database predates the plugin features it surfaces).
+
+You can also build from source: see the dashboard `README` in the [magic-context](https://github.com/cortexkit/magic-context) repo (`packages/dashboard`).
+
+## Updates
+
+Production builds use Tauri’s updater against the project release manifest (`latest.json` on the project GitHub Pages site). When an update is available, the app shows an **Update available** toast with **Install & Restart**. You can also use the tray **Check for Updates** action for an interactive download-and-install flow.
 
 The plugin must have run at least once so `context.db` exists (see dashboard README for default paths on your OS).
 

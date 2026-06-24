@@ -1,7 +1,7 @@
 import * as childProcess from "node:child_process";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join, resolve as resolvePath } from "node:path";
+import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { openDatabase } from "@magic-context/core/features/magic-context/storage";
@@ -50,6 +50,70 @@ function resolveBundledPiCli(): string | null {
 	} catch {
 		return null;
 	}
+}
+
+/** How to spawn a Pi child: the binary plus any fixed leading args. Always
+ *  spawned without a shell (see {@link resolvePiInvocation}). */
+interface PiInvocation {
+	command: string;
+	prefixArgs: string[];
+}
+
+/**
+ * Resolve how to spawn a Pi subagent, robust across POSIX and Windows.
+ *
+ * The key fix (#177): never depend on a bare `pi` on PATH or on a POSIX
+ * shebang. On Windows a global npm install puts `pi.cmd` / `pi.ps1` on PATH (not
+ * a literal `pi`), and Node's `spawn("pi")` without a shell looks for a file
+ * named exactly `pi`, so it ENOENTs; and Windows ignores the `#!/usr/bin/env
+ * node` shebang entirely, so spawning `dist/cli.js` "directly" only works on
+ * POSIX. The reliable, cross-platform approach is to re-invoke the EXACT host
+ * CLI the user is already running: `process.execPath` (the node/bun binary) plus
+ * `process.argv[1]` (the absolute path to the running `cli.js`). That sidesteps
+ * shim resolution completely and pins the child to the same Pi version/runtime.
+ *
+ * Mirrors Pi's own `getPiInvocation` reference. MUST be evaluated in the host Pi
+ * process (extensions load in-process, so `argv[1]` is the host `cli.js`).
+ *
+ * Resolution order:
+ *   1. argv[1] is a real on-disk script (not a bun-compiled `/$bunfs/root/`
+ *      virtual path) -> `execPath cli.js ...` (node + absolute cli.js).
+ *   2. execPath is a packaged binary (basename not node/bun) -> `execPath ...`
+ *      (the compiled binary IS pi; no script arg).
+ *   3. A bundled `@earendil-works/pi-coding-agent/dist/cli.js` resolves ->
+ *      `execPath cli.js ...` (node + resolved cli.js).
+ *   4. Last resort: bare `pi` on PATH.
+ *
+ * Everything is spawned WITHOUT a shell. The primary path (execPath + argv[1])
+ * covers every real runtime because the extension loads in-process, so argv[1]
+ * is the host cli.js; the bare-`pi` step is a near-unreachable backstop. We do
+ * NOT fall back to a shell for it (which on Windows would resolve the .cmd shim
+ * but pass the prompt/task text through cmd.exe, exposing arg-escaping and
+ * injection), and we don't pull in cross-spawn just for a dead path.
+ */
+function resolvePiInvocation(): PiInvocation {
+	const execPath = process.execPath;
+	const currentScript = process.argv[1];
+	const isBunVirtualScript =
+		currentScript?.startsWith("/$bunfs/root/") ?? false;
+
+	if (currentScript && !isBunVirtualScript && existsSync(currentScript)) {
+		return { command: execPath, prefixArgs: [currentScript] };
+	}
+
+	const execName = basename(execPath).toLowerCase();
+	const isGenericRuntime = /^(node|bun)(\.exe)?$/.test(execName);
+	if (!isGenericRuntime) {
+		// A packaged single-file binary: execPath itself is pi.
+		return { command: execPath, prefixArgs: [] };
+	}
+
+	const bundled = resolveBundledPiCli();
+	if (bundled) {
+		return { command: execPath, prefixArgs: [bundled] };
+	}
+
+	return { command: "pi", prefixArgs: [] };
 }
 
 /**
@@ -242,17 +306,13 @@ export class PiSubagentRunner implements SubagentRunner {
 	readonly harness = "pi";
 
 	/**
-	 * What to invoke to spawn a Pi subagent. Resolution order:
-	 *   1. Explicit `options.piBinary` (test seam, advanced users).
-	 *   2. The bundled `@earendil-works/pi-coding-agent/dist/cli.js` resolved
-	 *      via `require.resolve` against this module — spawned directly.
-	 *      Pi's CLI ships `#!/usr/bin/env node` and npm sets the exec bit
-	 *      during install, so the OS runs it under Node. Works for CI, e2e,
-	 *      npm-only installs, and npx users.
-	 *   3. Fallback to `pi` on PATH — happy path for interactive Pi CLI users
-	 *      who installed the global binary.
+	 * How to invoke a Pi subagent (command + fixed leading args + shell flag).
+	 * Resolved once at construction in the host process so `process.argv[1]`
+	 * points at the host `cli.js`. See {@link resolvePiInvocation} for the
+	 * cross-platform order; an explicit `options.piBinary` overrides it (test
+	 * seam + advanced users who point at their own pi build).
 	 */
-	private readonly piBinary: string;
+	private readonly invocation: PiInvocation;
 	private readonly spawnImpl: typeof childProcess.spawn;
 
 	constructor(
@@ -262,23 +322,9 @@ export class PiSubagentRunner implements SubagentRunner {
 			spawnImpl?: typeof childProcess.spawn;
 		} = {},
 	) {
-		if (options.piBinary) {
-			// Explicit override always wins. Used by tests + advanced users
-			// who already point at their own pi build.
-			this.piBinary = options.piBinary;
-		} else {
-			const bundled = resolveBundledPiCli();
-			if (bundled) {
-				// node_modules-resolved CLI script. Pi's dist/cli.js carries
-				// `#!/usr/bin/env node` plus its exec bit, so spawning the
-				// path directly runs it under Node without any extra runtime.
-				this.piBinary = bundled;
-			} else {
-				// Last-ditch fallback: assume `pi` is on PATH. This is the
-				// happy path for interactive Pi CLI users.
-				this.piBinary = "pi";
-			}
-		}
+		this.invocation = options.piBinary
+			? { command: options.piBinary, prefixArgs: [] }
+			: resolvePiInvocation();
 		this.spawnImpl = options.spawnImpl ?? childProcess.spawn;
 	}
 
@@ -419,19 +465,23 @@ export class PiSubagentRunner implements SubagentRunner {
 
 			let child: ReturnType<typeof childProcess.spawn>;
 			try {
-				child = this.spawnImpl(this.piBinary, args, {
-					cwd: options.cwd,
-					// Inherit env so OAuth tokens (~/.pi/agent/auth.json),
-					// API key env vars, and PATH all flow through. The Pi
-					// CLI reads its own auth state from disk on startup.
-					env: process.env,
-					// stdout = JSON events; stderr = diagnostics. stdin is a pipe
-					// ONLY on the large-prompt path (we write the message then end
-					// it); otherwise it stays closed because the message rides in
-					// argv and print-mode would otherwise block reading an open,
-					// idle stdin.
-					stdio: [deliverViaStdin ? "pipe" : "ignore", "pipe", "pipe"],
-				});
+				child = this.spawnImpl(
+					this.invocation.command,
+					[...this.invocation.prefixArgs, ...args],
+					{
+						cwd: options.cwd,
+						// Inherit env so OAuth tokens (~/.pi/agent/auth.json),
+						// API key env vars, and PATH all flow through. The Pi
+						// CLI reads its own auth state from disk on startup.
+						env: process.env,
+						// stdout = JSON events; stderr = diagnostics. stdin is a pipe
+						// ONLY on the large-prompt path (we write the message then end
+						// it); otherwise it stays closed because the message rides in
+						// argv and print-mode would otherwise block reading an open,
+						// idle stdin.
+						stdio: [deliverViaStdin ? "pipe" : "ignore", "pipe", "pipe"],
+					},
+				);
 			} catch (error) {
 				settle({
 					ok: false,

@@ -79,13 +79,18 @@ export function detectConfigPaths(): ConfigPaths {
     const tuiJsoncPath = join(configDir, "tui.jsonc");
     const tuiJsonPath = join(configDir, "tui.json");
     if (existsSync(tuiJsoncPath)) {
+        // OpenCode merges tui.json + tui.jsonc with tui.jsonc winning, so an
+        // existing tui.jsonc is the higher-precedence user file — write into it.
         tuiConfig = tuiJsoncPath;
         tuiConfigFormat = "jsonc";
     } else if (existsSync(tuiJsonPath)) {
         tuiConfig = tuiJsonPath;
         tuiConfigFormat = "json";
     } else {
-        tuiConfig = tuiJsonPath;
+        // Fresh install: create tui.jsonc (not tui.json) so the user can add
+        // comments later and we don't leave a second, lower-precedence file
+        // alongside a tui.jsonc they create afterward (#176).
+        tuiConfig = tuiJsoncPath;
         tuiConfigFormat = "none";
     }
 

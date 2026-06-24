@@ -499,6 +499,46 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		});
 	});
 
+	it("with no piBinary override, spawns the host runtime + cli.js (Windows-safe, #177)", async () => {
+		// Default resolution must NOT spawn a bare "pi" (which ENOENTs on Windows
+		// because npm installs a pi.cmd shim, not a literal pi). It re-invokes the
+		// exact host CLI: process.execPath + process.argv[1], with no shell.
+		const child = createMockChild();
+		const spawnImpl = mock(() => child as never);
+		const { PiSubagentRunner } = await import("./subagent-runner");
+		const runner = new PiSubagentRunner({ spawnImpl: spawnImpl as never });
+
+		const resultPromise = runner.run(baseOptions);
+		child.writeStdoutLine({ type: "session", id: "s1" });
+		child.writeStdoutLine(
+			agentEnd([
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "ok" }],
+					stopReason: "stop",
+				},
+			]),
+		);
+		child.emitClose(0);
+		await resultPromise;
+
+		expect(spawnImpl).toHaveBeenCalledTimes(1);
+		const [command, spawnArgs, opts] = (
+			spawnImpl.mock.calls as unknown[][]
+		)[0] as [string, string[], { shell?: boolean }];
+		// In this test runner argv[1] is a real on-disk script (bun/node test
+		// file), so the host-CLI branch fires: command is the runtime, the first
+		// arg is the running script, and the child is spawned without a shell.
+		expect(command).toBe(process.execPath);
+		expect(spawnArgs[0]).toBe(process.argv[1]);
+		expect(spawnArgs).toContain("--no-session");
+		// Never spawned through a shell (no cmd.exe in the path = no arg-escaping
+		// or injection on the untrusted prompt/task text).
+		expect(opts.shell).toBeFalsy();
+		// Crucially, never a bare "pi".
+		expect(command).not.toBe("pi");
+	});
+
 	it("returns model_failed promptly for live terminal error stopReason", async () => {
 		const child = createMockChild();
 		const { runner } = runnerWith(child);

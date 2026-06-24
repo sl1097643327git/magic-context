@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { basename, dirname } from "node:path";
 import { detectConflicts } from "@magic-context/core/shared/conflict-detector";
 import { fixConflicts } from "@magic-context/core/shared/conflict-fixer";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
@@ -376,7 +376,7 @@ export async function runSetup(dryRun = false): Promise<number> {
     // Write magic-context config
     if (dryRun) {
         log.message(`[dry-run] would write Magic Context config to ${paths.magicContextConfig}`);
-        log.message("[dry-run] would add the TUI sidebar plugin to tui.json");
+        log.message(`[dry-run] would add the TUI sidebar plugin to ${paths.tuiConfig}`);
     } else {
         writeMagicContextConfig(paths.magicContextConfig, {
             historianModel,
@@ -389,7 +389,7 @@ export async function runSetup(dryRun = false): Promise<number> {
         });
         log.success(`Config written to ${paths.magicContextConfig}`);
         addPluginToTuiConfig(paths.tuiConfig, paths.tuiConfigFormat);
-        log.success("TUI sidebar plugin added to tui.json");
+        log.success(`TUI sidebar plugin added to ${basename(paths.tuiConfig)}`);
     }
 
     // ─── Step 8: Oh-My-OpenCode compatibility ───────────

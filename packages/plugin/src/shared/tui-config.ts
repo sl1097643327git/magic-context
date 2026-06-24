@@ -62,9 +62,16 @@ function resolveTuiConfigPath(): string {
     const jsoncPath = join(configDir, "tui.jsonc");
     const jsonPath = join(configDir, "tui.json");
 
+    // OpenCode loads BOTH tui.json and tui.jsonc and merges them (tui.json first,
+    // tui.jsonc second, so .jsonc wins overlapping keys; plugin origins are
+    // deduped). So an existing tui.jsonc is the higher-precedence, user-facing
+    // file — write into it when present. Otherwise update an existing tui.json.
+    // For a fresh install create tui.jsonc, not tui.json: it lets the user add
+    // comments later and avoids leaving a second, lower-precedence config file
+    // alongside a tui.jsonc they create afterward (#176).
     if (existsSync(jsoncPath)) return jsoncPath;
     if (existsSync(jsonPath)) return jsonPath;
-    return jsonPath; // default: create tui.json
+    return jsoncPath;
 }
 
 /**

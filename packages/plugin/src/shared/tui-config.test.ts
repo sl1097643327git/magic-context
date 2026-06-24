@@ -60,4 +60,47 @@ describe("ensureTuiPluginEntry", () => {
         expect(entry[0]).toBe("@cortexkit/opencode-magic-context@latest");
         expect(entry[1]).toEqual({ enabled: true });
     });
+
+    it("creates tui.jsonc (not tui.json) on a fresh install", async () => {
+        const root = mkdtempSync(join(tmpdir(), "mc-tui-fresh-"));
+        roots.push(root);
+        process.env.OPENCODE_CONFIG_DIR = root;
+
+        const { ensureTuiPluginEntry } = await import("./tui-config");
+        expect(ensureTuiPluginEntry()).toBe(true);
+
+        // The new file must be tui.jsonc so a tui.json stub never ends up
+        // sitting next to a tui.jsonc the user writes later (#176).
+        expect(existsSync(join(root, "tui.jsonc"))).toBe(true);
+        expect(existsSync(join(root, "tui.json"))).toBe(false);
+        const parsed = JSON.parse(readFileSync(join(root, "tui.jsonc"), "utf-8")) as {
+            plugin: unknown[];
+        };
+        expect(parsed.plugin).toContain("@cortexkit/opencode-magic-context@latest");
+    });
+
+    it("writes into the existing tui.jsonc when both files exist", async () => {
+        const root = mkdtempSync(join(tmpdir(), "mc-tui-both-"));
+        roots.push(root);
+        process.env.OPENCODE_CONFIG_DIR = root;
+        // A real user config in tui.jsonc plus a leftover empty tui.json.
+        writeFileSync(
+            join(root, "tui.jsonc"),
+            `${JSON.stringify({ keybinds: { x: "y" } }, null, 2)}\n`,
+        );
+        writeFileSync(join(root, "tui.json"), "{}\n");
+
+        const { ensureTuiPluginEntry } = await import("./tui-config");
+        expect(ensureTuiPluginEntry()).toBe(true);
+
+        // The plugin entry must land in tui.jsonc (higher precedence), and the
+        // user's keybinds must survive; tui.json must be left untouched.
+        const jsonc = JSON.parse(readFileSync(join(root, "tui.jsonc"), "utf-8")) as {
+            plugin: unknown[];
+            keybinds: Record<string, string>;
+        };
+        expect(jsonc.plugin).toContain("@cortexkit/opencode-magic-context@latest");
+        expect(jsonc.keybinds).toEqual({ x: "y" });
+        expect(readFileSync(join(root, "tui.json"), "utf-8")).toBe("{}\n");
+    });
 });

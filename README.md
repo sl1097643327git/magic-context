@@ -28,6 +28,7 @@
   <a href="#-recall">Recall</a> ·
   <a href="https://docs.cortexkit.io/magic-context">Docs</a> ·
   <a href="./CONFIGURATION.md">Configuration</a> ·
+  <a href="https://github.com/cortexkit/magic-context/releases?q=dashboard&expanded=true">Dashboard</a> ·
   <a href="https://discord.gg/DSa65w8wuf">💬 Discord</a>
 </p>
 
