@@ -32,4 +32,16 @@ describe("writeFileAtomic", () => {
         expect(readFileSync(target, "utf-8")).toBe("v2\n");
         expect(statSync(target).mode & 0o777).toBe(0o600);
     });
+
+    it("creates missing parent directories (fresh CortexKit config location)", () => {
+        const root = mkdtempSync(join(tmpdir(), "mc-atomic-mkdir-"));
+        roots.push(root);
+        // Nested path whose parents do NOT exist yet — mirrors a first-ever setup
+        // writing ~/.config/cortexkit/magic-context.jsonc on a clean machine.
+        const target = join(root, "cortexkit", "nested", "magic-context.jsonc");
+        expect(existsSync(join(root, "cortexkit"))).toBe(false);
+        writeFileAtomic(target, '{"created":true}\n');
+        expect(readFileSync(target, "utf-8")).toBe('{"created":true}\n');
+        expect(existsSync(`${target}.tmp`)).toBe(false);
+    });
 });

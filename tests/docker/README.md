@@ -90,3 +90,24 @@ check "label that names what's being verified" \
 For a new mock-LLM behavior, add another `mock.on({...}, {...})` block to the matching `fixtures/aimock-*.cjs`. See [aimock docs](https://www.npmjs.com/package/@copilotkit/aimock) for the response shape.
 
 For deeper scenarios (multi-turn, historian publication, dreamer), prefer adding to `packages/e2e-tests/` instead — the in-process harness is much faster to iterate on and has tighter control over message shapes than aimock does.
+
+## Interactive setup sandbox (`Dockerfile.setup-sandbox`)
+
+A clean, throwaway machine for **manually** exercising the published `setup` and `doctor` wizards interactively (e.g. via a PTY) after a release. Unlike the two E2E images above (which copy the locally-built dist and run a scripted `--force` smoke), this image installs the **real published** `@cortexkit/magic-context@latest` from npm, with OpenCode and Pi present, then drops you into a shell so you can drive the wizard yourself and inspect where config and state land.
+
+```bash
+# build @latest (fresh npm fetch) and drop into an interactive shell
+tests/docker/setup-sandbox.sh
+
+# pin a specific version, or just (re)build the image
+tests/docker/setup-sandbox.sh 0.27.1
+tests/docker/setup-sandbox.sh --build-only
+```
+
+Rebuild after each release to pick up the newest published version (the build forces a fresh `@latest` fetch via a cache-bust arg). Use it to confirm the wizard writes to the CortexKit config location on a fresh machine:
+
+- user config → `~/.config/cortexkit/magic-context.jsonc`
+- project config → `<project>/.cortexkit/magic-context.jsonc`
+- shared DB → `~/.local/share/cortexkit/magic-context/context.db`
+
+The banner printed on each shell lists the exact commands and the paths to verify.
