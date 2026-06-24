@@ -1,6 +1,6 @@
 import { lookup as dnsLookup } from "node:dns/promises";
 import * as https from "node:https";
-import { isIP } from "node:net";
+import { isIP, type LookupFunction } from "node:net";
 import { domainToASCII } from "node:url";
 
 import { SmartNoteNetworkError, SmartNoteSecurityError } from "./types";
@@ -157,6 +157,39 @@ async function resolveHostToValidatedGlobalAddresses(
     }));
 }
 
+/**
+ * A `net.LookupFunction`-shaped hook that always resolves to the single
+ * pre-validated, pinned IP — never re-querying DNS (anti-rebinding). Node may
+ * invoke it with `{ all: true }` (Happy-Eyeballs / autoSelectFamily), which
+ * expects the ARRAY callback form, or with the legacy single-address form. We
+ * honor both: returning the wrong shape made Node's lookupAndConnectMultiple
+ * call `results.sort(...)` on `undefined`, which surfaced as
+ * "SMART_NOTE_NETWORK: results.sort is not a function" and broke every
+ * network-touching smart-note check.
+ *
+ * Node's `LookupFunction` type only models the legacy 3-arg callback, so the
+ * dual-shape dispatch is expressed against a locally-widened callback type and
+ * the result is asserted back to `LookupFunction` for `https.request`.
+ */
+export function createPinnedLookup(candidate: { address: string; family: 4 | 6 }): LookupFunction {
+    const hook = (
+        _hostname: string,
+        lookupOptions: { all?: boolean } | undefined,
+        cb: (
+            err: Error | null,
+            addressOrList: string | Array<{ address: string; family: number }>,
+            family?: number,
+        ) => void,
+    ): void => {
+        if (lookupOptions?.all) {
+            cb(null, [{ address: candidate.address, family: candidate.family }]);
+            return;
+        }
+        cb(null, candidate.address, candidate.family);
+    };
+    return hook as unknown as LookupFunction;
+}
+
 function requestValidatedAddress(
     validation: SmartNoteUrlValidation,
     candidate: ResolvedSmartNoteAddress,
@@ -178,11 +211,15 @@ function requestValidatedAddress(
                     "User-Agent": "magic-context-smart-note-check/1",
                     Accept: "text/plain, application/json;q=0.9, */*;q=0.1",
                 },
-                // Anti-rebinding: DNS was resolved and classified above. The
-                // connector is pinned to that exact IP while TLS still verifies
-                // the original hostname via hostname/servername/Host.
-                lookup: (_hostname, _lookupOptions, cb) =>
-                    cb(null, candidate.address, candidate.family),
+                // Anti-rebinding: DNS was resolved and classified above; the
+                // connector is pinned to that exact pre-validated IP while TLS
+                // still verifies the original hostname via
+                // hostname/servername/Host. The hook honors BOTH callback shapes
+                // — Node 20+ defaults to autoSelectFamily (Happy-Eyeballs), which
+                // drives the lookup with { all: true } and expects the ARRAY
+                // form; returning the wrong shape was the bug that broke every
+                // network-touching check.
+                lookup: createPinnedLookup(candidate),
                 timeout: options.timeoutMs,
             },
             (response) => {

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { type SmartNoteResolver, validateSmartNoteHttpUrl } from "./ssrf-guard";
+import { createPinnedLookup, type SmartNoteResolver, validateSmartNoteHttpUrl } from "./ssrf-guard";
 
 const signal = new AbortController().signal;
 
@@ -83,5 +83,45 @@ describe("smart-note SSRF guard", () => {
             "93.184.216.34",
             "2606:2800:220:1:248:1893:25c8:1946",
         ]);
+    });
+});
+
+describe("createPinnedLookup", () => {
+    // Regression: Node 20+ https.request defaults to autoSelectFamily
+    // (Happy-Eyeballs), which calls the lookup hook with { all: true } and
+    // expects the ARRAY callback form. The original hook only ever used the
+    // 3-arg form, so Node's lookupAndConnectMultiple ran results.sort() on
+    // undefined → "results.sort is not a function" broke every network check.
+    test("returns the ARRAY form when Node asks for all candidates", () => {
+        const hook = createPinnedLookup({ address: "93.184.216.34", family: 4 });
+        let received: unknown;
+        hook("example.test", { all: true }, (err, addresses) => {
+            expect(err).toBeNull();
+            received = addresses;
+        });
+        expect(received).toEqual([{ address: "93.184.216.34", family: 4 }]);
+    });
+
+    test("returns the legacy 3-arg form when all is not requested", () => {
+        const hook = createPinnedLookup({ address: "2606:2800:220:1::1", family: 6 });
+        let addr: unknown;
+        let fam: unknown;
+        hook("example.test", {}, (err, address, family) => {
+            expect(err).toBeNull();
+            addr = address;
+            fam = family;
+        });
+        expect(addr).toBe("2606:2800:220:1::1");
+        expect(fam).toBe(6);
+    });
+
+    test("pins to the validated IP without re-querying DNS", () => {
+        const hook = createPinnedLookup({ address: "203.0.113.7", family: 4 });
+        // Even though the hostname differs, the hook must return the pinned IP.
+        let received: unknown;
+        hook("attacker-rebind.test", { all: true }, (_err, addresses) => {
+            received = addresses;
+        });
+        expect(received).toEqual([{ address: "203.0.113.7", family: 4 }]);
     });
 });
