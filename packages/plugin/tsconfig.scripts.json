@@ -17,5 +17,6 @@
         "src/**/__tests__/**",
         "scripts/experiments",
         "scripts/lib",
-        "scripts/smoke-node-sqlite.ts"
+        "scripts/smoke-node-sqlite.ts",
+        "scripts/test-historian-prompt.ts"
     ]}
