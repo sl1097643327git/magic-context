@@ -236,7 +236,19 @@ async function expectSentinel(promise: Promise<unknown>, sentinel: string): Prom
         await promise;
         throw new Error(`Expected sentinel ${sentinel}`);
     } catch (error) {
+        // Still a real Error carrying the sentinel message, the universal
+        // fallback for any host that does not recognize the Effect HTTP tags.
         expect(String(error)).toContain(sentinel);
+        // AND duck-types an Effect HttpServerResponse.empty({status:204}) so
+        // OpenCode 1.17.x recognizes it (plain-string TypeId), suppresses the
+        // JSON-500 log, and writes a clean 204 — no TUI/log leak. Lock the exact
+        // shape Response.toWeb dereferences on the empty-body path.
+        const e = error as Record<string, unknown>;
+        expect(e["~effect/http/HttpServerResponse"]).toBe("~effect/http/HttpServerResponse");
+        expect(e["~effect/ErrorReporter/ignore"]).toBe(true);
+        expect(e.status).toBe(204);
+        expect((e.body as { _tag?: unknown })?._tag).toBe("Empty");
+        expect((e.cookies as { cookies?: unknown })?.cookies).toEqual({});
     }
 }
 
