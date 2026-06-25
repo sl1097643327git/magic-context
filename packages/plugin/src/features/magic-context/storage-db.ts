@@ -296,7 +296,7 @@ export function enforceSchemaFence(
     }
     lastSchemaFenceRejection = { persistedVersion, supportedVersion: latestSupportedVersion };
     log(
-        `[magic-context] storage fatal: refusing to open ${dbPath}; database schema v${persistedVersion} is newer than this binary supports (max v${latestSupportedVersion}). Upgrade Magic Context/OpenCode/Pi before writing to this cache.`,
+        `[magic-context] storage fatal: refusing to open ${dbPath}; database schema v${persistedVersion} is newer than this binary supports (max v${latestSupportedVersion}). A pinned or stale plugin is likely sharing this database with a newer instance; update or unpin Magic Context with 'npx @cortexkit/magic-context@latest doctor --force', then restart.`,
     );
     return false;
 }

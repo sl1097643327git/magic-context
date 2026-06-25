@@ -2,6 +2,7 @@
 import { Show, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js"
 import type { TuiSlotPlugin, TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import packageJson from "../../../package.json"
+import { readableTextColorOn } from '../badge-contrast';
 import { loadSidebarSnapshot, type SidebarSnapshot } from "../data/context-db"
 import { formatThresholdPercent } from "../../shared/format-threshold"
 import {
@@ -694,7 +695,7 @@ const SidebarContent = (props: {
                 onMouseDown={() => props.controller.toggleCollapsed()}
             >
                 <box paddingLeft={1} paddingRight={1} backgroundColor={props.theme.accent}>
-                    <text fg={props.theme.background}>
+                    <text fg={readableTextColorOn(props.theme.accent)}>
                         <b>{collapsed() ? "▶ " : "▼ "}{headerLabel()}</b>
                     </text>
                 </box>

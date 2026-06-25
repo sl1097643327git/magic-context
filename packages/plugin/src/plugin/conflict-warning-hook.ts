@@ -524,8 +524,13 @@ export async function sendSchemaFenceWarning(
         `newer build (OpenCode and Pi share one database). This build only supports`,
         `up to v${detail.supportedVersion}, so it has fail-closed to avoid corrupting the cache.`,
         "",
-        "Update Magic Context on this harness (or update OpenCode/Pi) to the latest",
-        "version, then restart. Your data is safe — nothing is disabled permanently.",
+        "This usually means a pinned or stale plugin is sharing the database with a",
+        "newer instance. Update or unpin Magic Context on this harness (or update",
+        "OpenCode/Pi) to the latest version, then restart. The fastest fix is:",
+        "",
+        "  npx @cortexkit/magic-context@latest doctor --force",
+        "",
+        "Your data is safe; nothing is disabled permanently.",
     ].join("\n");
 
     try {

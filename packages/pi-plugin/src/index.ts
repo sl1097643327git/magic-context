@@ -468,7 +468,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	if (!db) {
 		warn(
 			`Magic Context (pi) storage unavailable at ${dbPath} (cache schema is newer than this binary supports). ` +
-				"Plugin will not register hooks; upgrade/restart Pi/OpenCode/Magic Context to recover.",
+				"A pinned or stale plugin is likely sharing this database with a newer instance. " +
+				"Plugin will not register hooks; run 'npx @cortexkit/magic-context@latest doctor --force' " +
+				"(or update Pi/OpenCode) and restart to recover.",
 		);
 		return;
 	}
