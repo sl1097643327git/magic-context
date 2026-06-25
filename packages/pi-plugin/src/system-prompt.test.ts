@@ -126,4 +126,43 @@ describe("buildMagicContextBlock v2 system-prompt parity", () => {
 			closeQuietly(db);
 		}
 	});
+
+	it("includes language guidance only when configured", () => {
+		const db = createTestDb();
+		try {
+			const baseline = buildMagicContextBlock({
+				db,
+				cwd: tempDir("pi-language-baseline-"),
+				sessionId: "ses-language-baseline",
+				memoryEnabled: true,
+				injectDocs: false,
+				includeGuidance: true,
+			});
+			const unset = buildMagicContextBlock({
+				db,
+				cwd: tempDir("pi-language-unset-"),
+				sessionId: "ses-language-unset",
+				memoryEnabled: true,
+				injectDocs: false,
+				includeGuidance: true,
+				language: " ",
+			});
+			const localized = buildMagicContextBlock({
+				db,
+				cwd: tempDir("pi-language-set-"),
+				sessionId: "ses-language-set",
+				memoryEnabled: true,
+				injectDocs: false,
+				includeGuidance: true,
+				language: "Español",
+			});
+
+			expect(unset).toBe(baseline);
+			expect(localized).toContain(
+				"Use Español for your natural-language replies",
+			);
+		} finally {
+			closeQuietly(db);
+		}
+	});
 });

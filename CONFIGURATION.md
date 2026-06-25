@@ -98,6 +98,7 @@ Higher-tier models with longer cache windows benefit from a longer TTL. Setting 
 |--------|------|---------|-------------|
 | `enabled` | `boolean` | `true` | Master toggle. |
 | `auto_update` | `boolean` | `true` | User-config-only plugin self-update toggle; project configs cannot disable it. |
+| `language` | `string` | unset | User-config-only output language for Magic Context generated prose and primary guidance, for example `"Turkish"`, `"Español"`, or `"Português (Brasil)"`. Structural tokens stay in English. |
 | `ctx_reduce_enabled` | `boolean` | `true` | When `false`, hides `ctx_reduce` tool, disables all nudges/reminders, and strips reduction guidance from prompts. Heuristic cleanup, compartments, memory, and search still work. Useful for testing whether automatic cleanup alone is sufficient. |
 | `cache_ttl` | `string` or `object` | `"5m"` | Time after a response before applying pending ops. String or per-model map. |
 | `protected_tags` | `number` (1–100) | `20` | Last N active tags immune from immediate dropping. |
@@ -110,6 +111,20 @@ Higher-tier models with longer cache windows benefit from a longer TTL. Setting 
 | `commit_cluster_trigger` | `object` | See below | Controls the commit-cluster historian trigger. |
 | `sqlite` | `object` | See below | Per-connection SQLite tuning for Magic Context's own `context.db`. |
 | `compressor` | `object` | See below | Controls the background compressor that merges older compartments when the history block exceeds its budget. |
+
+### `language`
+
+Set `language` in your **user config** when you want Magic Context generated prose to consistently use a language instead of relying on model auto-mirroring:
+
+```jsonc
+{
+  "language": "Türkçe"
+}
+```
+
+This affects historian summaries, dreamer content, sidekick output, and the Magic Context guidance block. It does not translate schemas, XML tags, memory category names, code identifiers, file paths, commands, logs, or quoted text. Project configs cannot set this field for security, since it is injected into hidden-agent system prompts.
+
+Changing `language` does not rewrite existing compartments or memories. A project can temporarily have a mixed-language pool after a mid-project switch; older stored entries keep their original language until they are naturally rewritten or superseded.
 
 ### `commit_cluster_trigger`
 

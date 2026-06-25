@@ -62,6 +62,7 @@ export interface ManagedRecompContext {
     autoPromote: boolean;
     /** Resolved historian fallback chain (config `fallback_models` → builtin). */
     fallbackModels: readonly string[];
+    language?: string;
     /** Pre-resolved last-resort model key (the live session model). When omitted,
      *  the orchestrator resolves it from `liveModelBySession`. The hook path passes
      *  this explicitly so it can include its OpenCode-DB fallback (the live map can
@@ -229,6 +230,7 @@ function buildRecompDeps(ctx: ManagedRecompContext, sessionId: string) {
         //  - fallbackModels: configured chain (e.g. anthropic/claude-sonnet-4-6)
         //  - fallbackModelId: the live session model as a last-ditch retry
         fallbackModels: ctx.fallbackModels,
+        language: ctx.language,
         fallbackModelId:
             ctx.fallbackModelId ?? resolveLiveModelKey(ctx.liveSessionState, sessionId),
         historianTwoPass: ctx.historianTwoPass,
@@ -491,6 +493,7 @@ async function runUpgradeMemoryMigration(
             fallbackModels: ctx.fallbackModels,
             timeoutMs: ctx.historianTimeoutMs,
             userMemoriesEnabled: ctx.userMemoriesEnabled,
+            language: ctx.language,
         });
         return outcome.summary;
     } catch (error) {

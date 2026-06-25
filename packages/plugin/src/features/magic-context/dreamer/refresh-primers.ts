@@ -1,4 +1,5 @@
 import { DREAMER_PRIMER_INVESTIGATOR_AGENT } from "../../../agents/dreamer";
+import { withContentLanguageDirective } from "../../../agents/language-directive";
 import {
     type RawMessageProvider,
     setRawMessageProvider,
@@ -36,6 +37,7 @@ export interface RefreshPrimersArgs {
     deadline: number;
     model?: string;
     fallbackModels?: readonly string[];
+    language?: string;
     /**
      * Pi only: builds a RawMessageProvider for an arbitrary historical session id
      * (JSONL), so the orientation seed read works on Pi-only installs where there
@@ -250,7 +252,10 @@ async function refreshOnePrimer(
                 query: { directory: args.sessionDirectory },
                 body: {
                     agent: DREAMER_PRIMER_INVESTIGATOR_AGENT,
-                    system: PRIMER_INVESTIGATOR_SYSTEM_PROMPT,
+                    system: withContentLanguageDirective(
+                        PRIMER_INVESTIGATOR_SYSTEM_PROMPT,
+                        args.language,
+                    ),
                     ...modelBodyField(args.model),
                     parts: [{ type: "text", text: prompt, synthetic: true }],
                 },

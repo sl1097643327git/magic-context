@@ -6,6 +6,7 @@ import {
     DREAMER_DOCS_AGENT,
     DREAMER_RETROSPECTIVE_AGENT,
 } from "../../../agents/dreamer";
+import { withContentLanguageDirective } from "../../../agents/language-directive";
 import type { DreamingTask } from "../../../config/schema/magic-context";
 import type { RawMessageProvider } from "../../../hooks/magic-context/read-session-chunk";
 import type { PluginContext } from "../../../plugin/types";
@@ -88,6 +89,7 @@ export interface DreamTaskExecutorDeps {
     primerRawProviderFactory?: (
         sessionId: string,
     ) => Promise<RawMessageProvider | null> | RawMessageProvider | null;
+    language?: string;
 }
 
 /** A failed task either hot-retries (transient: provider/network/rate-limit/
@@ -259,6 +261,7 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                     promotionThreshold: config.promotionThreshold ?? 3,
                     model: config.model,
                     fallbackModels: config.fallbackModels,
+                    language: config.language ?? deps.language,
                 });
                 recordRun("completed", null);
                 log(
@@ -301,6 +304,7 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                     forceBroad: config.task === "verify-broad",
                     model: config.model,
                     fallbackModels: config.fallbackModels,
+                    language: config.language ?? deps.language,
                 });
                 recordRun("completed", null, {
                     memoryChanges: computeMemoryDelta(memoryBefore),
@@ -361,6 +365,7 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                     deadline,
                     model: config.model,
                     fallbackModels: config.fallbackModels,
+                    language: config.language ?? deps.language,
                     rawProviderFactory: deps.primerRawProviderFactory,
                 });
                 recordRun("completed", null);
@@ -546,6 +551,7 @@ function retrospectiveEventsForSessions(
         try {
             for (const event of getCompartmentEvents(db, sessionId)) {
                 if (event.kind !== "causal_incident" && event.kind !== "trajectory_correction") {
+                    log(`[dreamer] dropping event: unknown kind="${event.kind}"`);
                     continue;
                 }
                 events.push({
@@ -734,7 +740,13 @@ async function runRetrospectiveTask(
         const eventSessionIds = new Set(messages.map((message) => message.sessionId));
         const events = retrospectiveEventsForSessions(db, eventSessionIds);
         const deepenRun = await runChildTurn(
-            RETROSPECTIVE_SYSTEM_PROMPT,
+            withContentLanguageDirective(
+                RETROSPECTIVE_SYSTEM_PROMPT,
+                config.language ?? deps.language,
+                {
+                    retrospective: true,
+                },
+            ),
             buildRetrospectivePrompt({ projectPath: projectIdentity, frictionWindow, events }),
         );
         if (leaseLost) throw new Error("Dream lease lost during retrospective");
@@ -895,7 +907,10 @@ async function runAgenticTask(
                     system:
                         task === "maintain-docs"
                             ? MAINTAIN_DOCS_SYSTEM_PROMPT
-                            : CURATE_SYSTEM_PROMPT,
+                            : withContentLanguageDirective(
+                                  CURATE_SYSTEM_PROMPT,
+                                  config.language ?? deps.language,
+                              ),
                     ...modelBodyField(config.model),
                     parts: [{ type: "text", text: taskPrompt, synthetic: true }],
                 },

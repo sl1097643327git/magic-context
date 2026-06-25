@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { withContentLanguageDirective } from "@magic-context/core/agents/language-directive";
 import { getCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { clearEmergencyRecovery } from "@magic-context/core/features/magic-context/storage-meta-persisted";
@@ -42,6 +43,7 @@ export function registerCtxRecompCommand(
 		historianFallbacks?: readonly string[];
 		historianTimeoutMs?: number;
 		historianThinkingLevel?: string;
+		language?: string;
 		memoryEnabled: boolean;
 		autoPromote: boolean;
 	},
@@ -141,7 +143,11 @@ export function registerCtxRecompCommand(
 							client: createPiHistorianClient({
 								runner: deps.runner,
 								model: deps.historianModel as string,
-								systemPrompt: COMPARTMENT_STRUCTURAL_SYSTEM_PROMPT,
+								systemPrompt: withContentLanguageDirective(
+									COMPARTMENT_STRUCTURAL_SYSTEM_PROMPT,
+									deps.language,
+									{ preserveUserQuotes: true },
+								),
 								fallbackModels: deps.historianFallbacks,
 								timeoutMs: deps.historianTimeoutMs,
 								thinkingLevel: deps.historianThinkingLevel,
@@ -169,6 +175,7 @@ export function registerCtxRecompCommand(
 							// Recomp-runner model chain parity with OpenCode: configured
 							// fallbacks + the session's own model as last-ditch retry.
 							fallbackModels: deps.historianFallbacks,
+							language: deps.language,
 							fallbackModelId: ctx.model
 								? `${ctx.model.provider}/${ctx.model.id}`
 								: undefined,

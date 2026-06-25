@@ -68,6 +68,7 @@ export interface CompartmentRunnerDeps {
     currentContextLimit?: number;
     /** Resolved fallback chain for historian-family calls (historian + compressor). */
     fallbackModels?: readonly string[];
+    language?: string;
     directory: string;
     historyBudgetTokens?: number;
     fallbackModelId?: string;

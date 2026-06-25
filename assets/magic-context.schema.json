@@ -14,6 +14,12 @@
       "description": "Enable automatic npm self-update checks for the OpenCode plugin. Security: USER-only in config loader, so hostile project configs cannot suppress updates.",
       "type": "boolean"
     },
+    "language": {
+      "description": "Output language for Magic Context's generated content and guidance. When set (e.g. \"Turkish\", \"Español\", \"日本語\", \"Brazilian Portuguese\"), the historian, dreamer, sidekick, and the agent-guidance block instruct the model to write its PROSE in this language while keeping all structural tokens (XML tags, the five memory category names, code identifiers, file paths) in English. Free-form: use the language's own name. USER-LEVEL ONLY (ignored in project config for security). Unset = today's behavior (model mirrors the conversation; English scaffolding). Changing it triggers one cache re-materialization; existing compartments/memories keep their original language until naturally rewritten.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
     "ctx_reduce_enabled": {
       "default": true,
       "description": "When false, ctx_reduce tool is hidden, all nudges disabled, and prompt guidance about ctx_reduce stripped. Heuristic cleanup, compartments, memory, and other features still work. (default: true)",

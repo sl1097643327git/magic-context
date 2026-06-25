@@ -1,4 +1,5 @@
 import { DREAMER_REVIEWER_AGENT } from "../../../agents/dreamer";
+import { withContentLanguageDirective } from "../../../agents/language-directive";
 import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
@@ -40,6 +41,7 @@ interface ReviewUserMemoriesArgs {
     model?: string;
     /** Resolved dreamer fallback chain. */
     fallbackModels?: readonly string[];
+    language?: string;
 }
 
 interface ReviewResult {
@@ -193,7 +195,10 @@ If no promotions are warranted, return empty arrays. Always consume reviewed can
                 query: { directory: args.sessionDirectory },
                 body: {
                     agent: DREAMER_REVIEWER_AGENT,
-                    system: REVIEW_USER_MEMORIES_SYSTEM_PROMPT,
+                    system: withContentLanguageDirective(
+                        REVIEW_USER_MEMORIES_SYSTEM_PROMPT,
+                        args.language,
+                    ),
                     ...modelBodyField(args.model),
                     // synthetic: true hides the user-memory review prompt from the TUI
                     // subagent pane while still delivering it to the model. See issue #50.

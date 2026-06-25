@@ -14,6 +14,14 @@ describe("stripUnsafeProjectConfigFields", () => {
         expect(warnings.some((w) => w.includes("auto_update"))).toBe(true);
     });
 
+    it("strips language from project config", () => {
+        const raw: Record<string, unknown> = { language: "Turkish", historian: { model: "x" } };
+        const warnings = stripUnsafeProjectConfigFields(raw);
+        expect("language" in raw).toBe(false);
+        expect(raw.historian).toEqual({ model: "x" });
+        expect(warnings.some((w) => w.includes("language"))).toBe(true);
+    });
+
     it("strips sqlite.* from project config (resource-exhaustion vector)", () => {
         const raw: Record<string, unknown> = {
             sqlite: { cache_size_mb: 999_999, mmap_size_mb: 999_999 },

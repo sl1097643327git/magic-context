@@ -39,6 +39,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { withContentLanguageDirective } from "@magic-context/core/agents/language-directive";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
 	isEmptySidekickResult,
@@ -46,6 +47,7 @@ import {
 	stripThinkingBlocks,
 } from "@magic-context/core/features/magic-context/sidekick/core";
 import { log, sessionLog } from "@magic-context/core/shared/logger";
+
 import { PiSubagentRunner } from "../subagent-runner";
 
 /**
@@ -66,6 +68,7 @@ export interface PiSidekickConfig {
 	thinking_level?: string;
 	/** Ordered fallback chain after the primary sidekick model. */
 	fallbackModels?: readonly string[];
+	language?: string;
 }
 
 /**
@@ -136,7 +139,10 @@ export function registerCtxAugCommand(
 
 			const result = await runner.run({
 				agent: "sidekick",
-				systemPrompt: config.systemPrompt ?? SIDEKICK_SYSTEM_PROMPT,
+				systemPrompt: withContentLanguageDirective(
+					config.systemPrompt ?? SIDEKICK_SYSTEM_PROMPT,
+					config.language,
+				),
 				userMessage: prompt,
 				model: config.model,
 				fallbackModels: config.fallbackModels,

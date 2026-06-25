@@ -18,6 +18,14 @@ export const EXECUTE_THRESHOLD_CAP_MESSAGE =
     "execute_threshold is capped at 80% for cache safety: a single large agent step can overflow the context window before Magic Context can compact between turns, forcing OpenCode's native compaction (hard to recover from). 80% also leaves headroom below the 85%/95% emergency bands. Use a value between 20 and 80.";
 export const DEFAULT_HISTORIAN_TIMEOUT_MS = 300_000;
 export const DEFAULT_HISTORY_BUDGET_PERCENTAGE = 0.15;
+
+function isPlainSingleLineLanguageName(value: string): boolean {
+    for (const ch of value) {
+        const code = ch.charCodeAt(0);
+        if (code <= 0x1f || ch === "<" || ch === ">" || ch === "`") return false;
+    }
+    return true;
+}
 export const DEFAULT_LOCAL_EMBEDDING_MODEL = "Xenova/all-MiniLM-L6-v2";
 
 // Re-exported from the (DB-free) task registry so the schema and the runtime
@@ -308,6 +316,8 @@ export interface MagicContextConfig {
     /** Auto-update the cached OpenCode plugin wrapper when a newer npm version is available.
      *  USER config only; project configs cannot disable it. Default: true. */
     auto_update?: boolean;
+    /** Output language for generated Magic Context prose. USER config only. */
+    language?: string;
     /** When false, ctx_reduce tool is not registered, all nudges are disabled,
      *  and prompt guidance about ctx_reduce is stripped. Heuristic cleanup,
      *  compartments, memory, and other features continue to work. Default: true. */
@@ -428,6 +438,28 @@ export const MagicContextConfigSchema = z
             .optional()
             .describe(
                 "Enable automatic npm self-update checks for the OpenCode plugin. Security: USER-only in config loader, so hostile project configs cannot suppress updates.",
+            ),
+        language: z
+            .string()
+            .trim()
+            .min(1)
+            .max(64)
+            .refine(
+                (s) => isPlainSingleLineLanguageName(s),
+                "language must be a plain single-line name",
+            )
+            .transform((s) => s.normalize("NFC"))
+            .optional()
+            .describe(
+                "Output language for Magic Context's generated content and guidance. When set " +
+                    '(e.g. "Turkish", "Español", "日本語", "Brazilian Portuguese"), the historian, ' +
+                    "dreamer, sidekick, and the agent-guidance block instruct the model to write its " +
+                    "PROSE in this language while keeping all structural tokens (XML tags, the five " +
+                    "memory category names, code identifiers, file paths) in English. Free-form: use " +
+                    "the language's own name. USER-LEVEL ONLY (ignored in project config for security). " +
+                    "Unset = today's behavior (model mirrors the conversation; English scaffolding). " +
+                    "Changing it triggers one cache re-materialization; existing compartments/memories " +
+                    "keep their original language until naturally rewritten.",
             ),
         ctx_reduce_enabled: z
             .boolean()

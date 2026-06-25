@@ -1,3 +1,4 @@
+import { withContentLanguageDirective } from "../../../agents/language-directive";
 import { SIDEKICK_AGENT } from "../../../agents/sidekick";
 import type { SidekickConfig } from "../../../config/schema/magic-context";
 import type { PluginContext } from "../../../plugin/types";
@@ -22,6 +23,7 @@ export async function runSidekick(deps: {
     userMessage: string;
     config: SidekickConfig;
     sessionDirectory?: string;
+    language?: string;
 }): Promise<string | null> {
     const fallbackModels = resolveFallbackChain(deps.config.fallback_models);
     let agentSessionId: string | null = null;
@@ -71,6 +73,13 @@ export async function runSidekick(deps: {
         }
         const childSessionId = agentSessionId;
 
+        const systemPrompt = withContentLanguageDirective(
+            deps.config.system_prompt?.trim() ||
+                deps.config.prompt?.trim() ||
+                SIDEKICK_SYSTEM_PROMPT,
+            deps.language,
+        );
+
         const sidekickRun = await shared.promptSyncWithValidatedOutputRetry(
             deps.client,
             {
@@ -78,10 +87,7 @@ export async function runSidekick(deps: {
                 query: { directory: deps.sessionDirectory ?? deps.projectPath },
                 body: {
                     agent: SIDEKICK_AGENT,
-                    system:
-                        deps.config.system_prompt?.trim() ||
-                        deps.config.prompt?.trim() ||
-                        SIDEKICK_SYSTEM_PROMPT,
+                    system: systemPrompt,
                     // synthetic: true hides the sidekick prompt from the TUI subagent
                     // pane while still delivering it to the model. See issue #50.
                     parts: [{ type: "text", text: deps.userMessage, synthetic: true }],

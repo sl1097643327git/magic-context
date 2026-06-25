@@ -157,6 +157,18 @@ describe("MagicContextConfigSchema", () => {
             expect(MagicContextConfigSchema.parse({ auto_update: true }).auto_update).toBe(true);
         });
 
+        it("accepts and normalizes output language names", () => {
+            expect(
+                MagicContextConfigSchema.parse({ language: " Português (Brasil) " }).language,
+            ).toBe("Português (Brasil)");
+            expect(MagicContextConfigSchema.parse({ language: "中文（简体）" }).language).toBe(
+                "中文（简体）",
+            );
+            expect(MagicContextConfigSchema.parse({ language: "Cafe\u0301" }).language).toBe(
+                "Café",
+            );
+        });
+
         it("parses per-model cache_ttl objects", () => {
             const input = {
                 cache_ttl: {
@@ -194,6 +206,15 @@ describe("MagicContextConfigSchema", () => {
             expect(() =>
                 MagicContextConfigSchema.parse({ historian_timeout_ms: 59_999 }),
             ).toThrow();
+        });
+
+        it("rejects unsafe output language names", () => {
+            expect(() => MagicContextConfigSchema.parse({ language: "x".repeat(65) })).toThrow();
+            expect(() =>
+                MagicContextConfigSchema.parse({ language: "Turkish\nSpanish" }),
+            ).toThrow();
+            expect(() => MagicContextConfigSchema.parse({ language: "<Turkish>" })).toThrow();
+            expect(() => MagicContextConfigSchema.parse({ language: "`Turkish`" })).toThrow();
         });
 
         it("rejects openai-compatible embedding config without endpoint", () => {

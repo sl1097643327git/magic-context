@@ -50,6 +50,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * Closes:
  *  - `auto_update` — a repo must not suppress plugin self-updates (which can
  *    carry security fixes).
+ *  - `language`: a repo must not inject prompt text through a user preference.
  *  - `sqlite` — `sqlite.cache_size_mb` / `mmap_size_mb` become PRAGMAs on the
  *    process-global shared DB handle (one connection across every project in the
  *    process). A cloned repo could set a huge value to exhaust host memory /
@@ -68,6 +69,13 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         delete projectRaw.auto_update;
         warnings.push(
             "Ignoring auto_update from project config (security: this setting only honors user-level config).",
+        );
+    }
+
+    if ("language" in projectRaw) {
+        delete projectRaw.language;
+        warnings.push(
+            "Ignoring language from project config (security: output language is a user-level setting).",
         );
     }
 

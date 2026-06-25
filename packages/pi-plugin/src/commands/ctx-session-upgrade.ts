@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { withContentLanguageDirective } from "@magic-context/core/agents/language-directive";
 import { getCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
 import { isMemoryMigrationDone } from "@magic-context/core/features/magic-context/memory/memory-migration";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
@@ -50,6 +51,7 @@ export function registerCtxSessionUpgradeCommand(
 		historianFallbacks?: readonly string[];
 		historianTimeoutMs?: number;
 		historianThinkingLevel?: string;
+		language?: string;
 		memoryEnabled: boolean;
 		autoPromote: boolean;
 		userMemoriesEnabled?: boolean;
@@ -130,6 +132,7 @@ export function registerCtxSessionUpgradeCommand(
 						directory: ctx.cwd,
 						sessionId,
 						userMemoriesEnabled: deps.userMemoriesEnabled,
+						language: deps.language,
 					});
 					return outcome.summary;
 				} catch (error) {
@@ -221,7 +224,11 @@ export function registerCtxSessionUpgradeCommand(
 								thinkingLevel: deps.historianThinkingLevel,
 								directory: ctx.cwd,
 								accountingSessionId: sessionId,
-								systemPrompt: COMPARTMENT_STRUCTURAL_SYSTEM_PROMPT,
+								systemPrompt: withContentLanguageDirective(
+									COMPARTMENT_STRUCTURAL_SYSTEM_PROMPT,
+									deps.language,
+									{ preserveUserQuotes: true },
+								),
 								notify: (text) =>
 									sendCtxStatusMessage(pi, {
 										title: "/ctx-session-upgrade",
@@ -246,6 +253,7 @@ export function registerCtxSessionUpgradeCommand(
 							// HTTP-200 historian primary escalates instead of failing.
 							fallbackModels: deps.historianFallbacks,
 							fallbackModelId: sessionMainModel,
+							language: deps.language,
 						},
 						{},
 					);

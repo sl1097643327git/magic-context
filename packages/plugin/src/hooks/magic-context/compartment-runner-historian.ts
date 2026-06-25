@@ -75,6 +75,7 @@ export async function runValidatedHistorianPass(args: {
     twoPass?: boolean;
     subagentKind?: SubagentKind;
     agentId?: string;
+    language?: string;
 }): Promise<ValidatedHistorianPassResult> {
     const firstRun = await runHistorianPrompt({
         ...args,
@@ -116,6 +117,7 @@ export async function runValidatedHistorianPass(args: {
         args.prompt,
         firstRun.result,
         firstValidation.error ?? "invalid compartment output",
+        args.language,
     );
     const repairRun = await runHistorianPrompt({
         ...args,

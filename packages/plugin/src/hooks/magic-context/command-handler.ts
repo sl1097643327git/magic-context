@@ -217,6 +217,7 @@ async function executeAugmentation(
             projectPath: string;
             sessionDirectory?: string;
             client: PluginContext["client"];
+            language?: string;
         };
     },
     sessionId: string,
@@ -257,6 +258,7 @@ async function executeAugmentation(
         sessionDirectory: deps.sidekick.sessionDirectory,
         userMessage: prompt,
         config: deps.sidekick.config,
+        language: deps.sidekick.language,
     });
 
     // Step 3: Build augmented prompt
@@ -397,6 +399,7 @@ export function createMagicContextCommandHandler(deps: {
         projectPath: string;
         sessionDirectory?: string;
         client: PluginContext["client"];
+        language?: string;
     };
     dreamer?: {
         config: DreamerConfig;

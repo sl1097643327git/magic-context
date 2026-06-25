@@ -77,6 +77,14 @@ const FIELD_DEFS: FieldDef[] = [
     section: "General",
   },
   {
+    key: "language",
+    label: "Output Language",
+    type: "string",
+    description:
+      "Optional user-level language for Magic Context generated prose and guidance. Leave blank to keep today's behavior.",
+    section: "General",
+  },
+  {
     key: "ctx_reduce_enabled",
     label: "Agent Controlled Reduction",
     type: "boolean",
@@ -514,7 +522,13 @@ function ConfigForm(props: {
             type="text"
             value={typeof value() === "object" ? JSON.stringify(value()) : String(value() ?? "")}
             placeholder="default"
-            onInput={(e) => handleFieldChange(field.key, e.currentTarget.value)}
+            onInput={(e) => {
+              const next = e.currentTarget.value;
+              handleFieldChange(
+                field.key,
+                field.key === "language" && next.trim() === "" ? undefined : next,
+              );
+            }}
           />
         )}
       </div>

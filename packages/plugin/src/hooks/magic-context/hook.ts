@@ -97,6 +97,7 @@ export interface MagicContextDeps {
     liveSessionState?: LiveSessionState;
     config: {
         protected_tags: number;
+        language?: string;
         ctx_reduce_enabled?: boolean;
         toast_duration_ms?: number;
         clear_reasoning_age?: number;
@@ -340,6 +341,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         memoryEnabled: deps.config.memory?.enabled ?? true,
         autoPromote: deps.config.memory?.auto_promote ?? true,
         fallbackModels: historianFallbackModels,
+        language: deps.config.language,
         fallbackModelId: (() => {
             const model = resolveLiveModel(sessionId);
             return model ? `${model.providerID}/${model.modelID}` : undefined;
@@ -401,7 +403,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                 signal,
                 onProgress: ({ embedded, total }) => {
                     const cur = recompProgressBySession.get(sessionId);
-                    if (!cur || cur.phase !== "recomp") return;
+                    if (cur?.phase !== "recomp") return;
                     recompProgressBySession.set(sessionId, {
                         ...cur,
                         processedMessages: embedded,
@@ -678,7 +680,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         // Dreamer v2: the per-task scheduler owns due-evaluation + keyed leases.
         // This message-event-driven path is a secondary trigger to the process
         // timer; both call the same idempotent scheduler (leases prevent overlap).
-        const runtimeConfigs = buildDreamTaskRuntimeConfigs(dreaming);
+        const runtimeConfigs = buildDreamTaskRuntimeConfigs(dreaming, deps.config.language);
         const executor = createDreamTaskExecutor({
             client: deps.client,
             // Run in the directory this hook instance owns, not a stale sibling
@@ -691,6 +693,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                     openOpenCodeDb,
                 }),
             userMemoryCollectionEnabled: userMemoryCollectionEnabled(dreaming),
+            language: deps.config.language,
         });
         void runDueTasksForProject({
             db,
@@ -770,6 +773,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                   projectPath,
                   sessionDirectory: deps.directory,
                   client: deps.client,
+                  language: deps.config.language,
               }
             : undefined,
         dreamer: dreamerConfig
@@ -783,7 +787,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                       runManualDream({
                           db,
                           projectIdentity: projectPath,
-                          tasks: buildDreamTaskRuntimeConfigs(dreamerConfig),
+                          tasks: buildDreamTaskRuntimeConfigs(dreamerConfig, deps.config.language),
                           executor: createDreamTaskExecutor({
                               client: deps.client,
                               sessionDirectory: deps.directory,
@@ -795,6 +799,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                                   }),
                               userMemoryCollectionEnabled:
                                   userMemoryCollectionEnabled(dreamerConfig),
+                              language: deps.config.language,
                           }),
                           task,
                       }),
@@ -807,6 +812,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         protectedTags: deps.config.protected_tags,
         ctxReduceEnabled,
         dreamerEnabled: dreamerRunnable,
+        language: deps.config.language,
         injectDocs: deps.config.dreamer?.inject_docs !== false,
         directory: deps.directory,
         // System-prompt-hash handler reads systemPromptRefreshSessions to

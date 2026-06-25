@@ -417,6 +417,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                 twoPass: deps.historianTwoPass,
                 subagentKind: "recomp",
                 agentId: HISTORIAN_RECOMP_AGENT,
+                language: deps.language,
                 callbacks: {
                     onRepairRetry: async (error) => {
                         emitProgress(`Repair retry (pass ${passCount + 1})…`);

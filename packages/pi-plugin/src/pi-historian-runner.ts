@@ -38,6 +38,7 @@
  */
 
 import * as crypto from "node:crypto";
+import { withContentLanguageDirective } from "@magic-context/core/agents/language-directive";
 import { embedAndStoreCompartmentChunks } from "@magic-context/core/features/magic-context/compartment-embedding";
 import { insertCompartmentEvents } from "@magic-context/core/features/magic-context/compartment-events";
 import { isCompartmentLeaseHeld } from "@magic-context/core/features/magic-context/compartment-lease";
@@ -213,6 +214,7 @@ export interface PiHistorianDeps {
 	/** User-memory feature gate (`dreamer.user_memories.enabled`). Gates whether
 	 *  historian-extracted user observations are persisted as candidates. */
 	userMemoriesEnabled?: boolean;
+	language?: string;
 	/** Optional callback invoked on successful publication for cache-bust signaling. */
 	onPublished?: () => void;
 	/** Holder id for the DB-backed compartment-state lease guarding publish paths. */
@@ -604,11 +606,21 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			};
 
 			retainDrainReservationForRetryThrottle = true;
+			const historianSystemPrompt = withContentLanguageDirective(
+				COMPARTMENT_AGENT_SYSTEM_PROMPT,
+				deps.language,
+				{ preserveUserQuotes: true },
+			);
+			const historianEditorSystemPrompt = withContentLanguageDirective(
+				HISTORIAN_EDITOR_SYSTEM_PROMPT,
+				deps.language,
+				{ preserveUserQuotes: true },
+			);
 
 			// First pass.
 			const firstResult = await runner.run({
 				agent: HISTORIAN_AGENT_NAME,
-				systemPrompt: COMPARTMENT_AGENT_SYSTEM_PROMPT,
+				systemPrompt: historianSystemPrompt,
 				userMessage: prompt,
 				model: historianModel,
 				fallbackModels,
@@ -649,10 +661,11 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					prompt,
 					validatedPass.rawText,
 					validatedPass.error,
+					deps.language,
 				);
 				const repairResult = await runner.run({
 					agent: HISTORIAN_AGENT_NAME,
-					systemPrompt: COMPARTMENT_AGENT_SYSTEM_PROMPT,
+					systemPrompt: historianSystemPrompt,
 					userMessage: repairPrompt,
 					model: historianModel,
 					fallbackModels,
@@ -703,7 +716,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					);
 					const fbResult = await runner.run({
 						agent: HISTORIAN_AGENT_NAME,
-						systemPrompt: COMPARTMENT_AGENT_SYSTEM_PROMPT,
+						systemPrompt: historianSystemPrompt,
 						userMessage: prompt,
 						model: candidate,
 						// We drive the iteration here (validating each), so don't let
@@ -767,7 +780,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					sessionLog(sessionId, "historian two-pass: running editor on draft");
 					const editorResult = await runner.run({
 						agent: HISTORIAN_AGENT_NAME,
-						systemPrompt: HISTORIAN_EDITOR_SYSTEM_PROMPT,
+						systemPrompt: historianEditorSystemPrompt,
 						userMessage: buildHistorianEditorPrompt(draftAssistantText),
 						model: historianModel,
 						timeoutMs: historianTimeoutMs,

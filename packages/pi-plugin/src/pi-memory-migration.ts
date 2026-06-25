@@ -1,3 +1,4 @@
+import { withMigrationLanguageDirective } from "@magic-context/core/agents/language-directive";
 import {
 	applyMemoryMigration,
 	buildMemoryMigrationPrompt,
@@ -47,6 +48,7 @@ export interface PiMemoryMigrationDeps {
 	sessionId: string;
 	/** Route user_observations to the user-memory candidate pool when enabled. */
 	userMemoriesEnabled?: boolean;
+	language?: string;
 }
 
 export interface PiMemoryMigrationOutcome {
@@ -121,7 +123,10 @@ export async function runPiMemoryMigration(
 		}
 		const result = await deps.runner.run({
 			agent: "magic-context-historian",
-			systemPrompt: MIGRATION_SYSTEM_PROMPT,
+			systemPrompt: withMigrationLanguageDirective(
+				MIGRATION_SYSTEM_PROMPT,
+				deps.language,
+			),
 			userMessage: prompt,
 			model,
 			// We drive the chain here (validating each), so don't let the runner

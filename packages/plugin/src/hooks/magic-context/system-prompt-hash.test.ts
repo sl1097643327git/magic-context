@@ -81,11 +81,13 @@ function buildHandler(opts?: {
     experimentalUserMemories?: boolean;
     internalChildSessions?: Set<string>;
     ctxReduceEnabled?: boolean;
+    language?: string;
 }): ReturnType<typeof createSystemPromptHashHandler> {
     return createSystemPromptHashHandler({
         db: openDatabase(),
         protectedTags: 1,
         ctxReduceEnabled: opts?.ctxReduceEnabled ?? true,
+        language: opts?.language,
         dreamerEnabled: opts?.dreamerEnabled ?? false,
         injectDocs: opts?.injectDocs ?? false,
         directory: opts?.directory ?? "/tmp",
@@ -293,6 +295,47 @@ describe("system-prompt-hash v2 system prompt contents", () => {
         expect(joined).not.toContain("<user-profile>");
         expect(joined).not.toContain("<key-files>");
         expect(joined).not.toContain("Alpha &lt;closing-tag&gt;");
+    });
+
+    it("injects language guidance and stabilizes after the config changes once", async () => {
+        useTempDataHome("sph-language-fold-once-");
+        const sessionId = "ses-language-fold";
+        const systemPromptRefreshSessions = new Set<string>();
+        const historyRefreshSessions = new Set<string>();
+        const pendingMaterializationSessions = new Set<string>();
+        const db = openDatabase();
+
+        const withoutLanguage = buildHandler({
+            systemPromptRefreshSessions,
+            historyRefreshSessions,
+            pendingMaterializationSessions,
+        });
+        await withoutLanguage.handler({ sessionID: sessionId }, { system: ["You are helpful."] });
+        historyRefreshSessions.clear();
+        pendingMaterializationSessions.clear();
+        systemPromptRefreshSessions.clear();
+
+        const withLanguage = buildHandler({
+            systemPromptRefreshSessions,
+            historyRefreshSessions,
+            pendingMaterializationSessions,
+            language: "Turkish",
+        });
+        const changed = ["You are helpful."];
+        await withLanguage.handler({ sessionID: sessionId }, { system: changed });
+        expect(changed.join("\n")).toContain("Use Turkish for your natural-language replies");
+        expect(historyRefreshSessions.has(sessionId)).toBe(true);
+        expect(pendingMaterializationSessions.has(sessionId)).toBe(true);
+
+        historyRefreshSessions.clear();
+        pendingMaterializationSessions.clear();
+        systemPromptRefreshSessions.clear();
+        const stable = ["You are helpful."];
+        await withLanguage.handler({ sessionID: sessionId }, { system: stable });
+        expect(stable.join("\n")).toContain("Use Turkish for your natural-language replies");
+        expect(historyRefreshSessions.has(sessionId)).toBe(false);
+        expect(pendingMaterializationSessions.has(sessionId)).toBe(false);
+        expect(getOrCreateSessionMeta(db, sessionId).systemPromptHash).not.toBe("");
     });
 });
 

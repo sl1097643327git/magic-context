@@ -1,5 +1,7 @@
 /** Generic magic context system prompt section shared by all agents. */
 
+import { buildPrimaryLanguageDirective } from "./language-directive";
+
 /**
  * Mindset frame that counters two trained priors which make agents
  * self-sabotage under Magic Context:
@@ -136,6 +138,7 @@ export function buildMagicContextSection(
     temporalAwarenessEnabled = false,
     cavemanTextCompressionEnabled = false,
     subagentMode = false,
+    language?: string,
 ): string {
     // Subagent sessions: minimal §N§ + ctx_reduce mechanics only. Bypasses the
     // long-term-partner frame, memory/search/note guidance, and the reduction
@@ -157,9 +160,11 @@ export function buildMagicContextSection(
     // somehow the flag flipped on with ctx_reduce enabled.
     const cavemanWarning =
         cavemanTextCompressionEnabled && !ctxReduceEnabled ? CAVEMAN_COMPRESSION_WARNING : "";
+    const languageDirective = buildPrimaryLanguageDirective(language);
+    const languageGuidance = languageDirective ? `\n\n${languageDirective}` : "";
 
     if (!ctxReduceEnabled) {
-        return `## Magic Context\n\n${LONG_TERM_PARTNER_FRAME}\n${PARTNER_FRAME_CLOSER_NO_REDUCE}\n\n${BASE_INTRO_NO_REDUCE()}${smartNoteGuidance}${temporalGuidance}${cavemanWarning}`;
+        return `## Magic Context\n\n${LONG_TERM_PARTNER_FRAME}\n${PARTNER_FRAME_CLOSER_NO_REDUCE}\n\n${BASE_INTRO_NO_REDUCE()}${smartNoteGuidance}${temporalGuidance}${cavemanWarning}${languageGuidance}`;
     }
-    return `## Magic Context\n\n${LONG_TERM_PARTNER_FRAME}\n${PARTNER_FRAME_CLOSER_REDUCE}\n\n${BASE_INTRO(protectedTags)}${smartNoteGuidance}${temporalGuidance}\n${GENERIC_SECTION}\n\nPrefer many small targeted operations over one large blanket operation, and keep the working set tidy as routine maintenance.`;
+    return `## Magic Context\n\n${LONG_TERM_PARTNER_FRAME}\n${PARTNER_FRAME_CLOSER_REDUCE}\n\n${BASE_INTRO(protectedTags)}${smartNoteGuidance}${temporalGuidance}\n${GENERIC_SECTION}\n\nPrefer many small targeted operations over one large blanket operation, and keep the working set tidy as routine maintenance.${languageGuidance}`;
 }

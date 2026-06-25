@@ -283,6 +283,22 @@ describe("loadPiConfig", () => {
 		expect(result.config.dreamer?.prompt).toBeUndefined();
 		expect(result.warnings.join("\n")).toContain("dreamer.prompt");
 	});
+
+	it("strips language from PROJECT config but honors USER config", () => {
+		const cwd = makeTempRoot("mc-pi-cwd-");
+		const home = makeTempRoot("mc-pi-home-");
+		withHome(home);
+		writeUserConfig(home, JSON.stringify({ language: "Português (Brasil)" }));
+		writeProjectConfig(cwd, JSON.stringify({ language: "Turkish" }));
+
+		const result = loadPiConfig({ cwd });
+
+		expect(result.config.language).toBe("Português (Brasil)");
+		expect(result.warnings.join("\n")).toContain(
+			"Ignoring language from project config",
+		);
+	});
+
 	it("migrates legacy agent enabled keys before schema parsing", () => {
 		const cwd = makeTempRoot("mc-pi-cwd-");
 		const home = makeTempRoot("mc-pi-home-");

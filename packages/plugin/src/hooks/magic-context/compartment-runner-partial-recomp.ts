@@ -444,6 +444,7 @@ export async function executePartialRecompInternal(
                 twoPass: deps.historianTwoPass,
                 subagentKind: "recomp",
                 agentId: HISTORIAN_RECOMP_AGENT,
+                language: deps.language,
                 callbacks: {
                     onRepairRetry: async (error) => {
                         await sendIgnoredMessage(

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
     buildHistorianFailureNotice,
+    buildHistorianRepairPrompt,
     HISTORIAN_PERSISTENT_FAILURE_THRESHOLD,
     validateHistorianOutput,
 } from "./compartment-runner-validation";
@@ -29,6 +30,16 @@ describe("buildHistorianFailureNotice", () => {
         expect(notice).toContain("ProviderModelNotFoundError");
         // Still reassures that the conversation keeps working.
         expect(notice.toLowerCase()).toContain("keeps working");
+    });
+});
+
+describe("buildHistorianRepairPrompt", () => {
+    test("appends the language directive last when configured", () => {
+        const prompt = buildHistorianRepairPrompt("base", "<bad />", "bad xml", "Turkish");
+        expect(prompt).toContain("Your previous XML response was invalid");
+        expect(prompt.trim().endsWith("write the surrounding summary prose in Turkish.")).toBe(
+            true,
+        );
     });
 });
 

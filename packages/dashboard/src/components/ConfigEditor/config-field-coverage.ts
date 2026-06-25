@@ -19,6 +19,7 @@
 export const RENDERED_PREFIXES: readonly string[] = [
   // General
   "enabled",
+  "language",
   "ctx_reduce_enabled",
   "toast_duration_ms",
   // Thresholds (custom PerModelField widgets)

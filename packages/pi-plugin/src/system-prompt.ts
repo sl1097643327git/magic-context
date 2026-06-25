@@ -45,6 +45,7 @@ export interface BuildMagicContextBlockOptions {
 	dreamerEnabled?: boolean;
 	temporalAwarenessEnabled?: boolean;
 	cavemanTextCompressionEnabled?: boolean;
+	language?: string;
 	/** Reserved for compatibility; user profile now lives in m[0]. */
 	userMemoriesEnabled?: boolean;
 	existingSystemPrompt?: string;
@@ -72,6 +73,8 @@ export function buildMagicContextBlock(
 		opts.dreamerEnabled ?? false,
 		opts.temporalAwarenessEnabled ?? false,
 		opts.cavemanTextCompressionEnabled ?? false,
+		false,
+		opts.language,
 	);
 }
 

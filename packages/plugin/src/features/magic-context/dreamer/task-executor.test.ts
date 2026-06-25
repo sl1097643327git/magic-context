@@ -100,6 +100,49 @@ describe("createDreamTaskExecutor — curate", () => {
         expect(capturedPrompt).not.toContain('ctx_memory(action="verified"');
         expect(capturedPrompt).not.toContain("verified_files");
     });
+
+    test("adds the content language directive to curated prose tasks", async () => {
+        db = freshDb();
+        const project = "/repo/language-project";
+        insertMemory(db, {
+            projectPath: project,
+            category: "ARCHITECTURE",
+            content: "The project stores prompts in src/prompts.ts.",
+        });
+
+        let capturedSystem = "";
+        const client = {
+            session: {
+                list: mock(async () => ({ data: [] })),
+                create: mock(async () => ({ data: { id: "dream-child" } })),
+                prompt: mock(async (args: { body?: { system?: string } }) => {
+                    capturedSystem = args.body?.system ?? "";
+                    return {};
+                }),
+                messages: mock(async () => ({ data: assistantMessages("curation complete") })),
+                delete: mock(async () => ({})),
+            },
+        };
+        const executor = createDreamTaskExecutor({
+            client: client as never,
+            sessionDirectory: project,
+            openOpenCodeDb: () => null,
+            language: "Turkish",
+        });
+
+        await executor(
+            { task: "curate", schedule: "0 4 * * 0", timeoutMinutes: 20 },
+            {
+                db,
+                projectIdentity: project,
+                holderId: "holder-curate-language",
+                leaseKey: leaseKeyFor("curate", project),
+            },
+        );
+
+        expect(capturedSystem).toContain("Write human-readable prose you author in: Turkish.");
+        expect(capturedSystem).toContain("Copy required output schemas exactly");
+    });
 });
 
 describe("createDreamTaskExecutor — parent session resolution", () => {

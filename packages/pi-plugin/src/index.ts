@@ -361,6 +361,7 @@ export function resolveSidekickFromConfig(
 		timeoutMs: sidekick.timeout_ms,
 		thinking_level: sidekick.thinking_level,
 		fallbackModels: resolveFallbackChain(sidekick.fallback_models),
+		language: config.language,
 	};
 }
 
@@ -412,6 +413,7 @@ export function resolveHistorianFromConfig(
 		memoryEnabled: config.memory.enabled,
 		autoPromote: config.memory.auto_promote,
 		userMemoriesEnabled: userMemoryCollectionEnabled(config.dreamer),
+		language: config.language,
 	};
 }
 
@@ -641,6 +643,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			executeThresholdTokens: cfg.execute_threshold_tokens,
 		},
 		historian: hist,
+		language: cfg.language,
 		autoSearch: auto,
 		resolveForProject: resolveContextOptionsForProject,
 		maybeAutoEmbedSession: (sessionId, dir, identity) => {
@@ -766,6 +769,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		historianFallbacks: historianConfig?.fallbackModels,
 		historianTimeoutMs: config.historian_timeout_ms,
 		historianThinkingLevel: historianConfig?.thinkingLevel,
+		language: config.language,
 		memoryEnabled: config.memory.enabled,
 		autoPromote: config.memory.auto_promote,
 	});
@@ -784,6 +788,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		historianFallbacks: historianConfig?.fallbackModels,
 		historianTimeoutMs: config.historian_timeout_ms,
 		historianThinkingLevel: historianConfig?.thinkingLevel,
+		language: config.language,
 		memoryEnabled: config.memory.enabled,
 		autoPromote: config.memory.auto_promote,
 		userMemoriesEnabled: userMemoryCollectionEnabled(config.dreamer),
@@ -826,6 +831,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			// useless on Pi.
 			embeddingConfig: config.embedding,
 			memoryEnabled: config.memory.enabled,
+			language: config.language,
 			gitCommitIndexing: config.memory.git_commit_indexing,
 			onAdjunctsRefreshNeeded: signalPiSystemPromptRefreshForProject,
 		});
@@ -1082,6 +1088,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				cavemanTextCompressionEnabled:
 					effectiveConfig.ctx_reduce_enabled === false &&
 					effectiveConfig.caveman_text_compression?.enabled === true,
+				language: effectiveConfig.language,
 				// Stable user memories rendered as <user-profile> — dreamer
 				// promotes recurring observations into this set, then the
 				// system prompt surfaces them across all sessions in the

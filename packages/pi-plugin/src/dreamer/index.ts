@@ -41,6 +41,7 @@ export interface PiDreamerOptions {
 	 * previously made dreamer's memory tasks a no-op.
 	 */
 	memoryEnabled: boolean;
+	language?: string;
 	gitCommitIndexing: {
 		enabled: boolean;
 		since_days: number;
@@ -147,6 +148,7 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 		projectIdentity: opts.projectIdentity,
 		client,
 		dreamerConfig: opts.config,
+		language: opts.language,
 		gitCommitIndexing: opts.gitCommitIndexing,
 		ensureRegistered: ensureProjectRegisteredFromPiDirectory,
 		// SCHEDULED Pi retrospective must read Pi JSONL sessions, not opencode.db.
@@ -178,7 +180,7 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 		runManualDream({
 			db: opts.db,
 			projectIdentity: opts.projectIdentity,
-			tasks: buildDreamTaskRuntimeConfigs(opts.config),
+			tasks: buildDreamTaskRuntimeConfigs(opts.config, opts.language),
 			executor: createDreamTaskExecutor({
 				client: client as never,
 				sessionDirectory: opts.projectDir,
@@ -189,6 +191,7 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 				primerRawProviderFactory: createPiPrimerRawProviderFactory(),
 				userMemoryCollectionEnabled: userMemoryCollectionEnabled(opts.config),
 				ensureProjectRegistered: ensureProjectRegisteredFromPiDirectory,
+				language: opts.language,
 			}),
 			task,
 		});

@@ -3,6 +3,9 @@ import {
 	type DreamerConfig,
 	DreamerConfigSchema,
 } from "@magic-context/core/config/schema/magic-context";
+import { getTaskScheduleState } from "@magic-context/core/features/magic-context/dreamer/storage-task-schedule";
+import { insertMemory } from "@magic-context/core/features/magic-context/memory";
+import { runMigrations } from "@magic-context/core/features/magic-context/migrations";
 import { initializeDatabase } from "@magic-context/core/features/magic-context/storage-db";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
@@ -10,6 +13,7 @@ import {
 	__test,
 	awaitInFlightDreamers,
 	registerPiDreamerProject,
+	runPiDreamForProject,
 	unregisterPiDreamerProject,
 } from ".";
 
@@ -33,6 +37,7 @@ function requireCapturedClient(
 function createDb(): Database {
 	const database = new Database(":memory:");
 	initializeDatabase(database);
+	runMigrations(database);
 	return database;
 }
 
@@ -52,6 +57,7 @@ function dreamerOptions(args: {
 	projectIdentity: string;
 	projectDir?: string;
 	config?: DreamerConfig;
+	language?: string;
 	onAdjunctsRefreshNeeded?: (projectIdentity: string) => void;
 }) {
 	return {
@@ -63,6 +69,7 @@ function dreamerOptions(args: {
 		config: args.config ?? enabledConfig(),
 		embeddingConfig: { provider: "off" as const },
 		memoryEnabled: true,
+		language: args.language,
 		gitCommitIndexing: { enabled: false, since_days: 30, max_commits: 200 },
 		onAdjunctsRefreshNeeded: args.onAdjunctsRefreshNeeded,
 	};
@@ -121,6 +128,77 @@ describe("Pi dreamer wiring", () => {
 		registerPiDreamerProject(opts);
 
 		expect(__test.registeredProjectCount()).toBe(1);
+	});
+
+	test("threads language into scheduled dreamer registration", async () => {
+		db = createDb();
+		let language: string | undefined;
+		__test.setStartDreamScheduleTimerFactory(async (registration) => {
+			language = (registration as { language?: string }).language;
+			return mock(() => {});
+		});
+
+		registerPiDreamerProject(
+			dreamerOptions({
+				database: db,
+				projectIdentity: "git:pi-language",
+				language: "Español",
+			}),
+		);
+		await flushMicrotasks();
+
+		expect(language).toBe("Español");
+	});
+
+	test("manual dreamer passes a directive-bearing system prompt when language is set", async () => {
+		db = createDb();
+		let capturedSystem = "";
+		__test.setStartDreamScheduleTimerFactory(async () => mock(() => {}));
+		__test.setPiSubagentRunnerFactory(
+			() =>
+				({
+					run: mock(async (args: { systemPrompt?: string }) => {
+						capturedSystem = args.systemPrompt ?? "";
+						return { ok: true, assistantText: "done" };
+					}),
+				}) as never,
+		);
+		insertMemory(db, {
+			projectPath: "git:pi-manual-language",
+			category: "ARCHITECTURE",
+			content: "The Pi harness runs dreamer prompts through a subprocess.",
+		});
+
+		registerPiDreamerProject(
+			dreamerOptions({
+				database: db,
+				projectDir: process.cwd(),
+				projectIdentity: "git:pi-manual-language",
+				config: DreamerConfigSchema.parse({
+					model: "test/model",
+					tasks: { curate: { schedule: "0 4 * * *" } },
+				}),
+				language: "Español",
+			}),
+		);
+
+		const result = await runPiDreamForProject(
+			"git:pi-manual-language",
+			"curate",
+		);
+		expect(
+			getTaskScheduleState(db, "git:pi-manual-language", "curate")?.lastError,
+		).toBeNull();
+		expect(result).toEqual({
+			ran: ["curate"],
+			skippedNoWork: [],
+			deferredBusy: [],
+			failed: [],
+		});
+
+		expect(capturedSystem).toContain(
+			"Write human-readable prose you author in: Español.",
+		);
 	});
 
 	test("re-registering the SAME dir is a no-op (keeps the first timer)", async () => {

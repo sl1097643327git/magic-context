@@ -1,3 +1,4 @@
+import { withContentLanguageDirective } from "../../agents/language-directive";
 import { parseCompartmentOutput } from "./compartment-parser";
 import { mapParsedCompartmentsToChunk } from "./compartment-runner-mapping";
 import type {
@@ -161,8 +162,9 @@ export function buildHistorianRepairPrompt(
     originalPrompt: string,
     previousOutput: string,
     validationError: string,
+    language?: string,
 ): string {
-    return [
+    const prompt = [
         originalPrompt,
         "",
         "Your previous XML response was invalid and cannot be persisted.",
@@ -174,6 +176,7 @@ export function buildHistorianRepairPrompt(
         "Previous invalid XML:",
         previousOutput,
     ].join("\n");
+    return withContentLanguageDirective(prompt, language, { preserveUserQuotes: true });
 }
 
 export function validateStoredCompartments(

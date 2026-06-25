@@ -121,6 +121,8 @@ export function createSystemPromptHashHandler(deps: {
     protectedTags: number;
     ctxReduceEnabled: boolean;
     dreamerEnabled: boolean;
+    /** Optional language from user config for the main agent's generated text. */
+    language?: string;
     /** When true + dreamerEnabled, inject ARCHITECTURE.md and STRUCTURE.md into system prompt */
     injectDocs: boolean;
     /** Project root directory for reading doc files */
@@ -320,6 +322,7 @@ export function createSystemPromptHashHandler(deps: {
                 deps.experimentalTemporalAwareness,
                 deps.experimentalCavemanTextCompression,
                 subagentReduceMode,
+                deps.language,
             );
             output.system.push(guidance);
             sessionLog(

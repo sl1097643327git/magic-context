@@ -9,7 +9,10 @@ import type { DreamTaskRuntimeConfig } from "./task-scheduler";
  * (task override → dreamer-level default), thinking level, timeout, and
  * task-specific params. One place owns the inheritance rule.
  */
-export function buildDreamTaskRuntimeConfigs(dreamer: DreamerConfig): DreamTaskRuntimeConfig[] {
+export function buildDreamTaskRuntimeConfigs(
+    dreamer: DreamerConfig,
+    language?: string,
+): DreamTaskRuntimeConfig[] {
     // Defensive: `tasks` is always the v2 record after config load (Zod default),
     // but background/test callers can hand a partially-shaped object; treat a
     // missing entry as a disabled task with defaults rather than crashing.
@@ -30,6 +33,7 @@ export function buildDreamTaskRuntimeConfigs(dreamer: DreamerConfig): DreamTaskR
             model,
             fallbackModels,
             thinkingLevel,
+            language,
             timeoutMinutes: t.timeout_minutes ?? 20,
             promotionThreshold: t.promotion_threshold,
         };

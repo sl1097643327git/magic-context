@@ -459,6 +459,7 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             fallbackModelId: deps.fallbackModelId,
             fallbackModels: deps.fallbackModels,
             twoPass: deps.historianTwoPass,
+            language: deps.language,
         });
         if (!validatedPass.ok) {
             // Always track historian failures regardless of usage percentage.

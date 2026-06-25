@@ -26,6 +26,7 @@ export interface DreamTaskRuntimeConfig {
     model?: string;
     fallbackModels?: readonly string[];
     thinkingLevel?: PiThinkingLevel;
+    language?: string;
     timeoutMinutes: number;
     /** review-user-memories */
     promotionThreshold?: number;

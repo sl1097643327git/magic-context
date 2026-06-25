@@ -1,4 +1,5 @@
 import { HISTORIAN_AGENT } from "../../../agents/historian";
+import { withMigrationLanguageDirective } from "../../../agents/language-directive";
 import { normalizeSDKResponse, promptSyncWithModelSuggestionRetry } from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
 import { shouldKeepSubagents } from "../../../shared/keep-subagents";
@@ -288,6 +289,7 @@ export interface RunMemoryMigrationDeps {
     timeoutMs?: number;
     /** When true, route user_observations into the user-memory candidate pool. */
     userMemoriesEnabled?: boolean;
+    language?: string;
 }
 
 /**
@@ -401,7 +403,10 @@ export async function runMemoryMigration(
                         query: { directory },
                         body: {
                             agent: HISTORIAN_AGENT,
-                            system: MIGRATION_SYSTEM_PROMPT,
+                            system: withMigrationLanguageDirective(
+                                MIGRATION_SYSTEM_PROMPT,
+                                deps.language,
+                            ),
                             ...(modelOverride ? { model: modelOverride } : {}),
                             parts: [{ type: "text", text: prompt, synthetic: true }],
                         },

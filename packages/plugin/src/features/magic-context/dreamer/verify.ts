@@ -1,4 +1,5 @@
 import { DREAMER_MEMORY_MAPPER_AGENT } from "../../../agents/dreamer";
+import { withContentLanguageDirective } from "../../../agents/language-directive";
 import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
@@ -61,6 +62,7 @@ export interface VerifyArgs {
     forceBroad?: boolean;
     model?: string;
     fallbackModels?: readonly string[];
+    language?: string;
 }
 
 export interface VerifyResult {
@@ -161,7 +163,7 @@ async function verifyOneBatch(
                 query: { directory: args.sessionDirectory },
                 body: {
                     agent: DREAMER_MEMORY_MAPPER_AGENT,
-                    system: VERIFY_SYSTEM_PROMPT,
+                    system: withContentLanguageDirective(VERIFY_SYSTEM_PROMPT, args.language),
                     ...modelBodyField(args.model),
                     parts: [{ type: "text", text: prompt, synthetic: true }],
                 },

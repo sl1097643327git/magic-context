@@ -4,6 +4,7 @@ import {
     buildHiddenAgentConfig,
     buildHiddenAgentRegistrations,
 } from "./agents/hidden-agent-registrations";
+import { withContentLanguageDirective } from "./agents/language-directive";
 import { loadPluginConfig } from "./config";
 import { isDreamerRunnable } from "./config/agent-disable";
 import { migrateMagicContextConfigLocations } from "./config/migrate-config-location";
@@ -191,6 +192,7 @@ const server: Plugin = async (ctx) => {
             projectIdentity: resolveProjectIdentity(ctx.directory),
             client: ctx.client,
             dreamerConfig: dreamerRunnable ? pluginConfig.dreamer : undefined,
+            language: pluginConfig.language,
             embeddingConfig: pluginConfig.embedding,
             memoryEnabled: pluginConfig.memory?.enabled === true,
             gitCommitIndexing: pluginConfig.memory.git_commit_indexing?.enabled
@@ -550,9 +552,21 @@ const server: Plugin = async (ctx) => {
                     // promoted to user-profile when user_memories is disabled
                     // (gated in the runner). Keeping the system prompt constant
                     // preserves prompt-cache byte stability.
-                    historianPrompt: COMPARTMENT_AGENT_SYSTEM_PROMPT,
-                    historianRecompPrompt: COMPARTMENT_STRUCTURAL_SYSTEM_PROMPT,
-                    historianEditorPrompt: HISTORIAN_EDITOR_SYSTEM_PROMPT,
+                    historianPrompt: withContentLanguageDirective(
+                        COMPARTMENT_AGENT_SYSTEM_PROMPT,
+                        pluginConfig.language,
+                        { preserveUserQuotes: true },
+                    ),
+                    historianRecompPrompt: withContentLanguageDirective(
+                        COMPARTMENT_STRUCTURAL_SYSTEM_PROMPT,
+                        pluginConfig.language,
+                        { preserveUserQuotes: true },
+                    ),
+                    historianEditorPrompt: withContentLanguageDirective(
+                        HISTORIAN_EDITOR_SYSTEM_PROMPT,
+                        pluginConfig.language,
+                        { preserveUserQuotes: true },
+                    ),
                     sidekickPrompt: SIDEKICK_SYSTEM_PROMPT,
                     dreamerOverrides: dreamerAgentOverrides,
                     historianOverrides: historianAgentOverrides,

@@ -63,6 +63,7 @@ interface ProjectRegistration {
     projectIdentity: string;
     client: PluginContext["client"];
     dreamerConfig?: DreamerConfig;
+    language?: string;
     gitCommitIndexing?: {
         enabled: boolean;
         since_days: number;
@@ -329,7 +330,7 @@ async function sweepProject(
         // runs due tasks grouped by conflict-domain under keyed leases. The
         // executor runs in THIS registration's own checkout (not a sibling
         // worktree the shared git:<sha> identity might resolve to).
-        const runtimeConfigs = buildDreamTaskRuntimeConfigs(dreamerConfig);
+        const runtimeConfigs = buildDreamTaskRuntimeConfigs(dreamerConfig, reg.language);
         const executor = createDreamTaskExecutor({
             client: reg.client,
             sessionDirectory: reg.directory,
@@ -346,6 +347,7 @@ async function sweepProject(
             primerRawProviderFactory: reg.primerRawProviderFactory,
             userMemoryCollectionEnabled: userMemoryCollectionEnabled(dreamerConfig),
             ensureProjectRegistered: reg.ensureRegistered,
+            language: reg.language,
         });
         const ran = await runDueTasksForProject({
             db,

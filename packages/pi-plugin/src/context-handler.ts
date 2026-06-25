@@ -626,6 +626,7 @@ export interface PiHistorianOptions {
 	/** User-memory feature gate (`dreamer.user_memories.enabled`). Gates whether
 	 *  historian user observations are persisted as candidates. */
 	userMemoriesEnabled?: boolean;
+	language?: string;
 	/** Notify UI/status surfaces after historian state changes. */
 	onStatusChange?: (ctx: ExtensionContext, sessionId: string) => void;
 	/**
@@ -736,6 +737,7 @@ export interface PiContextHandlerOptions {
 	 * were getting dropped mid-task.
 	 */
 	protectedTags?: number;
+	language?: string;
 	/**
 	 * Optional historian wiring (Step 4b.3b). When omitted, the trigger
 	 * check is skipped — context events still tag + drop normally, and
@@ -2866,6 +2868,7 @@ function spawnPiHistorianRun(args: {
 				memoryEnabled: historian.memoryEnabled,
 				autoPromote: historian.autoPromote,
 				userMemoriesEnabled: historian.userMemoriesEnabled,
+				language: historian.language,
 				compartmentLeaseHolderId: holderId,
 				onPublished: () => {
 					const sessionStillActive = isContextHandlerSessionActive(sessionId);
