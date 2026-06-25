@@ -23,36 +23,54 @@ Production builds use Tauri’s updater against the project release manifest (`l
 
 The plugin must have run at least once so `context.db` exists (see dashboard README for default paths on your OS).
 
-## Mem (memories)
+The sidebar has six sections: **Projects**, **Workspaces**, **Cache**, **User Directives**, **Config**, and **Logs**. Memories, sessions, dreamer, and primers all live *inside* a project rather than as flat global tabs.
 
-Cross-session **project memories**: search, filter by project/category/status, and open a detail panel.
+## Projects
 
-**What you can do.**
+The landing view is a grid of **project cards** sorted by last activity, each showing session count, memory count, workspace membership, active harness badges (OC / Pi), and the last-active time. Search by name or path. Click a card to open that project's detail view, which has four sub-tabs:
+
+### Sessions
+
+Browse the project's OpenCode and Pi sessions: compartments, facts, notes, smart notes, token breakdown, and subagent stats.
+
+- Filter by harness and search; hide subagent sessions.
+- Open a session and switch tabs: messages, **compartments**, facts, notes, historian runs, tokens.
+- **Compartment viewer:** message ranges, v2 **tiers** (`p1`–`p4`) with the same fallback chain as runtime rendering, **importance** bands (critical/high/medium/low/minimal), and episode tags.
+- Edit or dismiss **session notes** and manage **smart notes**; edit or delete **session facts**.
+
+Use this when `/ctx-status` is not enough and you need to read what the historian actually stored.
+
+### Memories
+
+The project's **project memories**: search, filter by category/status, and open a detail panel.
 
 - **Edit** content and change status (`active`, `permanent`, `archived`).
 - **Archive** or **permanently delete** individual memories (delete is confirmed in the UI).
 - **Bulk select** rows and **bulk archive** or **bulk delete** with confirmation.
-- View metadata: category, source (`historian`, `agent`, `dreamer`, `user`), merge lineage, embeddings flag.
+- View metadata: category, source (`historian`, `agent`, `dreamer`, `user`), classify columns (importance / scope / shareable), merge lineage, embeddings flag.
 
 Changes write to the shared database; **running sessions pick up memory updates automatically** on subsequent turns without restarting the harness.
 
-<!-- screenshot: memories-page -->
+### Dreamer
 
-## Hist (sessions / history)
+Per-task **schedules**, last-run status, and recent **runs** for this project.
 
-Browse OpenCode and Pi sessions: compartments, facts, notes, smart notes, token breakdown, cache events per session, and subagent stats.
+- See each task's effective schedule (global config merged with any per-project override), next run / overdue state, last run time, and last failure.
+- Toggle a task on/off (writes the task's `schedule` into the project's local `magic-context.jsonc`).
+- Expand a run for per-task duration, token usage, smart-note surfacing counts, and memory change breakdown (written/archived/merged).
+- Trigger runs from your session with `/ctx-dream` (the dashboard reflects schedule state read-only; it does not run the dreamer itself).
 
-**What you can do.**
+### Primers
 
-- Filter by harness, project, search, and hide subagent sessions.
-- Open a session and switch tabs: messages, **compartments**, facts, notes, historian runs, tokens, cache.
-- **Compartment viewer:** message ranges, v2 **tiers** (`p1`–`p4`) with the same fallback chain as runtime rendering, **importance** bands (critical/high/medium/low/minimal), and episode tags.
-- Edit or dismiss **session notes** and manage **smart notes** for that session.
-- Edit or delete **session facts**.
+The project's **primers**: recurring standing questions the historian noticed, promoted into durable answers the dreamer keeps fresh against current code. Browse the promoted questions and their synthesized answers.
 
-Use this when `/ctx-status` is not enough and you need to read what the historian actually stored.
+<!-- screenshot: project-detail -->
 
-<!-- screenshot: sessions-compartments -->
+## Workspaces
+
+Group multiple project repos into a **workspace** so their project memories pool across member sessions (useful for multi-repo microservice setups). Create a workspace, add or remove member projects, and choose which memory categories are shared (CONSTRAINTS only, by default). Edits stage in the card and apply together on **Save** so an incremental change does not trigger several cache busts.
+
+<!-- screenshot: workspaces -->
 
 ## Cache (diagnostics)
 
@@ -60,55 +78,37 @@ Live **provider cache** telemetry: per-turn cache read/write, input tokens, and 
 
 **How to read the timeline.**
 
-- Each turn is a bar: **green** when cache hit ratio is high (about ≥90%), **amber** mid, **red** low — quick scan for turns that re-sent most of the prompt.
-- Severity icons per turn: `stable`, `info`, `warning`, `warming`, `bust`, `full_bust`. A **bust** (red/black) means the cached prefix was largely invalidated — expect higher fresh token use on the next call.
-- Expand a turn to see step-level events and bust causes recorded by the plugin.
-- **Recent sessions** cards summarize hit counts and bust counts; select a session to focus the chart. **Show all** loads the cross-session corpus (heavier on large DBs). Polling can be paused.
-
-Subagent sessions can be hidden to reduce noise.
+- The timeline is segmented by context-limit changes; each segment has its own y-axis scale. Bars show prompt size against the window with an inner fill for the cached portion, and drop markers where Magic Context initiated a reclaim.
+- Severity per turn: `stable`, `info`, `warning`, `warming`, `bust`, `full_bust`. A **bust** means the cached prefix was largely invalidated, so expect higher fresh token use on the next call. Sessions whose provider does not report cache data show as `UNKNOWN`.
+- Click a bar to scroll to the matching turn in the list; expand a turn for step-level events and the bust cause recorded by the plugin.
+- A **recent sessions** strip (measurement-driven, equal-width cards) summarizes recent sessions; select one to focus the chart. The event-window size is selectable. Polling can be paused, and subagent sessions can be hidden.
 
 <!-- screenshot: cache-timeline -->
 
-## Dream (dreamer)
+## User Directives
 
-Per-task **schedules**, global state, and recent **runs** grouped by project.
-
-**What you can do.**
-
-- See each task's next scheduled run (and overdue tasks), last run time, and last failure.
-- Expand a run for per-task duration, token usage, smart-note surfacing counts, and memory change breakdown (written/archived/merged).
-- Trigger runs from your session with `/ctx-dream` (the dashboard reflects schedule state read-only; it does not run the dreamer itself).
-
-<!-- screenshot: dreamer-panel -->
-
-## User (user memories)
-
-Experimental **user-level** memories (separate from project memory): promoted entries and **candidates** awaiting promotion.
-
-**What you can do.**
+**User-level** memories (separate from project memory): promoted entries that inject into every session as a `<user-profile>` block, plus **candidates** awaiting promotion.
 
 - **Promote** a candidate into an active user memory.
 - **Edit** content, **dismiss**, or **delete** promoted memories.
 - **Delete** candidates you do not want promoted.
 
-Controlled by `dreamer.user_memories.enabled` (on by default; set `false` to disable collection).
+Collection is driven by the **`review-user-memories`** dreamer task: schedule it to collect, set its schedule to `""` to turn it off.
 
 <!-- screenshot: user-memories -->
 
 ## Config
 
-Visual editor for Magic Context JSONC: **OpenCode user**, **Pi user**, and **per-project** overrides.
+Visual editor for Magic Context JSONC. Because both harnesses now read one shared CortexKit config, this is a single **User Config** surface plus **per-project** overrides (no separate OpenCode/Pi tabs).
 
-**What you can do.**
-
-- Toggle and edit fields that mirror `magic-context.schema.json` (the editor links the schema URL and parses JSONC including comments and trailing commas).
-- **Save** writes real files on disk (`saveConfig` / `savePiConfig` / `saveProjectConfig` via the Tauri backend) — not a preview buffer.
+- Toggle and edit fields that mirror `magic-context.schema.json` (the editor links the schema URL and parses JSONC including comments and trailing commas; saves abort on a parse error so comments and sibling keys are preserved).
+- **Save** writes real files on disk via the Tauri backend, not a preview buffer.
 - Model pickers use cached provider model lists refreshed in the background.
 
-Use [Configuration](/reference/configuration/) for the full generated key reference; use this tab for day-to-day edits.
+Use [Configuration](/reference/configuration/) for the full generated key reference; use this section for day-to-day edits.
 
 <!-- screenshot: config-editor -->
 
 ## Logs
 
-Optional **log tail** for `magic-context.log` with filtering — useful alongside Cache when correlating busts with plugin log lines. Open from the sidebar **Logs** item.
+Optional **log tail** for `magic-context.log` with filtering, useful alongside Cache when correlating busts with plugin log lines.

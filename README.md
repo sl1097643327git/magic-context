@@ -88,13 +88,7 @@ The wizard auto-detects which harnesses you have (OpenCode, Pi, or both), adds t
 
 **Troubleshooting:** `npx @cortexkit/magic-context@latest doctor` auto-detects your harnesses, checks for conflicts (compaction, OMO hooks, DCP), verifies the plugin and TUI sidebar, runs an integrity check on the database, and fixes what it can. Add `--issue` to file a ready-to-submit bug report.
 
-### Adding Magic Context to an existing project
-
-Magic Context is not limited to greenfield work. Run the setup wizard from the root of the project you already use with OpenCode or Pi, then restart the harness in that same directory so the plugin can attach to the existing project identity. From that point forward, new turns are captured automatically and the historian compartmentalizes the active session as it grows.
-
-Magic Context does **not** retroactively import or reprocess OpenCode or Pi sessions that happened before it was installed. Those past conversations are not backfilled into compartments. What builds up across an existing project from day one includes project memories, dreamer-maintained docs, key files, and other context captured after installation.
-
-If you want to seed knowledge from older work, add the important facts explicitly with `ctx_memory`, write a short project note in the repo, or keep working in the project and let the historian and dreamer promote recurring facts over time. Use `/ctx-recomp` when you need to rebuild Magic Context compartments from raw message history that Magic Context has captured in that session, such as after upgrading historian rules; it is not an importer for unrelated pre-install OpenCode or Pi sessions. The dashboard can also inspect the shared CortexKit database, memories, compartments, and dreamer runs without starting a coding session.
+Works the same on a brand-new or a long-running project: install, restart the harness, and Magic Context captures context from that point forward. It does not backfill OpenCode or Pi sessions from before it was installed.
 
 <details>
 <summary><strong>Compatibility with other context-management plugins</strong></summary>
