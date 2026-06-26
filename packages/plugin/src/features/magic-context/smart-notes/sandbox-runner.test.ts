@@ -36,4 +36,28 @@ describe("compiled smart-note QuickJS runner", () => {
         });
         expect(result.ok).toBe(false);
     });
+
+    test("serializes concurrent checks whose host calls suspend (shared-module asyncify safety)", async () => {
+        // Regression for QuickJSUseAfterFree: the asyncify module has ONE
+        // suspension stack; before serialization, two checks suspended in host
+        // awaits at once corrupted it and resumed against a disposed context.
+        // Each check here suspends in an async host call (readFile) that waits a
+        // tick, maximizing overlap. With the lock, all must succeed.
+        const slowCap: SmartNoteCapabilityApi = {
+            ...fakeCap,
+            readFile: async (path) => {
+                await new Promise((r) => setTimeout(r, 5));
+                return path === "ready.txt" ? "ready" : null;
+            },
+        };
+        const check = `function check(cap) { return { met: cap.readFile("ready.txt") === "ready" }; }`;
+        const results = await Promise.all(
+            Array.from({ length: 8 }, () =>
+                runCompiledSmartNoteCheck({ compiledCheck: check, capabilities: slowCap }),
+            ),
+        );
+        for (const result of results) {
+            expect(result).toEqual({ ok: true, result: { met: true } });
+        }
+    });
 });

@@ -245,6 +245,12 @@ function ConfigForm(props: {
   onSave: (content: string) => void | Promise<void>;
   saveStatus: string | null;
   models: string[];
+  /** "user" or "project". Project configs are untrusted repository input: the
+   *  runtime strips embedding endpoint/provider from them, and the Test
+   *  Connection probe refuses project scope (it would expand the repo's
+   *  {env:}/{file:} tokens and contact its endpoint, a secret-exfil vector).
+   *  So the embedding column is hidden for project scope. Defaults to "user". */
+  scope?: "user" | "project";
 }) {
   const [showRaw, setShowRaw] = createSignal(false);
   const [rawEdit, setRawEdit] = createSignal<string | null>(null);
@@ -270,7 +276,8 @@ function ConfigForm(props: {
     | { kind: "timeout"; timeout_ms: number }
     | { kind: "invalid_scheme"; endpoint: string }
     | { kind: "unresolved_token"; field: string; token: string }
-    | { kind: "blocked_sensitive_file"; field: string; token: string; reason: string };
+    | { kind: "blocked_sensitive_file"; field: string; token: string; reason: string }
+    | { kind: "scope_not_allowed"; scope: string };
 
   /** Render the probe outcome as `{ ok, message }` for the inline UI. The
    *  wording mirrors doctor's output so a user who runs both tools sees
@@ -331,6 +338,11 @@ function ConfigForm(props: {
         return {
           ok: false,
           message: `${outcome.field} references ${outcome.token}, which resolves to a credential location (${outcome.reason}). Refusing to read it for an endpoint test. Point this at your embedding API key, not a credential file.`,
+        };
+      case "scope_not_allowed":
+        return {
+          ok: false,
+          message: `Test Connection is only available for user-level config. Project config cannot set an embedding endpoint (the runtime ignores it), so there is nothing to test here.`,
         };
     }
   }
@@ -661,193 +673,212 @@ function ConfigForm(props: {
                             <div class="config-card-content">
                               <For each={fields}>{renderField}</For>
                             </div>
-                            {/* Right: Embedding settings */}
-                            <div class="config-card-content">
-                              {/* Provider */}
-                              <div class="config-field">
-                                <div class="config-field-header">
-                                  <span class="config-field-label">Embedding Provider</span>
-                                  <span class="config-field-key">embedding.provider</span>
-                                </div>
-                                <span class="config-field-desc">
-                                  Provider for memory semantic search
-                                </span>
-                                <div style={{ display: "flex", gap: "6px" }}>
-                                  <For each={["local", "openai-compatible", "off"] as const}>
-                                    {(opt) => (
-                                      <button
-                                        class={`btn sm ${embeddingProvider() === opt ? "primary" : ""}`}
-                                        onClick={() => handleFieldChange("embedding.provider", opt)}
-                                        type="button"
-                                      >
-                                        {opt === "local"
-                                          ? "Local"
-                                          : opt === "openai-compatible"
-                                            ? "OpenAI Compatible"
-                                            : "Off"}
-                                      </button>
-                                    )}
-                                  </For>
-                                </div>
-                                <Show when={embeddingProvider() === "local"}>
-                                  <span
-                                    class="config-field-desc"
-                                    style={{
-                                      "margin-top": "4px",
-                                      color: "var(--text-muted)",
-                                      "font-style": "italic",
-                                    }}
-                                  >
-                                    Uses Xenova/all-MiniLM-L6-v2 locally — no configuration needed
-                                  </span>
-                                </Show>
-                              </div>
-
-                              {/* Remote-only fields */}
-                              <Show when={isRemote()}>
+                            {/* Right: Embedding settings. Hidden for project
+                                configs: the runtime strips embedding
+                                endpoint/provider from untrusted project config,
+                                and Test Connection on a project would be a
+                                secret-exfil vector (expands the repo's tokens +
+                                contacts its endpoint). Project memory toggles
+                                live in the left column above. */}
+                            <Show when={(props.scope ?? "user") !== "project"}>
+                              <div class="config-card-content">
+                                {/* Provider */}
                                 <div class="config-field">
                                   <div class="config-field-header">
-                                    <span class="config-field-label">Model</span>
-                                    <span class="config-field-key">embedding.model</span>
+                                    <span class="config-field-label">Embedding Provider</span>
+                                    <span class="config-field-key">embedding.provider</span>
                                   </div>
                                   <span class="config-field-desc">
-                                    Embedding model name (e.g., text-embedding-3-small)
+                                    Provider for memory semantic search
                                   </span>
-                                  <input
-                                    class="config-input"
-                                    type="text"
-                                    value={String(
-                                      getNestedValue(formData(), "embedding.model") ?? "",
-                                    )}
-                                    placeholder="text-embedding-3-small"
-                                    onInput={(e) =>
-                                      handleFieldChange(
-                                        "embedding.model",
-                                        e.currentTarget.value || undefined,
-                                      )
-                                    }
-                                  />
-                                </div>
-
-                                <div class="config-field">
-                                  <div class="config-field-header">
-                                    <span class="config-field-label">Endpoint</span>
-                                    <span class="config-field-key">embedding.endpoint</span>
+                                  <div style={{ display: "flex", gap: "6px" }}>
+                                    <For each={["local", "openai-compatible", "off"] as const}>
+                                      {(opt) => (
+                                        <button
+                                          class={`btn sm ${embeddingProvider() === opt ? "primary" : ""}`}
+                                          onClick={() =>
+                                            handleFieldChange("embedding.provider", opt)
+                                          }
+                                          type="button"
+                                        >
+                                          {opt === "local"
+                                            ? "Local"
+                                            : opt === "openai-compatible"
+                                              ? "OpenAI Compatible"
+                                              : "Off"}
+                                        </button>
+                                      )}
+                                    </For>
                                   </div>
-                                  <span class="config-field-desc">API endpoint URL</span>
-                                  <input
-                                    class="config-input"
-                                    type="text"
-                                    value={String(
-                                      getNestedValue(formData(), "embedding.endpoint") ?? "",
-                                    )}
-                                    placeholder="https://api.openai.com/v1"
-                                    onInput={(e) =>
-                                      handleFieldChange(
-                                        "embedding.endpoint",
-                                        e.currentTarget.value || undefined,
-                                      )
-                                    }
-                                  />
-                                </div>
-
-                                <div class="config-field">
-                                  <div class="config-field-header">
-                                    <span class="config-field-label">API Key</span>
-                                    <span class="config-field-key">embedding.api_key</span>
-                                  </div>
-                                  <span class="config-field-desc">
-                                    Authentication key for the embedding API
-                                  </span>
-                                  <input
-                                    class="config-input"
-                                    type="password"
-                                    value={String(
-                                      getNestedValue(formData(), "embedding.api_key") ?? "",
-                                    )}
-                                    placeholder="sk-..."
-                                    onInput={(e) =>
-                                      handleFieldChange(
-                                        "embedding.api_key",
-                                        e.currentTarget.value || undefined,
-                                      )
-                                    }
-                                  />
-                                </div>
-
-                                <div>
-                                  <button
-                                    type="button"
-                                    class="btn sm"
-                                    onClick={async () => {
-                                      const endpoint = String(
-                                        getNestedValue(formData(), "embedding.endpoint") ?? "",
-                                      ).trim();
-                                      const model = String(
-                                        getNestedValue(formData(), "embedding.model") ?? "",
-                                      ).trim();
-                                      const apiKey = String(
-                                        getNestedValue(formData(), "embedding.api_key") ?? "",
-                                      ).trim();
-                                      const inputType = String(
-                                        getNestedValue(formData(), "embedding.input_type") ?? "",
-                                      ).trim();
-                                      const truncate = String(
-                                        getNestedValue(formData(), "embedding.truncate") ?? "",
-                                      ).trim();
-                                      if (!endpoint || !model) {
-                                        setEmbeddingTestResult({
-                                          ok: false,
-                                          message: "Endpoint and model are required",
-                                        });
-                                        return;
-                                      }
-                                      setEmbeddingTestResult({ ok: false, message: "Testing..." });
-                                      try {
-                                        // Rust returns the structured outcome directly (not
-                                        // `Result<T, String>` anymore). Any thrown error from
-                                        // `invoke` itself is a tauri infrastructure failure
-                                        // (e.g., command not registered) rather than a probe
-                                        // classification — we surface that unchanged.
-                                        const outcome = await invoke<EmbeddingProbeOutcome>(
-                                          "test_embedding_endpoint",
-                                          {
-                                            endpoint,
-                                            model,
-                                            apiKey: apiKey || null,
-                                            inputType: inputType || null,
-                                            truncate: truncate || null,
-                                          },
-                                        );
-                                        setEmbeddingTestResult(formatProbeOutcome(outcome));
-                                      } catch (e: unknown) {
-                                        setEmbeddingTestResult({
-                                          ok: false,
-                                          message: String(
-                                            (e as { message?: string })?.message ?? e,
-                                          ),
-                                        });
-                                      }
-                                    }}
-                                  >
-                                    ⚡ Test Connection
-                                  </button>
-                                  <Show when={embeddingTestResult()}>
+                                  <Show when={embeddingProvider() === "local"}>
                                     <span
+                                      class="config-field-desc"
                                       style={{
-                                        "margin-left": "10px",
-                                        "font-size": "12px",
-                                        color: embeddingTestResult()?.ok
-                                          ? "var(--green)"
-                                          : "var(--red)",
+                                        "margin-top": "4px",
+                                        color: "var(--text-muted)",
+                                        "font-style": "italic",
                                       }}
                                     >
-                                      {embeddingTestResult()?.message}
+                                      Uses Xenova/all-MiniLM-L6-v2 locally — no configuration needed
                                     </span>
                                   </Show>
                                 </div>
-                              </Show>
-                            </div>
+
+                                {/* Remote-only fields */}
+                                <Show when={isRemote()}>
+                                  <div class="config-field">
+                                    <div class="config-field-header">
+                                      <span class="config-field-label">Model</span>
+                                      <span class="config-field-key">embedding.model</span>
+                                    </div>
+                                    <span class="config-field-desc">
+                                      Embedding model name (e.g., text-embedding-3-small)
+                                    </span>
+                                    <input
+                                      class="config-input"
+                                      type="text"
+                                      value={String(
+                                        getNestedValue(formData(), "embedding.model") ?? "",
+                                      )}
+                                      placeholder="text-embedding-3-small"
+                                      onInput={(e) =>
+                                        handleFieldChange(
+                                          "embedding.model",
+                                          e.currentTarget.value || undefined,
+                                        )
+                                      }
+                                    />
+                                  </div>
+
+                                  <div class="config-field">
+                                    <div class="config-field-header">
+                                      <span class="config-field-label">Endpoint</span>
+                                      <span class="config-field-key">embedding.endpoint</span>
+                                    </div>
+                                    <span class="config-field-desc">API endpoint URL</span>
+                                    <input
+                                      class="config-input"
+                                      type="text"
+                                      value={String(
+                                        getNestedValue(formData(), "embedding.endpoint") ?? "",
+                                      )}
+                                      placeholder="https://api.openai.com/v1"
+                                      onInput={(e) =>
+                                        handleFieldChange(
+                                          "embedding.endpoint",
+                                          e.currentTarget.value || undefined,
+                                        )
+                                      }
+                                    />
+                                  </div>
+
+                                  <div class="config-field">
+                                    <div class="config-field-header">
+                                      <span class="config-field-label">API Key</span>
+                                      <span class="config-field-key">embedding.api_key</span>
+                                    </div>
+                                    <span class="config-field-desc">
+                                      Authentication key for the embedding API
+                                    </span>
+                                    <input
+                                      class="config-input"
+                                      type="password"
+                                      value={String(
+                                        getNestedValue(formData(), "embedding.api_key") ?? "",
+                                      )}
+                                      placeholder="sk-..."
+                                      onInput={(e) =>
+                                        handleFieldChange(
+                                          "embedding.api_key",
+                                          e.currentTarget.value || undefined,
+                                        )
+                                      }
+                                    />
+                                  </div>
+
+                                  <div>
+                                    <button
+                                      type="button"
+                                      class="btn sm"
+                                      onClick={async () => {
+                                        const endpoint = String(
+                                          getNestedValue(formData(), "embedding.endpoint") ?? "",
+                                        ).trim();
+                                        const model = String(
+                                          getNestedValue(formData(), "embedding.model") ?? "",
+                                        ).trim();
+                                        const apiKey = String(
+                                          getNestedValue(formData(), "embedding.api_key") ?? "",
+                                        ).trim();
+                                        const inputType = String(
+                                          getNestedValue(formData(), "embedding.input_type") ?? "",
+                                        ).trim();
+                                        const truncate = String(
+                                          getNestedValue(formData(), "embedding.truncate") ?? "",
+                                        ).trim();
+                                        if (!endpoint || !model) {
+                                          setEmbeddingTestResult({
+                                            ok: false,
+                                            message: "Endpoint and model are required",
+                                          });
+                                          return;
+                                        }
+                                        setEmbeddingTestResult({
+                                          ok: false,
+                                          message: "Testing...",
+                                        });
+                                        try {
+                                          // Rust returns the structured outcome directly (not
+                                          // `Result<T, String>` anymore). Any thrown error from
+                                          // `invoke` itself is a tauri infrastructure failure
+                                          // (e.g., command not registered) rather than a probe
+                                          // classification — we surface that unchanged.
+                                          const outcome = await invoke<EmbeddingProbeOutcome>(
+                                            "test_embedding_endpoint",
+                                            {
+                                              endpoint,
+                                              model,
+                                              apiKey: apiKey || null,
+                                              inputType: inputType || null,
+                                              truncate: truncate || null,
+                                              // Backend trust boundary: only "user"
+                                              // scope expands tokens + probes. The
+                                              // button is hidden for projects, but
+                                              // send the scope so the backend can
+                                              // refuse regardless.
+                                              source: props.scope ?? "user",
+                                            },
+                                          );
+                                          setEmbeddingTestResult(formatProbeOutcome(outcome));
+                                        } catch (e: unknown) {
+                                          setEmbeddingTestResult({
+                                            ok: false,
+                                            message: String(
+                                              (e as { message?: string })?.message ?? e,
+                                            ),
+                                          });
+                                        }
+                                      }}
+                                    >
+                                      ⚡ Test Connection
+                                    </button>
+                                    <Show when={embeddingTestResult()}>
+                                      <span
+                                        style={{
+                                          "margin-left": "10px",
+                                          "font-size": "12px",
+                                          color: embeddingTestResult()?.ok
+                                            ? "var(--green)"
+                                            : "var(--red)",
+                                        }}
+                                      >
+                                        {embeddingTestResult()?.message}
+                                      </span>
+                                    </Show>
+                                  </div>
+                                </Show>
+                              </div>
+                            </Show>
                           </div>
                         );
                       })()
@@ -1973,6 +2004,7 @@ function ProjectConfigDetail(props: {
               onSave={handleSave}
               saveStatus={saveStatus()}
               models={props.models}
+              scope="project"
             />
           }
         >
@@ -2118,6 +2150,7 @@ export default function ConfigEditor(props: { models: string[]; piModels: string
                     onSave={handleUserSave}
                     saveStatus={saveStatus()}
                     models={effectiveModels()}
+                    scope="user"
                   />
                 }
               >

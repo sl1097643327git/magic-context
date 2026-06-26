@@ -575,10 +575,17 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		// loaded via subagent-entry.ts with the
 		// `--magic-context-dreamer-actions` flag.
 		allowDreamerActions: false,
-		// Match OpenCode: when memory is off, the <project-memory> block is never
-		// injected, so omit ctx_memory entirely (its writes would never resurface).
-		// ctx_search stays: it still recalls conversation + git commits.
-		memoryToolEnabled: config.memory.enabled !== false,
+		// ALWAYS register ctx_memory in the main entry. Pi is a single REPL that
+		// can `/cd` between projects, but tool registration happens once at boot,
+		// so gating registration on the BOOT project's memory.enabled would
+		// mismatch the per-project prompt (which re-resolves memory.enabled each
+		// pass): start in a memory-off project and switch to a memory-on one and
+		// the tool would be absent while the prompt advertises it. The tool's
+		// own per-call guard (ctx-memory.ts, getProjectEmbeddingSnapshot) refuses
+		// when the CURRENT project has memory off, so always-register is correct.
+		// (The subagent entry still uses memoryToolEnabled to keep ctx_memory off
+		// the retrieval-only sidekick, a separate security concern.)
+		memoryToolEnabled: true,
 		// Match OpenCode's gating: when ctx_reduce_enabled is false,
 		// we don't surface the tool at all (along with disabling §N§
 		// prefix injection and stripping ctx_reduce mentions from the
@@ -591,9 +598,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		dreamerEnabled: isDreamerRunnable(config),
 	});
 	info(
-		`registered tools: ctx_search${
-			config.memory.enabled !== false ? ", ctx_memory" : ""
-		}, ctx_note, ctx_expand${config.ctx_reduce_enabled === true ? ", ctx_reduce" : ""}`,
+		`registered tools: ctx_search, ctx_memory, ctx_note, ctx_expand${
+			config.ctx_reduce_enabled === true ? ", ctx_reduce" : ""
+		}`,
 	);
 
 	// Register the per-LLM-call transform pipeline. Tags eligible message

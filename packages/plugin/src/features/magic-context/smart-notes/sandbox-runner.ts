@@ -28,6 +28,34 @@ function getAsyncModule(): Promise<QuickJSAsyncWASMModule> {
     return asyncModulePromise;
 }
 
+/**
+ * Process-wide serialization for sandbox runs.
+ *
+ * The asyncify variant has ONE suspension stack per WASM module instance, and we
+ * share a single cached module across every check (above). When a check awaits a
+ * host capability (httpGet/git/readFile) the WASM stack is unwound and parked;
+ * if a SECOND check's `evalCodeAsync` suspends on the same module before the
+ * first resumes, the two share/clobber that single asyncify stack and a
+ * continuation later resumes against a context that has since been disposed,
+ * surfacing as `QuickJSUseAfterFree: Lifetime not alive`. This is reachable in
+ * normal operation: the dream timer fires per-project smart-note sweeps
+ * un-awaited during multi-project startup, so two projects' sweeps overlap.
+ *
+ * Serializing every run through one promise chain makes "one suspended eval at a
+ * time" an invariant. These are background sweeps with no user-facing latency, so
+ * the serialization cost is irrelevant. A failed/rejected run must not break the
+ * chain for the next caller, so we continue the chain on both settle paths.
+ */
+let sandboxRunChain: Promise<unknown> = Promise.resolve();
+function withSandboxLock<T>(fn: () => Promise<T>): Promise<T> {
+    const run = sandboxRunChain.then(fn, fn);
+    sandboxRunChain = run.then(
+        () => undefined,
+        () => undefined,
+    );
+    return run;
+}
+
 export interface RunCompiledSmartNoteCheckOptions {
     compiledCheck: string;
     capabilities: SmartNoteCapabilityApi;
@@ -57,6 +85,16 @@ const DEFAULT_HEAP_LIMIT_BYTES = 8 * 1024 * 1024;
 const DEFAULT_STACK_LIMIT_BYTES = 512 * 1024;
 
 export async function runCompiledSmartNoteCheck(
+    options: RunCompiledSmartNoteCheckOptions,
+): Promise<RunCompiledSmartNoteCheckResult> {
+    // Serialize the actual sandbox work (see withSandboxLock): only one
+    // asyncify-suspended eval may exist at a time on the shared module. The
+    // per-check timeout starts INSIDE the lock so a check queued behind another
+    // doesn't burn its own budget waiting for the lock.
+    return withSandboxLock(() => runCompiledSmartNoteCheckLocked(options));
+}
+
+async function runCompiledSmartNoteCheckLocked(
     options: RunCompiledSmartNoteCheckOptions,
 ): Promise<RunCompiledSmartNoteCheckResult> {
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;

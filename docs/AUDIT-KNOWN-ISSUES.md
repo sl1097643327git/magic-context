@@ -863,24 +863,39 @@ not a data-safety hole. The destructive-sweep scenario requires a conflicted
 shared file to exist, which the migrator structurally never produces. If a user
 hand-authors a shared config, that IS their authoritative intent by definition.
 
-### A53. Dashboard embedding "Test Connection" expands {env:}/{file:} tokens and allows http/loopback/LAN (deliberate, user-config-only surface)
-A prior audit added a hard SSRF + token-refusal guard to the dashboard
-`test_embedding_endpoint` probe (`embedding_probe.rs`): it refused to expand
-`{env:}`/`{file:}` tokens, required `https`, and blocked loopback + RFC1918.
-That guard was relaxed deliberately because it broke the two most common, fully
-legitimate setups (a `{file:~/...key}` api_key, the pattern we document, and a
-self-hosted `http://localhost` embedding server) while protecting a threat that
-is not reachable on this surface. The probe's only input is the **user-level**
-config editor (`ConfigEditor`, rendered once from `App.tsx`); project-tier
-editing covers only dreamer schedule/model, never embedding. So the
-"malicious-project-config picks a hostile endpoint/secret-file and the user
-clicks Test" precondition is **not satisfiable**: the values are always the
-user's own, and expanding them to test is exactly what the plugin does at
-runtime. The probe now mirrors `doctor` (Node), which it is documented to mirror.
-Retained guards (cheap, no legit cost): cloud instance-metadata (IPv4
-169.254.169.254 + AWS IPv6 `fd00:ec2::254`, incl. IPv4-mapped) is always blocked;
-IPv4 link-local (169.254/16) + IPv6 link-local (fe80::/10) + unspecified stay
-blocked; URL userinfo (`user:pass@`) is rejected; and `{file:}` tokens resolving
-into credential dirs (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`) are refused.
-Do not re-add the https-only / token-refusal / loopback-block guards without a
-new threat model showing an attacker-controlled value can reach this probe.
+### A53. Dashboard embedding "Test Connection": token expansion + http/loopback/LAN allowed ONLY for user-scope; project-scope is refused at the backend
+The dashboard `test_embedding_endpoint` probe (`embedding_probe.rs`) expands
+`{env:}`/`{file:}` tokens and allows `http://` + loopback/LAN, because the two
+most common legitimate setups need it: a `{file:~/...key}` api_key (the pattern
+we document) and a self-hosted `http://localhost` embedding server. For
+**user-level** config this is correct and safe: the values are the user's own,
+and expanding them to test is exactly what the plugin does at runtime.
+
+**CORRECTION (was a P0 I shipped, then fixed):** an earlier version of this entry
+claimed the probe is "user-config-only" and therefore the relaxation was
+unconditionally safe. That was WRONG. The config editor renders the SAME
+`ConfigForm` (embedding fields + Test Connection) for **project** configs
+(`ProjectConfigDetail`), so a malicious repo committing
+`.cortexkit/magic-context.jsonc` with `api_key: "{env:GITHUB_TOKEN}"` + an
+attacker endpoint could exfiltrate the secret on one Test Connection click. The
+Oracle review of the v0.28 delta caught this.
+
+**Enforced fix (the actual current behavior):**
+- `test_embedding_endpoint` takes a `source` ("user" | "project"); anything but
+  `"user"` is REFUSED before any token expansion or network call
+  (`ScopeNotAllowed`). Absent source defaults to user for the single existing
+  user-config caller. This is the backend trust boundary.
+- The frontend hides the entire embedding column (provider/endpoint/api_key +
+  Test Connection) for project scope and sends `source` explicitly. (Project
+  embedding endpoint/provider are runtime-stripped anyway, so the column was also
+  misleading there.)
+- `{file:}` tokens are lexically normalized AND canonicalized before the
+  sensitive-dir check, so `~/.config/../.ssh/id_rsa` and symlinks-into-credential
+  dirs are blocked (P1).
+
+Retained IP guards (cheap, no legit cost): cloud instance-metadata (IPv4
+169.254.169.254 + AWS IPv6 `fd00:ec2::254`, incl. IPv4-mapped) always blocked;
+IPv4/IPv6 link-local + unspecified blocked; URL userinfo (`user:pass@`) rejected;
+DNS pinned via `resolve_to_addrs`. The user-scope relaxation mirrors `doctor`
+(Node). Do not extend token expansion / endpoint contact to any non-user scope
+without a new threat model.

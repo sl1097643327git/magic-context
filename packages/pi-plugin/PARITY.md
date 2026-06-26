@@ -631,6 +631,34 @@ firmly outside this edge. If it ever surfaces, the clean Pi fix is
 
 ---
 
+## 23. `ctx_memory` registration: OpenCode gates on launch config; Pi always registers + relies on the per-call guard
+
+When `memory.enabled` is false, the `<project-memory>` block is never injected,
+so an agent's `ctx_memory` writes can never resurface. Both harnesses drop the
+ctx_memory PROMPT guidance for a memory-off project, but they register the TOOL
+differently:
+
+- **OpenCode** gates tool registration on `memory.enabled` in
+  `tool-registry.ts`. This is consistent because the registry and the system
+  prompt both read the SAME launch-resolved config for a given session, so the
+  tool's presence always matches the prompt's guidance.
+- **Pi** must ALWAYS register `ctx_memory` in the main extension entry
+  (`index.ts`, `memoryToolEnabled: true`). Pi is a single long-lived REPL that
+  can `/cd` between projects: tool registration happens once at boot, but the
+  system prompt re-resolves `memory.enabled` per project every pass. Gating
+  registration on the boot project would mismatch after a switch (tool absent
+  while prompt advertises it, or vice-versa). Instead Pi leans on the tool's own
+  per-call guard (`ctx-memory.ts` → `getProjectEmbeddingSnapshot(projectIdentity)`),
+  which refuses with "Cross-session memory is disabled for this project" when the
+  CURRENT project has memory off. OpenCode's handler carries the identical guard,
+  so behavior matches; only the registration strategy differs.
+
+Note: Pi's `memoryToolEnabled` flag still exists and is still used by the
+SUBAGENT entry (`subagent-entry.ts`) to keep `ctx_memory` off the retrieval-only
+sidekick, a separate security concern, unaffected by this divergence.
+
+---
+
 ## Maintenance
 
 Update this file whenever a deliberate Pi↔OpenCode divergence is introduced or

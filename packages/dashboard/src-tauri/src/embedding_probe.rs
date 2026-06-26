@@ -8,7 +8,7 @@
 //! sending them to that endpoint would allow one-click exfiltration from the UI.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -58,6 +58,14 @@ pub enum EmbeddingProbeOutcome {
         token: String,
         reason: String,
     },
+    /// The probe was invoked for a non-user config scope (e.g. a project's
+    /// `.cortexkit/magic-context.jsonc`). Project config is untrusted repository
+    /// input, so we never expand its `{env:}`/`{file:}` tokens or contact its
+    /// endpoint (a malicious repo could otherwise exfiltrate a secret via one
+    /// click of "Test Connection"). The runtime also strips embedding
+    /// destination fields (endpoint/provider) from project config, so a project
+    /// embedding endpoint is inert anyway.
+    ScopeNotAllowed { scope: String },
 }
 
 /// Options passed to the Rust probe. Mirrors the Node `EmbeddingProbeOptions`.
@@ -159,23 +167,43 @@ fn resolve_token(token: &str, config_dir: &Path) -> Result<String, TokenExpandEr
         .and_then(|s| s.strip_suffix('}'))
     {
         let raw = path.trim();
-        let resolved: std::path::PathBuf = if let Some(rel) = raw.strip_prefix("~/") {
+        let resolved: PathBuf = if let Some(rel) = raw.strip_prefix("~/") {
             match dirs::home_dir() {
                 Some(home) => home.join(rel),
                 None => return Err(TokenExpandError::Unresolved(token.to_string())),
             }
         } else if Path::new(raw).is_absolute() {
-            std::path::PathBuf::from(raw)
+            PathBuf::from(raw)
         } else {
             config_dir.join(raw)
         };
-        if let Some(reason) = sensitive_file_reason(&resolved) {
+
+        // Sensitive-dir block must survive `..` traversal AND symlinks:
+        //  1. Lexical normalize collapses `~/.config/../.ssh/id_rsa` to
+        //     `~/.ssh/id_rsa` WITHOUT touching the filesystem, so the block
+        //     fires even when the file does not exist.
+        //  2. Canonicalize (when the file exists) resolves symlinks, so a file
+        //     OUTSIDE a credential dir that symlinks INTO one is also caught,
+        //     and we then read the canonical path to close the symlink-swap
+        //     window.
+        let normalized = lexically_normalize(&resolved);
+        if let Some(reason) = sensitive_file_reason(&normalized) {
             return Err(TokenExpandError::SensitiveFile {
                 token: token.to_string(),
                 reason,
             });
         }
-        return match std::fs::read_to_string(&resolved) {
+        let canonical = std::fs::canonicalize(&resolved).ok();
+        if let Some(canon) = &canonical {
+            if let Some(reason) = sensitive_file_reason(canon) {
+                return Err(TokenExpandError::SensitiveFile {
+                    token: token.to_string(),
+                    reason,
+                });
+            }
+        }
+        let read_path = canonical.unwrap_or(normalized);
+        return match std::fs::read_to_string(&read_path) {
             Ok(contents) => Ok(contents.trim().to_string()),
             Err(_) => Err(TokenExpandError::Unresolved(token.to_string())),
         };
@@ -183,6 +211,30 @@ fn resolve_token(token: &str, config_dir: &Path) -> Result<String, TokenExpandEr
     // Not an env/file token (shouldn't happen; find_substitution_token only
     // returns these two), leave it literal.
     Ok(token.to_string())
+}
+
+/// Collapse `.` and `..` segments lexically (no filesystem access, unlike
+/// `canonicalize`), so the sensitive-dir block can't be bypassed with a
+/// traversal like `~/.config/../.ssh/id_rsa` even when the file doesn't exist.
+/// A leading `..` (escaping the base) is dropped rather than allowed to walk
+/// above root. Symlinks are NOT resolved here; the caller additionally
+/// canonicalizes when the file exists to catch symlink-into-credential-dir.
+fn lexically_normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // Pop a normal segment; never pop a root/prefix.
+                if matches!(out.components().next_back(), Some(Component::Normal(_))) {
+                    out.pop();
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 /// Short human label when `path` sits inside a known credential directory, else
@@ -791,6 +843,70 @@ mod tests {
                 assert!(reason.contains("SSH"), "unexpected reason: {reason}");
             }
             other => panic!("expected SensitiveFile block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expand_blocks_sensitive_path_via_dotdot_traversal() {
+        // A `..` traversal that lands inside a credential dir must still be
+        // blocked even though the file doesn't exist (lexical normalization runs
+        // before the sensitive-dir check).
+        let token = "{file:~/.config/../.ssh/id_rsa}";
+        match expand_config_value(token, &std::env::temp_dir()) {
+            Err(TokenExpandError::SensitiveFile { reason, .. }) => {
+                assert!(reason.contains("SSH"), "unexpected reason: {reason}");
+            }
+            other => panic!("expected SensitiveFile block after normalization, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lexically_normalize_collapses_dotdot_without_escaping_root() {
+        let home = dirs::home_dir().expect("home");
+        assert_eq!(
+            lexically_normalize(&home.join(".config/../.ssh/id_rsa")),
+            home.join(".ssh/id_rsa")
+        );
+        // Leading `..` segments are dropped, never walking above the first
+        // normal segment.
+        assert_eq!(
+            lexically_normalize(Path::new("/a/../../b")),
+            PathBuf::from("/b")
+        );
+    }
+
+    #[test]
+    fn expand_blocks_sensitive_target_via_symlink() {
+        // A file OUTSIDE a credential dir that symlinks INTO one must be caught
+        // by the canonicalize pass. Skip on platforms/filesystems where symlink
+        // creation isn't permitted.
+        #[cfg(unix)]
+        {
+            let home = match dirs::home_dir() {
+                Some(h) => h,
+                None => return,
+            };
+            let ssh_target = home.join(".ssh");
+            // Only run if ~/.ssh actually exists to point at (avoids creating it).
+            if !ssh_target.exists() {
+                return;
+            }
+            let dir = std::env::temp_dir().join(format!("mc-symlink-test-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&dir);
+            let link = dir.join("decoy-key");
+            let _ = std::fs::remove_file(&link);
+            if std::os::unix::fs::symlink(&ssh_target, &link).is_err() {
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            }
+            let token = format!("{{file:{}/config}}", link.display());
+            let outcome = expand_config_value(&token, &std::env::temp_dir());
+            let _ = std::fs::remove_file(&link);
+            let _ = std::fs::remove_dir_all(&dir);
+            assert!(
+                matches!(outcome, Err(TokenExpandError::SensitiveFile { .. })),
+                "symlink into ~/.ssh must be blocked, got {outcome:?}"
+            );
         }
     }
 
