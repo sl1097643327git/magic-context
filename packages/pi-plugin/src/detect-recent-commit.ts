@@ -1,18 +1,19 @@
 /**
  * Pi-side recent-commit detector for note-nudge `commit_detected` trigger.
  *
- * Scans the last few assistant messages for commit-hash mentions paired
- * with commit-related verbs ("commit", "merge", "cherry-pick", "rebas").
- * Mirrors OpenCode's logic in `tag-messages.ts` (the `commitDetected`
- * walk near the COMMIT_LOOKBACK constant), but runs against Pi's
- * `AgentMessage[]` shape since Pi doesn't have OpenCode's MessageLike
- * structure.
+ * Scans the last few assistant messages for a commit-hash mention paired with a
+ * commit-related word IN THE SAME text part, using the shared
+ * `textMentionsRecentCommit` predicate (the single source of truth, also used by
+ * OpenCode's `tag-messages.ts` walk and the historian). Runs against Pi's
+ * `AgentMessage[]` shape since Pi doesn't have OpenCode's MessageLike structure.
  *
  * Used inside runPipeline to fire `onNoteTrigger(db, sessionId,
  * "commit_detected")` when a NEW commit appears (i.e. one the previous
  * pass did not already see). Tracking the last-seen state lives in
  * `commitSeenLastPass` per-session, mirroring OpenCode parity.
  */
+
+import { textMentionsRecentCommit } from "@magic-context/core/shared/commit-detection";
 
 // We accept a broad `unknown[]` and inspect each entry defensively.
 // Pi's `event.messages` from the `pi.on("context", ...)` hook is the
@@ -21,8 +22,6 @@
 // renames and makes it harness-agnostic.
 
 const COMMIT_LOOKBACK = 5;
-const COMMIT_HASH_PATTERN = /\b[0-9a-f]{7,12}\b/;
-const COMMIT_VERB_PATTERN = /\b(commit|committed|cherry-pick|merge|rebas)/i;
 
 /**
  * Detect whether the recent assistant messages mention a commit hash
@@ -60,8 +59,7 @@ export function detectRecentCommit(messages: unknown[]): boolean {
 				"text" in part &&
 				typeof part.text === "string"
 			) {
-				const text = part.text;
-				if (COMMIT_HASH_PATTERN.test(text) && COMMIT_VERB_PATTERN.test(text)) {
+				if (textMentionsRecentCommit(part.text)) {
 					return true;
 				}
 			}

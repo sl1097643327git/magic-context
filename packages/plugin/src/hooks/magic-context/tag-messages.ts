@@ -8,6 +8,7 @@ import {
     pickNearestPriorOwner,
 } from "../../features/magic-context/storage-tags";
 import { makeToolCompositeKey, type Tagger } from "../../features/magic-context/tagger";
+import { textMentionsRecentCommit } from "../../shared/commit-detection";
 import { isRecord } from "../../shared/record-type-guard";
 import { isReduceToolPart } from "./drop-stale-reduce-calls";
 import { estimateImageTokensFromDataUrl } from "./image-token-estimate";
@@ -397,7 +398,6 @@ export function tagMessages(
     let lastReduceMessageIndex = -1;
     const RECENT_REDUCE_LOOKBACK = 10;
     const COMMIT_LOOKBACK = 5;
-    const COMMIT_HASH_PATTERN = /\b[0-9a-f]{7,12}\b/;
     let commitDetected = false;
 
     // Intentional: we deliberately do NOT wrap this walk in db.transaction(...).
@@ -777,10 +777,7 @@ export function tagMessages(
             for (const part of message.parts) {
                 if (isTextPart(part)) {
                     const text = (part as { text: string }).text;
-                    if (
-                        COMMIT_HASH_PATTERN.test(text) &&
-                        /\b(commit|committed|cherry-pick|merge|rebas)/i.test(text)
-                    ) {
+                    if (textMentionsRecentCommit(text)) {
                         commitDetected = true;
                         break;
                     }

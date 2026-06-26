@@ -1,3 +1,4 @@
+import { COMMIT_VERB_PATTERN, createCommitHashExtractPattern } from "../../shared/commit-detection";
 import { OMO_INTERNAL_INITIATOR_MARKER } from "../../shared/internal-initiator-marker";
 import { isSystemDirective, removeSystemReminders } from "../../shared/system-directive";
 
@@ -22,8 +23,6 @@ export interface ChunkBlock {
     isToolOnly: boolean;
 }
 
-const COMMIT_HASH_PATTERN = /`?\b([0-9a-f]{6,12})\b`?/gi;
-const COMMIT_HINT_PATTERN = /\b(commit(?:ted)?|cherry-?pick(?:ed)?|hash(?:es)?|sha)\b/i;
 const MAX_COMMITS_PER_BLOCK = 5;
 
 export function hasMeaningfulUserText(parts: unknown[]): boolean {
@@ -159,7 +158,7 @@ export function formatBlock(block: ChunkBlock): string {
 export function extractCommitHashes(text: string): string[] {
     const hashes: string[] = [];
     const seen = new Set<string>();
-    for (const match of text.matchAll(COMMIT_HASH_PATTERN)) {
+    for (const match of text.matchAll(createCommitHashExtractPattern())) {
         const hash = match[1]?.toLowerCase();
         if (!hash || seen.has(hash)) continue;
         seen.add(hash);
@@ -174,12 +173,12 @@ export function compactTextForSummary(
     role: string,
 ): { text: string; commitHashes: string[] } {
     const commitHashes = role === "assistant" ? extractCommitHashes(text) : [];
-    if (commitHashes.length === 0 || !COMMIT_HINT_PATTERN.test(text)) {
+    if (commitHashes.length === 0 || !COMMIT_VERB_PATTERN.test(text)) {
         return { text, commitHashes };
     }
 
     const withoutHashes = text
-        .replace(COMMIT_HASH_PATTERN, "")
+        .replace(createCommitHashExtractPattern(), "")
         .replace(/\(\s*\)/g, "")
         .replace(/\s+,/g, ",")
         .replace(/,\s*,+/g, ", ")
