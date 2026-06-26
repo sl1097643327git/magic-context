@@ -143,6 +143,14 @@ export interface TranscriptPart {
     getToolInput?(): Record<string, unknown> | null;
 
     /**
+     * Replace this tool invocation's input object with `input`. Used by the
+     * smart-drops edit_marker path to write back a filePath-preserving,
+     * region-hint-clamped copy of an edit's arguments. Returns true if the part
+     * carried a writable tool input. No-op (false) for non-tool parts.
+     */
+    setToolInput?(input: Record<string, unknown>): boolean;
+
+    /**
      * Replace this part with a sentinel placeholder. Sentinels look like
      * `[dropped §N§]` or `[truncated §N§]` and survive cache-busting
      * cycles by carrying their original tag number. Used by the

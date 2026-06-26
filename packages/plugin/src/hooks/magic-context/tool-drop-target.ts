@@ -1,4 +1,5 @@
 import { isRecord } from "../../shared/record-type-guard";
+import { applyEditMarkerToInput } from "./edit-marker";
 import { stripTagPrefix } from "./tag-content-primitives";
 import type { MessageLike, ThinkingLikePart } from "./tag-messages";
 
@@ -112,6 +113,35 @@ function estimateInputSize(input: Record<string, unknown>): number {
         return JSON.stringify(input).length;
     } catch {
         return 0;
+    }
+}
+
+/**
+ * Edit-marker variant of `truncateToolPart` for a superseded edit/write: keep
+ * the tool_use call, output → `[dropped §N§]`, but preserve `filePath` verbatim
+ * and clamp the diff to a region hint (instead of the 5-char generic clamp).
+ * A SEPARATE path from `truncateToolPart`: it must never alter the existing
+ * skeleton bytes. Deterministic + idempotent (see edit-marker.ts).
+ */
+function editMarkerToolPart(part: unknown, tagId: number): void {
+    if (!isRecord(part)) return;
+    const sentinel = `[dropped \u00a7${tagId}\u00a7]`;
+
+    if (part.type === "tool" && isRecord(part.state)) {
+        part.state.output = sentinel;
+        if (isRecord(part.state.input)) applyEditMarkerToInput(part.state.input);
+        return;
+    }
+    if (part.type === "tool_result") {
+        part.content = sentinel;
+        return;
+    }
+    if (part.type === "tool-invocation" && isRecord(part.args)) {
+        applyEditMarkerToInput(part.args as Record<string, unknown>);
+        return;
+    }
+    if (part.type === "tool_use" && isRecord(part.input)) {
+        applyEditMarkerToInput(part.input as Record<string, unknown>);
     }
 }
 
@@ -266,6 +296,7 @@ export function createToolDropTarget(
     setContent: (content: string) => boolean;
     drop: () => ToolDropResult;
     truncate: () => ToolDropResult;
+    editMarker: () => ToolDropResult;
     /**
      * Non-mutating predicate: would drop()/truncate() actually remove bytes?
      * False for an absent (compacted-away) or incomplete (invocation present,
@@ -303,6 +334,18 @@ export function createToolDropTarget(
         return "truncated";
     };
 
+    const editMarker = (): ToolDropResult => {
+        const entry = index.get(compositeKey);
+        if (!entry || entry.occurrences.length === 0) return "absent";
+        if (!entry.hasResult) return "incomplete";
+
+        for (const occurrence of entry.occurrences) {
+            editMarkerToolPart(occurrence.part, tagId);
+        }
+        clearThinkingParts(thinkingParts);
+        return "truncated";
+    };
+
     return {
         setContent: (content: string): boolean => {
             if (isDropContent(content)) {
@@ -326,6 +369,7 @@ export function createToolDropTarget(
         },
         drop,
         truncate,
+        editMarker,
         canDrop: (): boolean => {
             const entry = index.get(compositeKey);
             return !!entry && entry.occurrences.length > 0 && entry.hasResult;

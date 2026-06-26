@@ -647,7 +647,12 @@ function toTagEntry(row: TagRow): TagEntry {
         messageId: row.message_id,
         type,
         status,
-        dropMode: row.drop_mode === "truncated" ? "truncated" : "full",
+        dropMode:
+            row.drop_mode === "truncated"
+                ? "truncated"
+                : row.drop_mode === "edit_marker"
+                  ? "edit_marker"
+                  : "full",
         toolName: row.tool_name ?? null,
         inputByteSize: row.input_byte_size ?? 0,
         byteSize: row.byte_size,

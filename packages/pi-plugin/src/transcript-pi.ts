@@ -715,6 +715,26 @@ function createPiAssistantPart(
 				? (p.arguments as Record<string, unknown>)
 				: null;
 		},
+		setToolInput(input: Record<string, unknown>): boolean {
+			const current = (working[messageIndex] as PiAssistantMessage).content;
+			const p = current[partIndex];
+			if (p?.type !== "toolCall") return false;
+			try {
+				if (JSON.stringify(p.arguments) === JSON.stringify(input)) return false;
+			} catch {
+				// non-serializable args: still replace
+			}
+			const newContent = current.slice();
+			// Spread to preserve optional fields (id, name, thoughtSignature);
+			// only `arguments` changes (mirrors setText's toolCall path).
+			newContent[partIndex] = { ...p, arguments: input };
+			working[messageIndex] = {
+				...(working[messageIndex] as PiAssistantMessage),
+				content: newContent,
+			};
+			markDirty(messageIndex);
+			return true;
+		},
 		// Replace this assistant part's content with a sentinel placeholder.
 		//
 		// CRITICAL for toolCall parts: we MUST preserve `{ type: "toolCall",

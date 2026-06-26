@@ -150,6 +150,95 @@ describe("apply operations for tool drops", () => {
         expect(getTagById(db, "ses-1", toolTagId!)?.dropMode).toBe("truncated");
     });
 
+    it("edit_marker: preserves filePath + region hint, freezes mode, replays byte-identically", () => {
+        useTempDataHome("context-edit-marker-");
+        const db = openDatabase();
+        const tagger = createTagger();
+        const longDiff = "## SECTION ".repeat(30);
+        const messages: MessageLike[] = [
+            {
+                info: { id: "m-assistant", role: "assistant", sessionID: "ses-1" },
+                parts: [
+                    {
+                        type: "tool",
+                        tool: "edit",
+                        callID: "call-edit",
+                        state: {
+                            input: {
+                                filePath: "/Users/me/proj/spec.md",
+                                oldString: longDiff,
+                                newString: `${longDiff}X`,
+                            },
+                            output: "edit applied",
+                            status: "completed",
+                        },
+                    },
+                ],
+            },
+        ];
+
+        const { targets, batch } = tagMessages("ses-1", messages, tagger, db);
+        const tagId = tagger.getToolTag("ses-1", "call-edit", "m-assistant");
+        expect(tagId).toBeDefined();
+
+        // Apply as a synthetic edit_marker op (the smart-drops compression path).
+        const did = applyPendingOperations(
+            "ses-1",
+            db,
+            targets,
+            0,
+            undefined,
+            [],
+            [{ id: 0, sessionId: "ses-1", tagId: tagId!, operation: "drop", queuedAt: 0 }],
+            new Set([tagId!]),
+        );
+        batch.finalize();
+
+        expect(did).toBe(true);
+        expect(getTagById(db, "ses-1", tagId!)?.dropMode).toBe("edit_marker");
+        const editPart = messages
+            .flatMap((m) => m.parts)
+            .find((p: any) => p.callID === "call-edit") as any;
+        // filePath preserved verbatim; diff clamped; output → canonical sentinel.
+        expect(editPart.state.input.filePath).toBe("/Users/me/proj/spec.md");
+        expect(editPart.state.input.oldString.endsWith("...[truncated]")).toBe(true);
+        expect(editPart.state.output).toBe(`[dropped \u00a7${tagId}\u00a7]`);
+
+        // Snapshot the frozen bytes, then replay via applyFlushedStatuses (the
+        // defer-pass path) on a FRESHLY re-tagged copy of the ORIGINAL message:
+        // it must reproduce the exact same bytes (cache-stable replay).
+        const frozen = JSON.stringify(editPart);
+
+        const replayMessages: MessageLike[] = [
+            {
+                info: { id: "m-assistant", role: "assistant", sessionID: "ses-1" },
+                parts: [
+                    {
+                        type: "tool",
+                        tool: "edit",
+                        callID: "call-edit",
+                        state: {
+                            input: {
+                                filePath: "/Users/me/proj/spec.md",
+                                oldString: longDiff,
+                                newString: `${longDiff}X`,
+                            },
+                            output: "edit applied",
+                            status: "completed",
+                        },
+                    },
+                ],
+            },
+        ];
+        const replay = tagMessages("ses-1", replayMessages, tagger, db);
+        applyFlushedStatuses("ses-1", db, replay.targets);
+        replay.batch.finalize();
+        const replayed = replayMessages
+            .flatMap((m) => m.parts)
+            .find((p: any) => p.callID === "call-edit") as any;
+        expect(JSON.stringify(replayed)).toBe(frozen);
+    });
+
     it("defers pending drop when only invocation exists", () => {
         useTempDataHome("context-tool-drop-incomplete-");
         const db = openDatabase();

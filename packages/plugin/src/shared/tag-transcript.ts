@@ -54,6 +54,7 @@ import {
     updateTagTokenCount,
 } from "../features/magic-context/storage-tags";
 import { makeToolCompositeKey, type Tagger } from "../features/magic-context/tagger";
+import { applyEditMarkerToInput } from "../hooks/magic-context/edit-marker";
 import { estimateImageTokensFromDataUrl } from "../hooks/magic-context/image-token-estimate";
 import { estimateTokens } from "../hooks/magic-context/read-session-formatting";
 import {
@@ -687,6 +688,28 @@ function buildAggregateTarget(tagId: number, occurrences: ToolOccurrence[]): Tag
             let any = false;
             for (const occ of occurrences) {
                 if (setToolContentOrText(occ.part, sentinel)) {
+                    any = true;
+                }
+            }
+            return any ? "truncated" : "absent";
+        },
+        editMarker(): "truncated" | "absent" {
+            // Edit-marker: preserve the tool_use input's filePath + a region
+            // hint of the diff, sentinelize the result half. Separate from
+            // truncate() so the existing skeleton bytes are never touched.
+            // Deterministic + idempotent (re-derived from source each pass; the
+            // region-hint clamp self-guards via ...[truncated]).
+            const sentinel = `[dropped \u00a7${tagId}\u00a7]`;
+            let any = false;
+            for (const occ of occurrences) {
+                if (occ.kind === "tool_use") {
+                    const input = occ.part.getToolInput?.();
+                    if (input) {
+                        const next = { ...input };
+                        applyEditMarkerToInput(next);
+                        if (occ.part.setToolInput?.(next)) any = true;
+                    }
+                } else if (setToolContentOrText(occ.part, sentinel)) {
                     any = true;
                 }
             }

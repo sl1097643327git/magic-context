@@ -156,6 +156,38 @@ describe("createPiTranscript", () => {
 		expect(textPart?.getToolInput?.() ?? null).toBeNull();
 	});
 
+	it("setToolInput replaces toolCall arguments, preserving id/name", () => {
+		const messages = [
+			assistantToolCall("call-1", "edit", {
+				filePath: "spec.md",
+				oldString: "a".repeat(200),
+			}),
+		];
+		const transcript = createPiTranscript(messages, "ses-transcript");
+		const part = transcript.messages[0]?.parts[0];
+
+		expect(
+			part?.setToolInput?.({ filePath: "spec.md", oldString: "clamped" }),
+		).toBe(true);
+		transcript.commit();
+
+		const output = transcript.getOutputMessages() as Array<{
+			content: Array<{
+				type: string;
+				id?: string;
+				name?: string;
+				arguments?: unknown;
+			}>;
+		}>;
+		const toolCall = output[0]?.content[0];
+		expect(toolCall).toMatchObject({
+			type: "toolCall",
+			id: "call-1",
+			name: "edit",
+			arguments: { filePath: "spec.md", oldString: "clamped" },
+		});
+	});
+
 	it("folds Pi toolResult messages into the following user transcript message", () => {
 		const messages = [
 			assistantToolCall("call-1", "Read", { path: "x" }),

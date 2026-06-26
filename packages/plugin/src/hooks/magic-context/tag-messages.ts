@@ -204,6 +204,10 @@ export type TagTarget = {
     getContent?: () => string | null;
     drop?: () => ToolDropResult;
     truncate?: () => ToolDropResult;
+    /** Edit-marker compression for an edit/write superseded by a later edit to
+     * the same file: keep the call + filePath + a region hint of the diff,
+     * output → [dropped §N§]. Used by smart-drops. */
+    editMarker?: () => ToolDropResult;
     /** Non-mutating: would drop()/truncate() actually reclaim bytes? Tool
      * targets only; absent on message/file targets. */
     canDrop?: () => boolean;

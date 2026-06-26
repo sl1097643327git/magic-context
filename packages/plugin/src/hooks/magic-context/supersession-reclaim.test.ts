@@ -10,7 +10,7 @@ import {
     openDatabase,
     queuePendingOp,
 } from "../../features/magic-context/storage";
-import { buildSupersessionReclaimOps } from "./supersession-reclaim";
+import { buildEditSupersessionReclaim, buildSupersessionReclaimOps } from "./supersession-reclaim";
 import type { TagTarget } from "./tag-messages";
 
 const tempDirs: string[] = [];
@@ -40,12 +40,13 @@ function freshDb(): ReturnType<typeof openDatabase> & object {
 
 const SES = "ses-1";
 
-/** A droppable tool target; optional input for ctx_note action reads. */
+/** A droppable tool target; optional input for ctx_note action / edit filePath reads. */
 function target(input?: Record<string, unknown>): TagTarget {
     return {
         setContent: () => true,
         drop: () => "removed",
         truncate: () => "truncated",
+        editMarker: () => "truncated",
         canDrop: () => true,
         readInput: () => input ?? null,
     };
@@ -149,5 +150,91 @@ describe("buildSupersessionReclaimOps", () => {
         });
         // 2 already pending, 3 not droppable → only 1.
         expect(ids(ops)).toEqual([1]);
+    });
+});
+
+describe("buildEditSupersessionReclaim (superseded-edit compression)", () => {
+    it("keeps the newest edit per file, marks older edits to the same file", () => {
+        const db = freshDb();
+        // Two edits to file A, one edit to file B.
+        insertTag(db, SES, "c1", "tool", 900, 1, 0, "edit");
+        insertTag(db, SES, "c2", "tool", 900, 2, 0, "edit");
+        insertTag(db, SES, "c3", "tool", 900, 3, 0, "write");
+        const targets = new Map<number, TagTarget>([
+            [1, target({ filePath: "A.ts", oldString: "x" })],
+            [2, target({ filePath: "A.ts", oldString: "y" })], // newer edit to A
+            [3, target({ filePath: "B.ts", content: "z" })],
+        ]);
+        const { ops, editMarkerTagIds } = buildEditSupersessionReclaim({
+            db,
+            sessionId: SES,
+            targets,
+        });
+        // newest A (2) and only-B (3) kept; older A (1) compressed.
+        expect(ids(ops)).toEqual([1]);
+        expect([...editMarkerTagIds]).toEqual([1]);
+    });
+
+    it("never marks an edit whose filePath is unresolvable (fail safe)", () => {
+        const db = freshDb();
+        insertTag(db, SES, "c1", "tool", 900, 1, 0, "edit");
+        insertTag(db, SES, "c2", "tool", 900, 2, 0, "edit");
+        const targets = new Map<number, TagTarget>([
+            [1, target(undefined)], // no input → no filePath
+            [2, target(undefined)],
+        ]);
+        const { ops } = buildEditSupersessionReclaim({ db, sessionId: SES, targets });
+        expect(ops).toHaveLength(0);
+    });
+
+    it("ignores non-edit tools entirely", () => {
+        const db = freshDb();
+        insertTag(db, SES, "c1", "tool", 900, 1, 0, "read");
+        insertTag(db, SES, "c2", "tool", 900, 2, 0, "read");
+        const targets = new Map<number, TagTarget>([
+            [1, target({ filePath: "A.ts" })],
+            [2, target({ filePath: "A.ts" })],
+        ]);
+        const { ops } = buildEditSupersessionReclaim({ db, sessionId: SES, targets });
+        expect(ops).toHaveLength(0);
+    });
+
+    it("excludes non-reclaimable older edits but still marks reclaimable ones", () => {
+        const db = freshDb();
+        // All three edit A.ts. Newest-first: 3 (kept), 2 (older, reclaimable),
+        // 1 (older, but can't reclaim → excluded).
+        insertTag(db, SES, "c1", "tool", 900, 1, 0, "edit");
+        insertTag(db, SES, "c2", "tool", 900, 2, 0, "edit");
+        insertTag(db, SES, "c3", "tool", 900, 3, 0, "edit");
+        const targets = new Map<number, TagTarget>([
+            [1, { ...noDropTarget(), readInput: () => ({ filePath: "A.ts" }) }],
+            [2, target({ filePath: "A.ts" })],
+            [3, target({ filePath: "A.ts" })],
+        ]);
+        const { ops, editMarkerTagIds } = buildEditSupersessionReclaim({
+            db,
+            sessionId: SES,
+            targets,
+        });
+        expect(ids(ops)).toEqual([2]);
+        expect([...editMarkerTagIds]).toEqual([2]);
+    });
+
+    it("excludes older edits already queued in pendingOps", () => {
+        const db = freshDb();
+        insertTag(db, SES, "c1", "tool", 900, 1, 0, "edit");
+        insertTag(db, SES, "c2", "tool", 900, 2, 0, "edit");
+        const targets = new Map<number, TagTarget>([
+            [1, target({ filePath: "A.ts" })],
+            [2, target({ filePath: "A.ts" })],
+        ]);
+        const { ops } = buildEditSupersessionReclaim({
+            db,
+            sessionId: SES,
+            targets,
+            pendingOps: [{ id: 1, sessionId: SES, tagId: 1, operation: "drop", queuedAt: 0 }],
+        });
+        // older A (1) is already pending → not re-emitted.
+        expect(ops).toHaveLength(0);
     });
 });

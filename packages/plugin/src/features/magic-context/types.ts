@@ -3,7 +3,18 @@ export interface TagEntry {
     messageId: string;
     type: "message" | "tool" | "file";
     status: "active" | "dropped" | "compacted";
-    dropMode: "full" | "truncated";
+    /**
+     * How a dropped tool tag is rendered on every replay pass (frozen at drop
+     * time, re-derived deterministically from the original wire part each pass):
+     *  - "full": the whole tool call is removed from the transcript.
+     *  - "truncated": skeleton; keep the tool_use call, output -> [dropped N],
+     *    every input arg value clamped to 5 chars.
+     *  - "edit_marker": like "truncated" but for an edit/write superseded by a
+     *    later edit to the same file; keep the filePath verbatim and a short
+     *    region-hint prefix of the diff, so the agent still sees WHICH file and
+     *    region it edited. Only produced when the smart_drops config is on.
+     */
+    dropMode: "full" | "truncated" | "edit_marker";
     toolName: string | null;
     inputByteSize: number;
     byteSize: number;

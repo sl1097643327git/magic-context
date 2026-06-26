@@ -134,7 +134,10 @@ import {
 	setRawMessageProvider,
 } from "@magic-context/core/hooks/magic-context/read-session-chunk";
 import { invalidateTrueRawTokenCache } from "@magic-context/core/hooks/magic-context/read-session-true-raw-tokens";
-import { buildSupersessionReclaimOps } from "@magic-context/core/hooks/magic-context/supersession-reclaim";
+import {
+	buildEditSupersessionReclaim,
+	buildSupersessionReclaimOps,
+} from "@magic-context/core/hooks/magic-context/supersession-reclaim";
 import {
 	advanceToolReclaimWatermarkToCurrentMax,
 	buildSyntheticToolReclaimOps,
@@ -4130,10 +4133,13 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			pendingOps,
 		});
 		// Smart-drops: also reclaim older todowrite/ctx_reduce/meta outputs that
-		// a later call supersedes, merged into the same already-gated drop apply
-		// as the age-based sweep above. Dedupe (a tag can qualify under both).
+		// a later call supersedes, and compress superseded edits to an
+		// edit_marker (keep filePath + region hint). Merged into the same
+		// already-gated drop apply as the age-based sweep above. Dedupe (a tag
+		// can qualify under more than one rule).
+		const editMarkerTagIds = new Set<number>();
 		if (args.smartDrops) {
-			const positionalIds = new Set(syntheticPendingOps.map((op) => op.tagId));
+			const selectedIds = new Set(syntheticPendingOps.map((op) => op.tagId));
 			const supersessionOps = buildSupersessionReclaimOps({
 				db: args.db,
 				sessionId: args.sessionId,
@@ -4141,7 +4147,25 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				pendingOps,
 			});
 			for (const op of supersessionOps) {
-				if (!positionalIds.has(op.tagId)) syntheticPendingOps.push(op);
+				if (!selectedIds.has(op.tagId)) {
+					syntheticPendingOps.push(op);
+					selectedIds.add(op.tagId);
+				}
+			}
+			const editReclaim = buildEditSupersessionReclaim({
+				db: args.db,
+				sessionId: args.sessionId,
+				targets,
+				pendingOps,
+			});
+			for (const op of editReclaim.ops) {
+				// Drop wins over compress: only compress an edit no earlier rule
+				// already selected for a full/skeleton drop.
+				if (!selectedIds.has(op.tagId)) {
+					syntheticPendingOps.push(op);
+					selectedIds.add(op.tagId);
+					editMarkerTagIds.add(op.tagId);
+				}
 			}
 		}
 		autoReclaimTargetCount = syntheticPendingOps.length;
@@ -4154,6 +4178,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				undefined,
 				[],
 				syntheticPendingOps,
+				editMarkerTagIds,
 			);
 			if (autoReclaimDidMutate) {
 				droppedCount += syntheticPendingOps.length;

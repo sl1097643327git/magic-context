@@ -1,5 +1,6 @@
 import { type ContextDatabase, getActiveTagsBySession } from "../../features/magic-context/storage";
 import type { PendingOp } from "../../features/magic-context/types";
+import { isEditTool } from "./edit-marker";
 import type { TagTarget } from "./tag-messages";
 
 // Smart-drops Phase 1: select provably-superseded "spent control-plane" tool
@@ -80,4 +81,68 @@ export function buildSupersessionReclaimOps(input: {
         });
     }
     return synthetic;
+}
+
+/**
+ * Select superseded edit/write tool calls for COMPRESSION (not full drop).
+ * Among active edit/write tags grouped by their `filePath`, the newest stays
+ * full; every older edit to the same file is an edit_marker target. Like the
+ * control-plane selector, supersession is age-independent so the watermark is
+ * ignored, but the caller only acts inside the gated pass.
+ *
+ * Returns both the drop ops AND the set of tag ids that must be compressed as
+ * edit_marker (the caller passes the set to applyPendingOperations).
+ */
+export function buildEditSupersessionReclaim(input: {
+    db: ContextDatabase;
+    sessionId: string;
+    targets: Map<number, TagTarget>;
+    pendingOps?: readonly PendingOp[];
+}): { ops: PendingOp[]; editMarkerTagIds: Set<number> } {
+    const realPendingTagIds = new Set((input.pendingOps ?? []).map((op) => op.tagId));
+    const tags = getActiveTagsBySession(input.db, input.sessionId);
+
+    // Active edit/write tags, newest-first, so the FIRST seen per file is kept.
+    const editTags = tags
+        .filter((tag) => tag.type === "tool" && tag.status === "active" && isEditTool(tag.toolName))
+        .sort((left, right) => right.tagNumber - left.tagNumber);
+
+    const seenFile = new Set<string>();
+    const ops: PendingOp[] = [];
+    const editMarkerTagIds = new Set<number>();
+
+    for (const tag of editTags) {
+        const filePath = readFilePath(input.targets.get(tag.tagNumber));
+        // No resolvable filePath → cannot prove supersession by file identity;
+        // leave it alone (fail safe).
+        if (!filePath) continue;
+        if (!seenFile.has(filePath)) {
+            seenFile.add(filePath); // newest edit to this file stays full
+            continue;
+        }
+        // Older edit to an already-seen file → compress.
+        if (realPendingTagIds.has(tag.tagNumber)) continue;
+        if (input.targets.get(tag.tagNumber)?.canDrop?.() !== true) continue;
+        editMarkerTagIds.add(tag.tagNumber);
+        ops.push({
+            id: 0,
+            sessionId: input.sessionId,
+            tagId: tag.tagNumber,
+            operation: "drop",
+            queuedAt: 0,
+        });
+    }
+    return { ops, editMarkerTagIds };
+}
+
+const FILE_PATH_KEYS = ["filePath", "file_path", "path"] as const;
+
+function readFilePath(target: TagTarget | undefined): string | null {
+    const input = target?.readInput?.();
+    if (!input) return null;
+    for (const key of FILE_PATH_KEYS) {
+        const value = input[key];
+        if (typeof value === "string" && value.length > 0) return value;
+    }
+    return null;
 }

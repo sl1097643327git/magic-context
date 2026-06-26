@@ -52,7 +52,7 @@ import {
     stripInlineThinking,
     stripSystemInjectedMessages,
 } from "./strip-content";
-import { buildSupersessionReclaimOps } from "./supersession-reclaim";
+import { buildEditSupersessionReclaim, buildSupersessionReclaimOps } from "./supersession-reclaim";
 import { buildSyntheticTodoPart } from "./todo-view";
 import {
     advanceToolReclaimWatermarkToCurrentMax,
@@ -634,11 +634,13 @@ export async function runPostTransformPhase(
                 pendingOps,
             });
             // Smart-drops: reclaim spent control-plane outputs that a later
-            // call supersedes (older todowrite/ctx_reduce/meta), merged into the
-            // same gated apply as the age-based sweep. Dedupe against those ops
-            // (a tag can qualify under both).
+            // call supersedes (older todowrite/ctx_reduce/meta), and compress
+            // superseded edits to an edit_marker (keep filePath + region hint).
+            // Merged into the same gated apply as the age-based sweep. Dedupe
+            // against those ops (a tag can qualify under more than one rule).
+            const editMarkerTagIds = new Set<number>();
             if (args.smartDrops) {
-                const positionalIds = new Set(syntheticPendingOps.map((op) => op.tagId));
+                const selectedIds = new Set(syntheticPendingOps.map((op) => op.tagId));
                 const supersessionOps = buildSupersessionReclaimOps({
                     db: args.db,
                     sessionId: args.sessionId,
@@ -646,7 +648,26 @@ export async function runPostTransformPhase(
                     pendingOps,
                 });
                 for (const op of supersessionOps) {
-                    if (!positionalIds.has(op.tagId)) syntheticPendingOps.push(op);
+                    if (!selectedIds.has(op.tagId)) {
+                        syntheticPendingOps.push(op);
+                        selectedIds.add(op.tagId);
+                    }
+                }
+                const editReclaim = buildEditSupersessionReclaim({
+                    db: args.db,
+                    sessionId: args.sessionId,
+                    targets: args.targets,
+                    pendingOps,
+                });
+                for (const op of editReclaim.ops) {
+                    // A superseded edit only compresses if no earlier rule already
+                    // selected it for a full/skeleton drop (drop wins; it reclaims
+                    // strictly more).
+                    if (!selectedIds.has(op.tagId)) {
+                        syntheticPendingOps.push(op);
+                        selectedIds.add(op.tagId);
+                        editMarkerTagIds.add(op.tagId);
+                    }
                 }
             }
             autoReclaimTargetCount = syntheticPendingOps.length;
@@ -659,6 +680,7 @@ export async function runPostTransformPhase(
                     undefined,
                     [],
                     syntheticPendingOps,
+                    editMarkerTagIds,
                 );
                 if (autoReclaimDidMutate) {
                     droppedCount += syntheticPendingOps.length;

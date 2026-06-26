@@ -60,6 +60,13 @@ export function applyPendingOperations(
     preloadedTags?: TagEntry[],
     preloadedPendingOps?: ReturnType<typeof getPendingOps>,
     syntheticPendingOps: PendingOp[] = [],
+    /**
+     * Smart-drops: tag ids to compress as an edit_marker (an edit/write
+     * superseded by a later edit to the same file) instead of a full/skeleton
+     * drop. Synthetic-only: these are selected for the current apply pass;
+     * replay reads the frozen drop_mode, not this set.
+     */
+    editMarkerTagIds: ReadonlySet<number> = new Set(),
 ): boolean {
     let didMutateMessage = false;
     db.transaction(() => {
@@ -119,7 +126,18 @@ export function applyPendingOperations(
 
             let shouldPersistDrop = false;
             if (isToolTag) {
-                if (skeletonWindow.has(pendingOp.tagId)) {
+                if (editMarkerTagIds.has(pendingOp.tagId)) {
+                    // Superseded edit/write: compress to a filePath-preserving
+                    // marker even when the tag is inside the recent skeleton
+                    // window. Frozen as drop_mode="edit_marker", replayed by mode.
+                    const markResult = target?.editMarker?.() ?? "absent";
+                    if (markResult === "incomplete" || markResult === "absent") {
+                        continue;
+                    }
+                    didMutateMessage = true;
+                    updateTagDropMode(db, sessionId, pendingOp.tagId, "edit_marker");
+                    shouldPersistDrop = true;
+                } else if (skeletonWindow.has(pendingOp.tagId)) {
                     const truncResult = target?.truncate?.() ?? "absent";
                     if (
                         truncResult === "incomplete" ||
@@ -172,7 +190,12 @@ export function applyFlushedStatuses(
         if (tag.status === "dropped") {
             const target = targets.get(tag.tagNumber);
             if (tag.type === "tool") {
-                if (tag.dropMode === "truncated") {
+                if (tag.dropMode === "edit_marker") {
+                    const markResult = target?.editMarker?.() ?? "absent";
+                    if (markResult === "truncated") {
+                        didMutateMessage = true;
+                    }
+                } else if (tag.dropMode === "truncated") {
                     const truncResult = target?.truncate?.() ?? "absent";
                     if (truncResult === "truncated") {
                         didMutateMessage = true;

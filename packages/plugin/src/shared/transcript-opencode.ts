@@ -140,6 +140,9 @@ function createOpenCodePart(
         getToolInput(): Record<string, unknown> | null {
             return readOpenCodeToolInput(rawPart);
         },
+        setToolInput(input: Record<string, unknown>): boolean {
+            return writeOpenCodeToolInput(rawPart, input);
+        },
         replaceWithSentinel(sentinelText: string): boolean {
             // Build a synthetic text part that carries the sentinel as
             // its content. Subsequent passes see this as a normal text
@@ -277,4 +280,23 @@ function readOpenCodeToolInput(part: unknown): Record<string, unknown> | null {
     const state = isRecord(part.state) ? part.state : null;
     const input = state?.input ?? part.args ?? part.input;
     return isRecord(input) ? input : null;
+}
+
+/** Replace an OpenCode tool part's input object in place. Returns true if a
+ *  writable input slot was found. */
+function writeOpenCodeToolInput(part: unknown, input: Record<string, unknown>): boolean {
+    if (!isRecord(part)) return false;
+    if (isRecord(part.state) && isRecord(part.state.input)) {
+        part.state.input = input;
+        return true;
+    }
+    if (isRecord(part.args)) {
+        part.args = input;
+        return true;
+    }
+    if (isRecord(part.input)) {
+        part.input = input;
+        return true;
+    }
+    return false;
 }
