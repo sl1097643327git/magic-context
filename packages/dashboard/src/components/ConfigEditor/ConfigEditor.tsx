@@ -1790,8 +1790,8 @@ function ConfigForm(props: {
                       Experimental: content-aware reclaim of provably-superseded tool output, on top
                       of the existing auto-drop. Drops superseded todowrite, spent ctx_reduce, and
                       zero-value status outputs, and compresses older edits to a file while keeping
-                      the newest. Only acts on passes already busting the cache, so it never causes a
-                      cache bust on its own. Off by default while cache stability is being proven.
+                      the newest. Only acts on passes already busting the cache, so it never causes
+                      a cache bust on its own. Off by default while cache stability is being proven.
                     </span>
                     <label class="toggle-switch">
                       <input
