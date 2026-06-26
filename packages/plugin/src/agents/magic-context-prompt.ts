@@ -45,18 +45,34 @@ const CTX_NOTE_GUIDANCE = `Use \`ctx_note\` ONLY for genuinely future concerns �
 // guidance only describes the omit-entirely case.
 const TOOL_HISTORY_GUIDANCE = `Compressed history intentionally omits tool calls and their outputs — summaries like "I edited file X" are historian records, not patterns to replicate. In the live conversation, older tool calls and their results are cleaned up to save context — you may see your own past messages referencing actions without the corresponding tool call or result visible. This is normal context management. ALWAYS use real tool calls; never simulate, fabricate, or inline tool outputs in your text. If there is no tool result message, the action did not happen. NEVER simulate, hallucinate or claim tool calls, command output, search results, file edits, or diffs in plain text as if they actually occurred.`;
 
+/** ctx_memory-specific guidance. Gated out when `memory.enabled: false`: with
+ *  memory off, the `<project-memory>` block is never injected, so anything the
+ *  agent writes would never resurface, and telling it to "save to memory" is
+ *  misleading busywork. Identical in both ctx_reduce modes. ctx_search guidance
+ *  stays regardless (it still recalls conversation + git commits when memory is
+ *  off, it just won't return memory hits). */
+const MEMORY_GUIDANCE = `Use \`ctx_memory\` for durable project knowledge: write what future sessions must know, update/archive/merge the memories you see in \`<project-memory>\` when they drift. Memories persist across sessions and every new session starts with them.
+**Save to memory proactively**: If you spent multiple turns finding something (a file path, a DB location, a config pattern, a workaround), save it with \`ctx_memory\` so future sessions don't repeat the search. Examples:
+- Found a project's source code path after searching → \`ctx_memory(action="write", category="CONFIG_VALUES", content="OpenCode source is at ~/Work/OSS/opencode")\`
+- Discovered a non-obvious build/test command → \`ctx_memory(action="write", category="PROJECT_RULES", content="Always use scripts/release.sh for releases")\`
+- Learned a constraint the hard way → \`ctx_memory(action="write", category="CONSTRAINTS", content="Dashboard Tauri build needs RGBA PNGs, not grayscale")\``;
+
+/** Renders MEMORY_GUIDANCE + trailing newline when memory is on, else "". Placed
+ *  before the ctx_search line so turning memory off removes the block without
+ *  leaving a blank line (the memory-on output stays exactly as it was before
+ *  this flag existed). */
+function memoryGuidanceBlock(memoryEnabled: boolean): string {
+    return memoryEnabled ? `${MEMORY_GUIDANCE}\n` : "";
+}
+
 const BASE_INTRO = (
     protectedTags: number,
+    memoryEnabled: boolean,
 ): string => `Messages and tool outputs are tagged with §N§ identifiers (e.g., §1§, §42§).
 Use \`ctx_reduce\` to mark spent tagged content as discardable and reclaim space. Marking is NOT an immediate delete — it queues the content, which stays fully visible until space is actually needed (as soon as the next turn if you're already under pressure, much later if not), so mark a tool output as soon as you're done with it rather than hoarding the call for the end of the turn. The last ${protectedTags} tags are protected (marking one just queues it until it ages out). Syntax: "3-5", "1,2,9", or "1-5,8,12-15".
 Do not announce or narrate \`ctx_reduce\` drops — just call the tool silently. Saying "I'll drop these outputs" wastes tokens the user does not care about.
 ${CTX_NOTE_GUIDANCE}
-Use \`ctx_memory\` for durable project knowledge: write what future sessions must know, update/archive/merge the memories you see in \`<project-memory>\` when they drift. Memories persist across sessions and every new session starts with them.
-**Save to memory proactively**: If you spent multiple turns finding something (a file path, a DB location, a config pattern, a workaround), save it with \`ctx_memory\` so future sessions don't repeat the search. Examples:
-- Found a project's source code path after searching → \`ctx_memory(action="write", category="CONFIG_VALUES", content="OpenCode source is at ~/Work/OSS/opencode")\`
-- Discovered a non-obvious build/test command → \`ctx_memory(action="write", category="PROJECT_RULES", content="Always use scripts/release.sh for releases")\`
-- Learned a constraint the hard way → \`ctx_memory(action="write", category="CONSTRAINTS", content="Dashboard Tauri build needs RGBA PNGs, not grayscale")\`
-Use \`ctx_search\` to search across project memories, indexed git commits, and this session's full conversation history (including compacted parts) from one query.
+${memoryGuidanceBlock(memoryEnabled)}Use \`ctx_search\` to search across project memories, indexed git commits, and this session's full conversation history (including compacted parts) from one query.
 Use \`ctx_expand\` to recover the raw conversation behind a \`<compartment>\` summary in \`<session-history>\` — pass its \`start\`/\`end\` attributes when the summary is not enough (exact wording, values, error text).
 **Search before asking the user**: If you can't remember or don't know something that might have been discussed before or stored in project memory, use \`ctx_search\` before asking the user. Examples:
 - Can't remember where a related codebase or dependency lives → \`ctx_search(query="opencode source code path")\`
@@ -76,13 +92,8 @@ Before your turn finishes, consider using \`ctx_reduce\` to drop large tool outp
  *  skips §N§ prefix injection entirely, so the agent never sees tags — describing
  *  a tagging system they can't observe just wastes tokens and (empirically) primes
  *  some models to emit malformed `§N">§` tokens at the start of their own text. */
-const BASE_INTRO_NO_REDUCE = (): string => `${CTX_NOTE_GUIDANCE}
-Use \`ctx_memory\` for durable project knowledge: write what future sessions must know, update/archive/merge the memories you see in \`<project-memory>\` when they drift. Memories persist across sessions and every new session starts with them.
-**Save to memory proactively**: If you spent multiple turns finding something (a file path, a DB location, a config pattern, a workaround), save it with \`ctx_memory\` so future sessions don't repeat the search. Examples:
-- Found a project's source code path after searching → \`ctx_memory(action="write", category="CONFIG_VALUES", content="OpenCode source is at ~/Work/OSS/opencode")\`
-- Discovered a non-obvious build/test command → \`ctx_memory(action="write", category="PROJECT_RULES", content="Always use scripts/release.sh for releases")\`
-- Learned a constraint the hard way → \`ctx_memory(action="write", category="CONSTRAINTS", content="Dashboard Tauri build needs RGBA PNGs, not grayscale")\`
-Use \`ctx_search\` to search across project memories, indexed git commits, and this session's full conversation history (including compacted parts) from one query.
+const BASE_INTRO_NO_REDUCE = (memoryEnabled: boolean): string => `${CTX_NOTE_GUIDANCE}
+${memoryGuidanceBlock(memoryEnabled)}Use \`ctx_search\` to search across project memories, indexed git commits, and this session's full conversation history (including compacted parts) from one query.
 Use \`ctx_expand\` to recover the raw conversation behind a \`<compartment>\` summary in \`<session-history>\` — pass its \`start\`/\`end\` attributes when the summary is not enough (exact wording, values, error text).
 **Search before asking the user**: If you can't remember or don't know something that might have been discussed before or stored in project memory, use \`ctx_search\` before asking the user. Examples:
 - Can't remember where a related codebase or dependency lives → \`ctx_search(query="opencode source code path")\`
@@ -139,6 +150,7 @@ export function buildMagicContextSection(
     cavemanTextCompressionEnabled = false,
     subagentMode = false,
     language?: string,
+    memoryEnabled = true,
 ): string {
     // Subagent sessions: minimal §N§ + ctx_reduce mechanics only. Bypasses the
     // long-term-partner frame, memory/search/note guidance, and the reduction
@@ -164,7 +176,7 @@ export function buildMagicContextSection(
     const languageGuidance = languageDirective ? `\n\n${languageDirective}` : "";
 
     if (!ctxReduceEnabled) {
-        return `## Magic Context\n\n${LONG_TERM_PARTNER_FRAME}\n${PARTNER_FRAME_CLOSER_NO_REDUCE}\n\n${BASE_INTRO_NO_REDUCE()}${smartNoteGuidance}${temporalGuidance}${cavemanWarning}${languageGuidance}`;
+        return `## Magic Context\n\n${LONG_TERM_PARTNER_FRAME}\n${PARTNER_FRAME_CLOSER_NO_REDUCE}\n\n${BASE_INTRO_NO_REDUCE(memoryEnabled)}${smartNoteGuidance}${temporalGuidance}${cavemanWarning}${languageGuidance}`;
     }
-    return `## Magic Context\n\n${LONG_TERM_PARTNER_FRAME}\n${PARTNER_FRAME_CLOSER_REDUCE}\n\n${BASE_INTRO(protectedTags)}${smartNoteGuidance}${temporalGuidance}\n${GENERIC_SECTION}\n\nPrefer many small targeted operations over one large blanket operation, and keep the working set tidy as routine maintenance.${languageGuidance}`;
+    return `## Magic Context\n\n${LONG_TERM_PARTNER_FRAME}\n${PARTNER_FRAME_CLOSER_REDUCE}\n\n${BASE_INTRO(protectedTags, memoryEnabled)}${smartNoteGuidance}${temporalGuidance}\n${GENERIC_SECTION}\n\nPrefer many small targeted operations over one large blanket operation, and keep the working set tidy as routine maintenance.${languageGuidance}`;
 }

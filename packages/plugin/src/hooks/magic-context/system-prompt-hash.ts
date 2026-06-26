@@ -121,6 +121,11 @@ export function createSystemPromptHashHandler(deps: {
     protectedTags: number;
     ctxReduceEnabled: boolean;
     dreamerEnabled: boolean;
+    /** When false (`memory.enabled: false`), the `<project-memory>` block is
+     *  never injected, so ctx_memory guidance is dropped from the prompt and the
+     *  ctx_memory tool is not registered. ctx_search guidance stays (it still
+     *  recalls conversation + git commits). Default true. */
+    memoryEnabled?: boolean;
     /** Optional language from user config for the main agent's generated text. */
     language?: string;
     /** When true + dreamerEnabled, inject ARCHITECTURE.md and STRUCTURE.md into system prompt */
@@ -323,6 +328,7 @@ export function createSystemPromptHashHandler(deps: {
                 deps.experimentalCavemanTextCompression,
                 subagentReduceMode,
                 deps.language,
+                deps.memoryEnabled !== false,
             );
             output.system.push(guidance);
             sessionLog(

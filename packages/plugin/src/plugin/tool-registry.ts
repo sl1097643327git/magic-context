@@ -65,6 +65,11 @@ export function createToolRegistry(args: {
     const resolveProjectPath = (directory: string) => resolveProjectIdentity(directory);
 
     const ctxReduceEnabled = pluginConfig.ctx_reduce_enabled !== false;
+    // When memory is off the <project-memory> block is never injected, so an
+    // agent's memory writes would never resurface. Omit ctx_memory entirely
+    // (the matching guidance is gated in buildMagicContextSection). ctx_search
+    // stays: it still recalls conversation + git commits, just not memories.
+    const memoryEnabled = pluginConfig.memory?.enabled !== false;
     const allTools: Record<string, ToolDefinition> = {
         ...(ctxReduceEnabled
             ? createCtxReduceTools({
@@ -83,16 +88,19 @@ export function createToolRegistry(args: {
             resolveProjectPath,
             ensureProjectRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
         }),
-        ...createCtxMemoryTools({
-            db,
-            resolveProjectPath,
-            ensureProjectRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
-            // Primary agents get the full mutation surface (write/archive/update/
-            // merge) on memories they can already see (with ids) in the injected
-            // <project-memory> block. Only `list` (bulk enumeration) stays
-            // dreamer-only — runtime-gated via toolContext.agent in tools.ts.
-            allowedActions: [...CTX_MEMORY_ACTIONS],
-        }),
+        ...(memoryEnabled
+            ? createCtxMemoryTools({
+                  db,
+                  resolveProjectPath,
+                  ensureProjectRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
+                  // Primary agents get the full mutation surface (write/archive/
+                  // update/merge) on memories they can already see (with ids) in
+                  // the injected <project-memory> block. Only `list` (bulk
+                  // enumeration) stays dreamer-only (runtime-gated via
+                  // toolContext.agent in tools.ts).
+                  allowedActions: [...CTX_MEMORY_ACTIONS],
+              })
+            : {}),
     };
 
     // Patch arg schemas so property-level .describe() text survives JSON Schema serialization.

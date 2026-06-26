@@ -113,6 +113,63 @@ describe("buildMagicContextSection — subagent mode", () => {
     });
 });
 
+describe("buildMagicContextSection: memory gating", () => {
+    // buildMagicContextSection's 9th positional parameter is memoryEnabled
+    // (defaults to true). The 7-arg legacy call below relies on that default.
+    it("memory ON (default) keeps the ctx_memory guidance and is byte-identical to legacy callers", () => {
+        const legacy = buildMagicContextSection(null, 20, true, false, false, false, false);
+        const memOn = buildMagicContextSection(
+            null,
+            20,
+            true,
+            false,
+            false,
+            false,
+            false,
+            undefined,
+            true,
+        );
+        expect(memOn).toBe(legacy);
+        expect(memOn).toContain("Use `ctx_memory`");
+        expect(memOn).toContain("**Save to memory proactively**");
+    });
+
+    it("memory OFF drops ALL ctx_memory guidance but keeps ctx_search", () => {
+        const off = buildMagicContextSection(
+            null,
+            20,
+            true,
+            false,
+            false,
+            false,
+            false,
+            undefined,
+            false,
+        );
+        expect(off).not.toContain("ctx_memory");
+        expect(off).not.toContain("Save to memory proactively");
+        expect(off).toContain("Use `ctx_search`");
+        // no dangling blank line where the block was removed
+        expect(off).not.toContain("\n\nUse `ctx_search`");
+    });
+
+    it("memory OFF gates the guidance in no-reduce mode too", () => {
+        const off = buildMagicContextSection(
+            null,
+            20,
+            false,
+            false,
+            false,
+            false,
+            false,
+            undefined,
+            false,
+        );
+        expect(off).not.toContain("ctx_memory");
+        expect(off).toContain("Use `ctx_search`");
+    });
+});
+
 describe("buildMagicContextSection — caveman compression warning", () => {
     it("emits the warning when caveman is enabled AND ctx_reduce is disabled", () => {
         const out = buildMagicContextSection(

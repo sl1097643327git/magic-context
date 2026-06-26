@@ -814,6 +814,9 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         protectedTags: deps.config.protected_tags,
         ctxReduceEnabled,
         dreamerEnabled: dreamerRunnable,
+        // Gates ctx_memory guidance out of the prompt when memory is off (the
+        // ctx_memory TOOL is gated in tool-registry.ts on the same flag).
+        memoryEnabled: deps.config.memory?.enabled !== false,
         language: deps.config.language,
         injectDocs: deps.config.dreamer?.inject_docs !== false,
         directory: deps.directory,

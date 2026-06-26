@@ -575,6 +575,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		// loaded via subagent-entry.ts with the
 		// `--magic-context-dreamer-actions` flag.
 		allowDreamerActions: false,
+		// Match OpenCode: when memory is off, the <project-memory> block is never
+		// injected, so omit ctx_memory entirely (its writes would never resurface).
+		// ctx_search stays: it still recalls conversation + git commits.
+		memoryToolEnabled: config.memory.enabled !== false,
 		// Match OpenCode's gating: when ctx_reduce_enabled is false,
 		// we don't surface the tool at all (along with disabling §N§
 		// prefix injection and stripping ctx_reduce mentions from the
@@ -587,9 +591,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		dreamerEnabled: isDreamerRunnable(config),
 	});
 	info(
-		`registered tools: ctx_search, ctx_memory, ctx_note, ctx_expand${
-			config.ctx_reduce_enabled === true ? ", ctx_reduce" : ""
-		}`,
+		`registered tools: ctx_search${
+			config.memory.enabled !== false ? ", ctx_memory" : ""
+		}, ctx_note, ctx_expand${config.ctx_reduce_enabled === true ? ", ctx_reduce" : ""}`,
 	);
 
 	// Register the per-LLM-call transform pipeline. Tags eligible message
