@@ -269,7 +269,8 @@ function ConfigForm(props: {
     | { kind: "network_error"; message: string }
     | { kind: "timeout"; timeout_ms: number }
     | { kind: "invalid_scheme"; endpoint: string }
-    | { kind: "unresolved_token"; field: string; token: string };
+    | { kind: "unresolved_token"; field: string; token: string }
+    | { kind: "blocked_sensitive_file"; field: string; token: string; reason: string };
 
   /** Render the probe outcome as `{ ok, message }` for the inline UI. The
    *  wording mirrors doctor's output so a user who runs both tools sees
@@ -311,10 +312,25 @@ function ConfigForm(props: {
           ok: false,
           message: `Endpoint must start with http:// or https:// (got: ${outcome.endpoint})`,
         };
-      case "unresolved_token":
+      case "unresolved_token": {
+        // Message depends on the token kind: a {file:} token failed because the
+        // file is missing/unreadable; an {env:} token failed because the var is
+        // not exported into this GUI process (the classic "launch from a
+        // terminal" case). The old wording assumed env for both, which was wrong
+        // and confusing for the recommended {file:~/...key} pattern.
+        const isFile = outcome.token.startsWith("{file:");
+        const detail = isFile
+          ? "the file it points to could not be read (check the path exists and is readable)"
+          : "the environment variable is not set in this process. Launch the app from a terminal where your shell exports it, or run `doctor` to validate from the shell";
         return {
           ok: false,
-          message: `${outcome.field} still contains ${outcome.token} — the referenced variable is not set in this process. Launch OpenCode from a terminal (where your shell exports the var) or run \`doctor\` to validate from the shell.`,
+          message: `${outcome.field} references ${outcome.token}, but ${detail}.`,
+        };
+      }
+      case "blocked_sensitive_file":
+        return {
+          ok: false,
+          message: `${outcome.field} references ${outcome.token}, which resolves to a credential location (${outcome.reason}). Refusing to read it for an endpoint test. Point this at your embedding API key, not a credential file.`,
         };
     }
   }

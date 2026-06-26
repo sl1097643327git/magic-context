@@ -862,3 +862,25 @@ config" — trusting it (and letting GC run against the model it names) is corre
 not a data-safety hole. The destructive-sweep scenario requires a conflicted
 shared file to exist, which the migrator structurally never produces. If a user
 hand-authors a shared config, that IS their authoritative intent by definition.
+
+### A53. Dashboard embedding "Test Connection" expands {env:}/{file:} tokens and allows http/loopback/LAN (deliberate, user-config-only surface)
+A prior audit added a hard SSRF + token-refusal guard to the dashboard
+`test_embedding_endpoint` probe (`embedding_probe.rs`): it refused to expand
+`{env:}`/`{file:}` tokens, required `https`, and blocked loopback + RFC1918.
+That guard was relaxed deliberately because it broke the two most common, fully
+legitimate setups (a `{file:~/...key}` api_key, the pattern we document, and a
+self-hosted `http://localhost` embedding server) while protecting a threat that
+is not reachable on this surface. The probe's only input is the **user-level**
+config editor (`ConfigEditor`, rendered once from `App.tsx`); project-tier
+editing covers only dreamer schedule/model, never embedding. So the
+"malicious-project-config picks a hostile endpoint/secret-file and the user
+clicks Test" precondition is **not satisfiable**: the values are always the
+user's own, and expanding them to test is exactly what the plugin does at
+runtime. The probe now mirrors `doctor` (Node), which it is documented to mirror.
+Retained guards (cheap, no legit cost): cloud instance-metadata (IPv4
+169.254.169.254 + AWS IPv6 `fd00:ec2::254`, incl. IPv4-mapped) is always blocked;
+IPv4 link-local (169.254/16) + IPv6 link-local (fe80::/10) + unspecified stay
+blocked; URL userinfo (`user:pass@`) is rejected; and `{file:}` tokens resolving
+into credential dirs (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`) are refused.
+Do not re-add the https-only / token-refusal / loopback-block guards without a
+new threat model showing an attacker-controlled value can reach this probe.

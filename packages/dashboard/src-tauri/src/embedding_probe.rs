@@ -36,15 +36,27 @@ pub enum EmbeddingProbeOutcome {
     Timeout { timeout_ms: u64 },
     /// Endpoint URL is missing or is not HTTPS.
     InvalidScheme { endpoint: String },
-    /// Config contains `{env:VAR}` / `{file:path}` tokens. The dashboard
-    /// refuses to expand those tokens before contacting a user-supplied
-    /// endpoint, because doing so could leak local secrets.
+    /// Config carries an `{env:VAR}` / `{file:path}` token that could not be
+    /// resolved for the test: the env var is not set in this process, or the
+    /// referenced file does not exist / is unreadable. The probe expands these
+    /// tokens (this is the user-config editor, so the values are the user's own,
+    /// exactly what the plugin would load at runtime) but reports unresolved
+    /// ones instead of sending a literal `{...}` token to the endpoint.
     UnresolvedToken {
         /// Which field carries the token (e.g., "api_key", "endpoint").
         field: String,
         /// The unresolved token (e.g., "{env:EMBED_KEY}"). Safe to surface —
-        /// users need to know which var is missing.
+        /// users need to know which var/file is missing.
         token: String,
+    },
+    /// An `{file:path}` token resolves into a known-sensitive directory
+    /// (SSH keys, AWS/GnuPG credentials, GitHub CLI auth). The probe refuses to
+    /// read such a file and send it to the endpoint (an embedding API key is
+    /// never legitimately one of these), so this is almost certainly a mistake.
+    BlockedSensitiveFile {
+        field: String,
+        token: String,
+        reason: String,
     },
 }
 
@@ -90,6 +102,107 @@ pub fn find_substitution_token(raw: &str) -> Option<String> {
 /// It never resolves tokens to local file contents or environment values.
 pub fn substitute_value(raw: &str, _config_dir: Option<&Path>) -> (String, Option<String>) {
     (raw.to_string(), find_substitution_token(raw))
+}
+
+/// Why a token failed to expand. Maps to a probe outcome at the call site.
+#[derive(Debug)]
+pub enum TokenExpandError {
+    /// `{env:VAR}` unset, or `{file:path}` missing / unreadable.
+    Unresolved(String),
+    /// `{file:path}` resolved into a known-sensitive directory.
+    SensitiveFile { token: String, reason: String },
+}
+
+/// Expand every `{env:VAR}` / `{file:path}` token in a single config VALUE,
+/// using the same semantics the plugin applies at load time
+/// (`packages/plugin/src/config/variable.ts`):
+///   - `{env:VAR}` → `std::env::var(VAR)` (trimmed key); unset/empty → Unresolved
+///   - `{file:~/p}` → contents of `$HOME/p` (trimmed)
+///   - `{file:/abs}` → contents of `/abs`
+///   - `{file:rel}` → resolved against `config_dir`
+///
+/// This is safe to do here even though the same expansion is refused for
+/// untrusted PROJECT configs: the dashboard's embedding fields come from the
+/// USER-level config editor, so the values are the user's own; expanding them
+/// to test the endpoint is exactly what the plugin does for real at runtime.
+/// `{file:}` tokens that resolve into credential directories are still refused.
+pub fn expand_config_value(value: &str, config_dir: &Path) -> Result<String, TokenExpandError> {
+    let mut out = String::new();
+    let mut rest = value;
+    loop {
+        let Some(token) = find_substitution_token(rest) else {
+            out.push_str(rest);
+            return Ok(out);
+        };
+        let idx = rest
+            .find(&token)
+            .expect("token was located by find_substitution_token");
+        out.push_str(&rest[..idx]);
+        out.push_str(&resolve_token(&token, config_dir)?);
+        rest = &rest[idx + token.len()..];
+    }
+}
+
+fn resolve_token(token: &str, config_dir: &Path) -> Result<String, TokenExpandError> {
+    if let Some(var) = token
+        .strip_prefix("{env:")
+        .and_then(|s| s.strip_suffix('}'))
+    {
+        let name = var.trim();
+        return match std::env::var(name) {
+            Ok(v) if !v.is_empty() => Ok(v),
+            _ => Err(TokenExpandError::Unresolved(token.to_string())),
+        };
+    }
+    if let Some(path) = token
+        .strip_prefix("{file:")
+        .and_then(|s| s.strip_suffix('}'))
+    {
+        let raw = path.trim();
+        let resolved: std::path::PathBuf = if let Some(rel) = raw.strip_prefix("~/") {
+            match dirs::home_dir() {
+                Some(home) => home.join(rel),
+                None => return Err(TokenExpandError::Unresolved(token.to_string())),
+            }
+        } else if Path::new(raw).is_absolute() {
+            std::path::PathBuf::from(raw)
+        } else {
+            config_dir.join(raw)
+        };
+        if let Some(reason) = sensitive_file_reason(&resolved) {
+            return Err(TokenExpandError::SensitiveFile {
+                token: token.to_string(),
+                reason,
+            });
+        }
+        return match std::fs::read_to_string(&resolved) {
+            Ok(contents) => Ok(contents.trim().to_string()),
+            Err(_) => Err(TokenExpandError::Unresolved(token.to_string())),
+        };
+    }
+    // Not an env/file token (shouldn't happen; find_substitution_token only
+    // returns these two), leave it literal.
+    Ok(token.to_string())
+}
+
+/// Short human label when `path` sits inside a known credential directory, else
+/// None. Mirrors the warn list in the Node `variable.ts`; the dashboard probe
+/// BLOCKS rather than warns, since reading these into an embedding test is never
+/// legitimate.
+fn sensitive_file_reason(path: &Path) -> Option<String> {
+    let home = dirs::home_dir()?;
+    let candidates = [
+        (home.join(".ssh"), "SSH keys"),
+        (home.join(".aws"), "AWS credentials"),
+        (home.join(".gnupg"), "GnuPG keyring"),
+        (home.join(".config").join("gh"), "GitHub CLI auth"),
+    ];
+    for (dir, label) in candidates {
+        if path == dir || path.starts_with(&dir) {
+            return Some(label.to_string());
+        }
+    }
+    None
 }
 
 /// POST `{model, input}` to `${endpoint}/embeddings` and classify the outcome.
@@ -260,7 +373,12 @@ async fn validate_probe_endpoint(
         }
     };
 
-    if parsed.scheme() != "https" {
+    // Allow both http and https. The error message has always said "http:// or
+    // https://", and the canonical Node probe (doctor) accepts both; a
+    // self-hosted embedding server on plain http://localhost is the single most
+    // common local setup, so https-only was wrong and contradicted its own
+    // message.
+    if parsed.scheme() != "https" && parsed.scheme() != "http" {
         return Err(EmbeddingProbeOutcome::InvalidScheme {
             endpoint: raw_endpoint.to_string(),
         });
@@ -306,29 +424,51 @@ async fn validate_probe_endpoint(
 }
 
 fn is_disallowed_probe_ip(ip: IpAddr) -> bool {
+    // Cloud instance-metadata is always blocked (the classic SSRF
+    // exfiltration target, never a real embedding host) regardless of the
+    // range rules below.
+    if is_cloud_metadata_ip(ip) {
+        return true;
+    }
     match ip {
         IpAddr::V4(ip) => is_disallowed_probe_ipv4(ip),
         IpAddr::V6(ip) => is_disallowed_probe_ipv6(ip),
     }
 }
 
+/// Known cloud instance-metadata addresses (AWS/GCP/Azure IMDS over IPv4, AWS
+/// IMDS over IPv6). Always refused. IPv4 169.254.169.254 is also link-local
+/// (blocked anyway), but listing it explicitly keeps the intent obvious.
+fn is_cloud_metadata_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.octets() == [169, 254, 169, 254],
+        IpAddr::V6(v6) => {
+            v6 == Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x254)
+                || v6
+                    .to_ipv4_mapped()
+                    .map_or(false, |m| m.octets() == [169, 254, 169, 254])
+        }
+    }
+}
+
 fn is_disallowed_probe_ipv4(ip: Ipv4Addr) -> bool {
-    ip.is_loopback()
-        || ip.is_private()
-        || ip.is_link_local()
-        || ip.is_unspecified()
-        || ip.octets()[0] == 0
+    // Loopback + private (10/8, 172.16/12, 192.168/16) are now ALLOWED so a
+    // self-hosted embedding server on localhost or a LAN box can be tested
+    // (matches doctor). Link-local (169.254/16, covers IMDS), unspecified
+    // (0.0.0.0), and the 0.x reserved block stay blocked.
+    ip.is_link_local() || ip.is_unspecified() || ip.octets()[0] == 0
 }
 
 fn is_disallowed_probe_ipv6(ip: Ipv6Addr) -> bool {
-    ip.is_loopback()
-        || ip.is_unspecified()
-        || is_unique_local_ipv6(ip)
-        || is_unicast_link_local_ipv6(ip)
-}
-
-fn is_unique_local_ipv6(ip: Ipv6Addr) -> bool {
-    (ip.segments()[0] & 0xfe00) == 0xfc00
+    // Unwrap IPv4-mapped (::ffff:a.b.c.d) so an IPv4 link-local/metadata address
+    // can't slip through via its IPv6 form.
+    if let Some(v4) = ip.to_ipv4_mapped() {
+        return is_disallowed_probe_ipv4(v4);
+    }
+    // Loopback (::1) + ULA (fc00::/7, the IPv6 LAN range) are now ALLOWED. The
+    // one AWS IPv6 metadata address inside ULA is caught by is_cloud_metadata_ip
+    // above. Link-local (fe80::/10) and unspecified (::) stay blocked.
+    ip.is_unspecified() || is_unicast_link_local_ipv6(ip)
 }
 
 fn is_unicast_link_local_ipv6(ip: Ipv6Addr) -> bool {
@@ -543,10 +683,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn probe_rejects_loopback_endpoint_before_connecting() {
+    async fn probe_allows_loopback_and_attempts_connection() {
+        // Loopback is now ALLOWED (self-hosted local embedding servers). With
+        // nothing listening on this port the probe attempts the connection and
+        // gets a transport error, crucially NOT a pre-connect "blocked"
+        // refusal, proving the IP guard no longer rejects loopback.
         let outcome = probe_embedding_endpoint(EmbeddingProbeOptions {
-            endpoint: "https://127.0.0.1:4444".to_string(),
+            endpoint: "http://127.0.0.1:4444".to_string(),
             model: "text-embedding-3-small".to_string(),
+            api_key: None,
+            input_type: None,
+            truncate: None,
+            timeout_ms: 200,
+        })
+        .await;
+        match outcome {
+            EmbeddingProbeOutcome::NetworkError { message } => {
+                assert!(
+                    !message.contains("blocked"),
+                    "loopback must not be blocked pre-connect: {message}"
+                );
+            }
+            EmbeddingProbeOutcome::Timeout { .. } => {}
+            other => panic!("expected a connection error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_rejects_non_http_scheme() {
+        let outcome = probe_embedding_endpoint(EmbeddingProbeOptions {
+            endpoint: "ftp://example.com/v1".to_string(),
+            model: "m".to_string(),
             api_key: None,
             input_type: None,
             truncate: None,
@@ -555,8 +722,85 @@ mod tests {
         .await;
         assert!(matches!(
             outcome,
-            EmbeddingProbeOutcome::NetworkError { .. }
+            EmbeddingProbeOutcome::InvalidScheme { .. }
         ));
+    }
+
+    #[test]
+    fn metadata_ip_blocked_v4_and_v6() {
+        assert!(is_disallowed_probe_ip("169.254.169.254".parse().unwrap()));
+        assert!(is_disallowed_probe_ip("fd00:ec2::254".parse().unwrap()));
+    }
+
+    #[test]
+    fn loopback_and_private_now_allowed() {
+        assert!(!is_disallowed_probe_ip("127.0.0.1".parse().unwrap()));
+        assert!(!is_disallowed_probe_ip("192.168.1.50".parse().unwrap()));
+        assert!(!is_disallowed_probe_ip("10.0.0.5".parse().unwrap()));
+        assert!(!is_disallowed_probe_ip("::1".parse().unwrap()));
+        assert!(!is_disallowed_probe_ip("fd12:3456::1".parse().unwrap())); // ULA LAN
+    }
+
+    #[test]
+    fn unspecified_and_link_local_still_blocked() {
+        assert!(is_disallowed_probe_ip("0.0.0.0".parse().unwrap()));
+        assert!(is_disallowed_probe_ip("169.254.1.2".parse().unwrap())); // link-local
+        assert!(is_disallowed_probe_ip("::".parse().unwrap()));
+        assert!(is_disallowed_probe_ip("fe80::1".parse().unwrap())); // v6 link-local
+    }
+
+    #[test]
+    fn expand_resolves_env_and_file_tokens() {
+        std::env::set_var("MC_TEST_EXPAND_KEY", "sk-resolved");
+        let dir = std::env::temp_dir();
+        assert_eq!(
+            expand_config_value("{env:MC_TEST_EXPAND_KEY}", &dir).ok(),
+            Some("sk-resolved".to_string())
+        );
+        std::env::remove_var("MC_TEST_EXPAND_KEY");
+
+        let file = dir.join("mc-expand-probe-key.txt");
+        std::fs::write(&file, "  sk-from-file\n").unwrap();
+        let token = format!("{{file:{}}}", file.display());
+        assert_eq!(
+            expand_config_value(&token, &dir).ok(),
+            // file contents are trimmed (the file had leading/trailing whitespace)
+            Some("sk-from-file".to_string())
+        );
+        std::fs::remove_file(&file).ok();
+    }
+
+    #[test]
+    fn expand_reports_unresolved_env_and_missing_file() {
+        std::env::remove_var("MC_TEST_NO_SUCH_EXPAND_VAR");
+        assert!(matches!(
+            expand_config_value("{env:MC_TEST_NO_SUCH_EXPAND_VAR}", &std::env::temp_dir()),
+            Err(TokenExpandError::Unresolved(_))
+        ));
+        assert!(matches!(
+            expand_config_value("{file:/no/such/probe/file.key}", &std::env::temp_dir()),
+            Err(TokenExpandError::Unresolved(_))
+        ));
+    }
+
+    #[test]
+    fn expand_blocks_sensitive_file_paths() {
+        let token = "{file:~/.ssh/id_rsa}";
+        match expand_config_value(token, &std::env::temp_dir()) {
+            Err(TokenExpandError::SensitiveFile { reason, .. }) => {
+                assert!(reason.contains("SSH"), "unexpected reason: {reason}");
+            }
+            other => panic!("expected SensitiveFile block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expand_leaves_plain_values_untouched() {
+        let dir = std::env::temp_dir();
+        assert_eq!(
+            expand_config_value("https://api.openai.com/v1", &dir).ok(),
+            Some("https://api.openai.com/v1".to_string())
+        );
     }
 
     #[tokio::test]

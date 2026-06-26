@@ -1,8 +1,10 @@
 use crate::embedding_probe::{
-    find_substitution_token, probe_embedding_endpoint, EmbeddingProbeOptions, EmbeddingProbeOutcome,
+    expand_config_value, probe_embedding_endpoint, EmbeddingProbeOptions, EmbeddingProbeOutcome,
+    TokenExpandError,
 };
 use crate::process_ext::NoWindowExtTokio;
 use crate::{config, db, log_parser, AppState};
+use std::path::{Path, PathBuf};
 use tauri::State;
 
 // ── Memory commands ─────────────────────────────────────────
@@ -903,10 +905,27 @@ pub async fn get_available_pi_models() -> Vec<String> {
 ///
 /// 3. 401/403 → `AuthFailed` (specific "credentials rejected" message).
 ///    404/405 → `EndpointUnsupported` (wrong URL / no embeddings API).
-fn reject_probe_token(field: &str, value: &str) -> Option<EmbeddingProbeOutcome> {
-    find_substitution_token(value).map(|token| EmbeddingProbeOutcome::UnresolvedToken {
-        field: field.to_string(),
-        token,
+/// Expand an `{env:}`/`{file:}` token in one probe field, mapping a failure to
+/// the matching probe outcome. The embedding fields come from the USER-level
+/// config editor, so expanding the user's own tokens to test their endpoint is
+/// exactly what the plugin does at runtime (see `expand_config_value`).
+fn expand_probe_field(
+    field: &str,
+    value: &str,
+    config_dir: &Path,
+) -> Result<String, EmbeddingProbeOutcome> {
+    expand_config_value(value, config_dir).map_err(|err| match err {
+        TokenExpandError::Unresolved(token) => EmbeddingProbeOutcome::UnresolvedToken {
+            field: field.to_string(),
+            token,
+        },
+        TokenExpandError::SensitiveFile { token, reason } => {
+            EmbeddingProbeOutcome::BlockedSensitiveFile {
+                field: field.to_string(),
+                token,
+                reason,
+            }
+        }
     })
 }
 
@@ -917,17 +936,19 @@ fn prepare_embedding_probe_options(
     input_type: Option<String>,
     truncate: Option<String>,
 ) -> Result<EmbeddingProbeOptions, EmbeddingProbeOutcome> {
-    if let Some(outcome) = reject_probe_token("endpoint", &endpoint) {
-        return Err(outcome);
-    }
-    if let Some(outcome) = reject_probe_token("model", &model) {
-        return Err(outcome);
-    }
-    if let Some(key) = api_key.as_deref() {
-        if let Some(outcome) = reject_probe_token("api_key", key) {
-            return Err(outcome);
-        }
-    }
+    // Relative `{file:}` references resolve against the user config file's dir,
+    // matching the plugin's load-time resolution.
+    let config_dir = config::resolve_user_config_path()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let endpoint = expand_probe_field("endpoint", &endpoint, &config_dir)?;
+    let model = expand_probe_field("model", &model, &config_dir)?;
+    let api_key = match api_key {
+        Some(key) => Some(expand_probe_field("api_key", &key, &config_dir)?),
+        None => None,
+    };
 
     let input_type = input_type
         .map(|s| s.trim().to_string())
@@ -1130,50 +1151,61 @@ mod tests {
     }
 
     #[test]
-    fn embedding_probe_refuses_file_api_key_without_reading_secret() {
+    fn embedding_probe_expands_file_api_key_for_the_test() {
+        // The embedding fields come from the USER config editor, so a
+        // {file:...} api_key is the user's own secret; expand it (as the
+        // plugin does at runtime) instead of refusing.
         let dir = tempfile::tempdir().expect("tempdir");
         let secret_path = dir.path().join("embedding-secret.txt");
-        std::fs::write(&secret_path, "super-secret-token").expect("write secret");
+        std::fs::write(&secret_path, "  super-secret-token\n").expect("write secret");
         let token = format!("{{file:{}}}", secret_path.display());
 
-        let outcome = prepare_embedding_probe_options(
+        let options = prepare_embedding_probe_options(
             "https://example.com/v1".to_string(),
             "text-embedding-3-small".to_string(),
-            Some(token.clone()),
+            Some(token),
             None,
             None,
         )
-        .expect_err("file token must be refused before any network probe");
+        .expect("resolvable file token should expand, not error");
 
-        match outcome {
-            EmbeddingProbeOutcome::UnresolvedToken {
-                field,
-                token: reported,
-            } => {
-                assert_eq!(field, "api_key");
-                assert_eq!(reported, token);
-            }
-            other => panic!("expected unresolved token, got {other:?}"),
-        }
+        // file contents are trimmed by expand_config_value (the file had
+        // leading/trailing whitespace).
+        assert_eq!(options.api_key.as_deref(), Some("super-secret-token"));
     }
 
     #[test]
-    fn embedding_probe_refuses_env_model_token_without_expanding() {
-        std::env::set_var("MC_DASHBOARD_TEST_MODEL", "secret-model");
-        let outcome = prepare_embedding_probe_options(
+    fn embedding_probe_expands_env_model_token_for_the_test() {
+        std::env::set_var("MC_DASHBOARD_TEST_MODEL", "resolved-model");
+        let options = prepare_embedding_probe_options(
             "https://example.com/v1".to_string(),
             "{env:MC_DASHBOARD_TEST_MODEL}".to_string(),
             Some("literal-key".to_string()),
             None,
             None,
         )
-        .expect_err("env token must be refused before any network probe");
+        .expect("resolvable env token should expand, not error");
         std::env::remove_var("MC_DASHBOARD_TEST_MODEL");
+
+        assert_eq!(options.model, "resolved-model");
+    }
+
+    #[test]
+    fn embedding_probe_reports_unresolved_env_token() {
+        std::env::remove_var("MC_DASHBOARD_UNSET_TEST_VAR");
+        let outcome = prepare_embedding_probe_options(
+            "https://example.com/v1".to_string(),
+            "text-embedding-3-small".to_string(),
+            Some("{env:MC_DASHBOARD_UNSET_TEST_VAR}".to_string()),
+            None,
+            None,
+        )
+        .expect_err("an unset env token must not reach the network");
 
         match outcome {
             EmbeddingProbeOutcome::UnresolvedToken { field, token } => {
-                assert_eq!(field, "model");
-                assert_eq!(token, "{env:MC_DASHBOARD_TEST_MODEL}");
+                assert_eq!(field, "api_key");
+                assert_eq!(token, "{env:MC_DASHBOARD_UNSET_TEST_VAR}");
             }
             other => panic!("expected unresolved token, got {other:?}"),
         }

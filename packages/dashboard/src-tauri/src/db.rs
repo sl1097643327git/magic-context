@@ -1254,9 +1254,9 @@ fn build_db_cache_events_with_decisions(
             finish: row.finish,
             turn_id: String::new(),
             is_turn_start: false,
-            context_limit: 0,           // filled in after sessions are known
+            context_limit: 0,               // filled in after sessions are known
             context_limit_estimated: false, // set with context_limit below
-            is_drop: false,             // computed in pass 2
+            is_drop: false,                 // computed in pass 2
         });
     }
 
@@ -6775,7 +6775,10 @@ mod memory_project_filter_tests {
         let rows = get_memories(&conn, None, None, None, None, None, 100, 0)
             .expect("get_memories must not error when memory_embeddings is absent");
         assert_eq!(rows.len(), 1);
-        assert!(!rows[0].has_embedding, "no embeddings table → has_embedding=false");
+        assert!(
+            !rows[0].has_embedding,
+            "no embeddings table → has_embedding=false"
+        );
 
         let stats = get_memory_stats(&conn, None, None).expect("stats must not error");
         assert_eq!(stats.with_embeddings, 0);
