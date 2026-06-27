@@ -6,6 +6,7 @@ import { closeQuietly } from "../../../shared/sqlite-helpers";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
 import {
+    getMostRecentTaskRunAt,
     getTaskScheduleState,
     getTaskScheduleStatesForProject,
     seedTaskScheduleState,
@@ -102,5 +103,33 @@ describe("task_schedule_state storage", () => {
         seedTaskScheduleState(db, "git:other", "consolidate", 3, null);
         const rows = getTaskScheduleStatesForProject(db, "git:abc");
         expect(rows.map((r) => r.task).sort()).toEqual(["consolidate", "verify"]);
+    });
+
+    describe("getMostRecentTaskRunAt (issue #194 sidebar/status source)", () => {
+        it("returns null when no task has run yet", () => {
+            db = freshDb();
+            seedTaskScheduleState(db, "git:abc", "verify", 1000, null);
+            expect(getMostRecentTaskRunAt(db, "git:abc")).toBeNull();
+        });
+
+        it("returns the MAX last_run_at across the project's tasks", () => {
+            db = freshDb();
+            seedTaskScheduleState(db, "git:abc", "verify", 0, 5000);
+            seedTaskScheduleState(db, "git:abc", "curate", 0, 8000);
+            seedTaskScheduleState(db, "git:abc", "classify-memories", 0, 3000);
+            expect(getMostRecentTaskRunAt(db, "git:abc")).toBe(8000);
+        });
+
+        it("is scoped to the project", () => {
+            db = freshDb();
+            seedTaskScheduleState(db, "git:abc", "verify", 0, 5000);
+            seedTaskScheduleState(db, "git:other", "verify", 0, 9000);
+            expect(getMostRecentTaskRunAt(db, "git:abc")).toBe(5000);
+        });
+
+        it("returns null for an unknown project", () => {
+            db = freshDb();
+            expect(getMostRecentTaskRunAt(db, "git:nope")).toBeNull();
+        });
     });
 });

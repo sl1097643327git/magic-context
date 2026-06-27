@@ -3,6 +3,7 @@
  * and returns typed responses for TUI consumption.
  */
 import type { MagicContextConfig } from "../config/schema/magic-context";
+import { getMostRecentTaskRunAt } from "../features/magic-context/dreamer/storage-task-schedule";
 import { resolveProjectIdentity } from "../features/magic-context/memory/project-identity";
 import { getEmbeddingCoverageStatus } from "../features/magic-context/project-embedding-registry";
 import {
@@ -303,16 +304,12 @@ export function buildSidebarSnapshot(
         let lastDreamerRunAt: number | null = null;
         if (projectIdentity) {
             try {
-                const dreamRow = db
-                    .prepare<[string], { value: string }>(
-                        "SELECT value FROM dream_state WHERE key = ?",
-                    )
-                    .get(`last_dream_at:${projectIdentity}`);
-                if (dreamRow?.value) {
-                    lastDreamerRunAt = Number(dreamRow.value) || null;
-                }
+                // Dreamer V2 retired the V1 dream_state['last_dream_at'] field;
+                // the live "last successful run" is MAX(last_run_at) across the
+                // project's task_schedule_state rows (issue #194).
+                lastDreamerRunAt = getMostRecentTaskRunAt(db, projectIdentity);
             } catch {
-                // dream_state may not exist
+                // task_schedule_state may not exist on a pre-V2 DB
             }
         }
 

@@ -102,6 +102,25 @@ export function getTaskScheduleStatesForProject(
 }
 
 /**
+ * Most recent successful Dreamer task run for a project, as an epoch-ms value,
+ * or null if no task has run yet. `last_run_at` advances only on task success
+ * (see the scheduler), so this is "last successful dreamer activity", the
+ * meaning the V1 `dream_state['last_dream_at:<project>']` field carried before
+ * Dreamer V2 retired it. Used by the OpenCode sidebar RPC and Pi's /ctx-status
+ * so the displayed "last run" reflects V2 per-task execution instead of a frozen
+ * V1 migration-seed timestamp (issue #194).
+ */
+export function getMostRecentTaskRunAt(db: Database, projectPath: string): number | null {
+    const row = db
+        .prepare<[string], { max_at: number | null }>(
+            "SELECT MAX(last_run_at) AS max_at FROM task_schedule_state WHERE project_path = ?",
+        )
+        .get(projectPath);
+    const value = row?.max_at ?? null;
+    return typeof value === "number" && value > 0 ? value : null;
+}
+
+/**
  * Delete task_schedule_state rows for a project whose `task` is NOT in the given
  * keep-set. Used to garbage-collect RETIRED task names (e.g. the v1
  * improve/consolidate/archive-stale rows superseded by the verify/curate split):

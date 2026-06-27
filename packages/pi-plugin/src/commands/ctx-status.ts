@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
-import { getDreamState } from "@magic-context/core/features/magic-context/dreamer/storage-dream-state";
+import { getMostRecentTaskRunAt } from "@magic-context/core/features/magic-context/dreamer/storage-task-schedule";
 import { getMemoryCount } from "@magic-context/core/features/magic-context/memory/storage-memory";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { getPendingOps } from "@magic-context/core/features/magic-context/storage";
@@ -154,20 +154,13 @@ function buildStatusDetails(
 		dreamer: {
 			enabled: deps.dreamer?.runnable === true,
 			scheduleSummary: deps.dreamer?.scheduleSummary ?? null,
-			lastRunAt: readNumberState(
-				deps.db,
-				`last_dream_at:${deps.projectIdentity}`,
-			),
+			// Dreamer V2 retired the V1 dream_state['last_dream_at'] field; the
+			// live "last successful run" is MAX(last_run_at) across the project's
+			// task_schedule_state rows (issue #194).
+			lastRunAt: getMostRecentTaskRunAt(deps.db, deps.projectIdentity),
 		},
 		historian: readHistorianState(deps.db, sessionId, meta),
 	};
-}
-
-function readNumberState(db: ContextDatabase, key: string): number | null {
-	const value = getDreamState(db, key);
-	if (!value) return null;
-	const parsed = Number(value);
-	return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
 function readHistorianState(
