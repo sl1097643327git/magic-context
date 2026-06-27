@@ -1,5 +1,3 @@
-import { PI_PACKAGE_SOURCE } from "./pi-helpers";
-
 export const PI_MAGIC_CONTEXT_PACKAGE_NAME = "@cortexkit/pi-magic-context";
 
 function stripNpmPrefix(value: string): string {
@@ -47,6 +45,3 @@ export function describePiPackageEntry(entry: unknown): string {
     }
 }
 
-export function defaultPiPackageEntry(): string {
-    return PI_PACKAGE_SOURCE;
-}

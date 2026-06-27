@@ -3,7 +3,6 @@
 import { describe, expect, test } from "bun:test";
 import {
     CANONICAL_DREAM_TASKS,
-    isAgenticTask,
     isCanonicalDreamTask,
     MEMORY_DOMAIN_TASKS,
 } from "./task-registry";
@@ -22,11 +21,7 @@ describe("dreamer task registry", () => {
             "promote-primers",
             "refresh-primers",
         ]);
-        expect(isAgenticTask("promote-primers")).toBe(false);
-        expect(isAgenticTask("refresh-primers")).toBe(false);
-        // map-memories has its own runner — NOT the agentic prompt-builder path.
-        expect(isAgenticTask("map-memories")).toBe(false);
-        // It leads the canonical order (records the mappings verify gates on).
+        // map-memories leads the canonical order (records the mappings verify gates on).
         expect(CANONICAL_DREAM_TASKS.indexOf("map-memories")).toBe(0);
         expect(CANONICAL_DREAM_TASKS.indexOf("classify-memories")).toBe(
             CANONICAL_DREAM_TASKS.indexOf("curate") + 1,

@@ -285,7 +285,7 @@ describe("runSetup", () => {
         const env: SetupEnvironment = {
             detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
             getPiVersion: () => "0.74.0",
-            // Only github-copilot model so buildModelSelection always picks it first
+            // Only one model so the model picker has a single deterministic choice.
             getAvailableModels: () => ["github-copilot/gpt-5.4"],
             paths: {
                 getPiAgentConfigDir: () => agentDir,

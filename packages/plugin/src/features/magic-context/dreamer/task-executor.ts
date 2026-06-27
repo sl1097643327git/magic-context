@@ -62,7 +62,7 @@ import {
     RETROSPECTIVE_SYSTEM_PROMPT,
     type RetrospectivePromptEvent,
 } from "./task-prompts";
-import { isAgenticTask } from "./task-registry";
+
 import type { DreamTaskRuntimeConfig, TaskExecOutcome, TaskExecutor } from "./task-scheduler";
 import { runVerify } from "./verify";
 
@@ -974,5 +974,3 @@ async function runAgenticTask(
     }
 }
 
-/** Re-export for the dream-timer's executor wiring. */
-export { isAgenticTask };

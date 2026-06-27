@@ -37,12 +37,6 @@ export const AGENTIC_DREAM_TASKS = ["curate", "maintain-docs"] as const;
 
 export type AgenticDreamTask = (typeof AGENTIC_DREAM_TASKS)[number];
 
-const AGENTIC_SET = new Set<string>(AGENTIC_DREAM_TASKS);
-
-export function isAgenticTask(task: DreamTaskName): task is AgenticDreamTask {
-    return AGENTIC_SET.has(task);
-}
-
 /**
  * Tasks that read-modify-write the project `memories` table (+ epoch +
  * supersede-delta rows). They SHARE one per-project "memory" lease so they

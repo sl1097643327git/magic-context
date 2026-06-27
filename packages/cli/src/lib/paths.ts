@@ -5,7 +5,6 @@ import { resolveCortexKitUserConfigPath } from "@magic-context/core/config/migra
 import {
     getMagicContextHistorianDir as getMagicContextHistorianDirCore,
     getMagicContextLogPath as getMagicContextLogPathCore,
-    getMagicContextTempDir as getMagicContextTempDirCore,
 } from "@magic-context/core/shared/data-path";
 import type { HarnessId } from "@magic-context/core/shared/harness";
 
@@ -132,23 +131,6 @@ export function getPiUserExtensionsPath(): string {
 // ============================================================================
 // Plugin / shared paths
 // ============================================================================
-
-/**
- * Per-harness temp directory the plugin writes to.
- *
- * Re-exported from the plugin so the CLI and the running plugin always agree
- * on the path. The CLI uses this with an explicit harness when running
- * `magic-context doctor --harness opencode` or `--harness pi`, because the
- * unified CLI never loads the plugin (so `setHarness()` was never called) and
- * we still need to surface the correct per-harness diagnostics.
- *
- * Layout:
- *   - `getMagicContextTempDir("opencode")` → `${tmpdir}/opencode/magic-context/`
- *   - `getMagicContextTempDir("pi")`       → `${tmpdir}/pi/magic-context/`
- */
-export function getMagicContextTempDir(harness: HarnessId): string {
-    return getMagicContextTempDirCore(harness);
-}
 
 /** Plugin log file path under the harness-scoped temp dir. */
 export function getMagicContextLogPath(harness: HarnessId): string {

@@ -1,4 +1,3 @@
-import { resolve } from "node:path";
 
 import { cleanUserText } from "../../../hooks/magic-context/read-session-chunk";
 import { hasMeaningfulUserText } from "../../../hooks/magic-context/read-session-formatting";
@@ -526,6 +525,3 @@ function parseJsonRecord(value: string): Record<string, unknown> | null {
     return parsed as Record<string, unknown>;
 }
 
-export function sameResolvedPath(a: string, b: string): boolean {
-    return resolve(a) === resolve(b);
-}

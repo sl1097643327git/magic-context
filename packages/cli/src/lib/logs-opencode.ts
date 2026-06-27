@@ -2,12 +2,8 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { type DiagnosticReport, renderDiagnosticsMarkdown } from "./diagnostics-opencode";
-import { capBodyToGithubLimit, extractRecentErrors, MAX_GITHUB_BODY_BYTES } from "./issue-body";
+import { capBodyToGithubLimit, extractRecentErrors } from "./issue-body";
 import { sanitizeConfigValue, sanitizeDiagnosticText } from "./redaction";
-
-// Re-export the shared body helpers so downstream callers (and tests) can
-// import them from the same module they get `bundleIssueReport` from.
-export { capBodyToGithubLimit, extractRecentErrors, MAX_GITHUB_BODY_BYTES };
 
 /**
  * Replace absolute home paths, usernames, and known secret-token shapes in
