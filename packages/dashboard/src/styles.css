@@ -2375,7 +2375,7 @@ select.config-input {
 /* Custom searchable model select */
 .model-select {
   position: relative;
-  max-width: 400px;
+  width: 100%;
 }
 
 .model-select-trigger {

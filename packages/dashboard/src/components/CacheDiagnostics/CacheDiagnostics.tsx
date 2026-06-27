@@ -47,7 +47,6 @@ export default function CacheDiagnostics() {
   );
   const [harnessFilter, setHarnessFilter] = createSignal<HarnessFilter>("all");
   const [hideSubagents, setHideSubagents] = createSignal(true);
-  const [subagentIds, setSubagentIds] = createSignal<Set<string>>(new Set());
   const [expandedTurns, setExpandedTurns] = createSignal<Set<string>>(new Set());
   // Window size = how many recent events to keep per session (the picker). Drives
   // both the per-session card stats and the selected session's chart/list.
@@ -121,14 +120,11 @@ export default function CacheDiagnostics() {
   const applySessionMeta = (sessions: SessionRow[]) => {
     cachedSessions = sessions;
     const names: Record<string, string> = {};
-    const subs = new Set<string>();
     for (const s of sessions) {
       const key = windowKey(s.harness, s.session_id);
       if (s.title) names[key] = s.title;
-      if (s.is_subagent) subs.add(key);
     }
     setSessionNames(names);
-    setSubagentIds(subs);
   };
 
   // The recent sessions we keep windows for: top-N by activity, non-subagent
@@ -285,9 +281,6 @@ export default function CacheDiagnostics() {
     }
   };
 
-  const isSubagent = (harness: Harness, sessionId: string) =>
-    subagentIds().has(`${harness}:${sessionId}`);
-
   // Cards: per-session stats aggregated over each session's OWN window (never a
   // shared global pool), ordered by the session table's recency. Reading
   // windowsVersion() makes this re-run when any window changes.
@@ -329,24 +322,17 @@ export default function CacheDiagnostics() {
     return rows.slice(0, visibleCardCount());
   };
 
-  // Chart/list events: the selected session's window, or — when nothing is
-  // selected ("Show all") — every recent window merged (filtered). Reading
-  // windowsVersion() ties the downstream memos to window mutations.
+  // Chart/list events: the selected session's window. There is no combined /
+  // merged "all sessions" view: a session is always selected (cards select,
+  // never deselect), so an empty result only occurs in the brief pre-selection
+  // window on cold start. Reading windowsVersion() ties the downstream memos to
+  // window mutations.
   const filteredEvents = () => {
     windowsVersion();
     const selected = selectedSession();
-    if (selected) {
-      const win = cachedWindows.get(windowKey(selected.harness, selected.sessionId));
-      return win ? win.events : [];
-    }
-    const harness = harnessFilter();
-    const all: DbCacheEvent[] = [];
-    for (const win of cachedWindows.values()) {
-      if (harness !== "all" && win.harness !== harness) continue;
-      if (hideSubagents() && isSubagent(win.harness, win.sessionId)) continue;
-      all.push(...win.events);
-    }
-    return all;
+    if (!selected) return [];
+    const win = cachedWindows.get(windowKey(selected.harness, selected.sessionId));
+    return win ? win.events : [];
   };
 
   // Ordering used for worst-severity promotion across multi-step turns.
@@ -493,10 +479,16 @@ export default function CacheDiagnostics() {
           <FilterSelect
             value={harnessFilter()}
             onChange={(value) => {
-              setHarnessFilter(value as HarnessFilter);
-              // Clear the selection → Lane B switches to the global recent
-              // window (selectSession triggers the event refetch).
-              selectSession(null);
+              const harness = value as HarnessFilter;
+              setHarnessFilter(harness);
+              // Keep a session selected (no combined view): if the current
+              // selection no longer matches the harness filter, re-select the
+              // top card of the filtered set.
+              const sel = selectedSession();
+              if (sel && harness !== "all" && sel.harness !== harness) {
+                const top = filteredStats()[0];
+                selectSession(top ? { harness: top.harness, sessionId: top.session_id } : null);
+              }
             }}
             placeholder="Harness"
             options={[
@@ -546,20 +538,6 @@ export default function CacheDiagnostics() {
             style={{ "font-size": "11px", color: "var(--text-secondary)", "margin-bottom": "8px" }}
           >
             Recent Sessions
-            <Show when={selectedSession()}>
-              <span> · </span>
-              <button
-                type="button"
-                class="btn sm"
-                style={{ padding: "1px 6px", "font-size": "10px", "margin-left": "4px" }}
-                onClick={() => {
-                  // Clear the selection → Lane B shows the global recent window.
-                  selectSession(null);
-                }}
-              >
-                Show all
-              </button>
-            </Show>
           </div>
           <div
             ref={measureCardRow}
@@ -588,13 +566,12 @@ export default function CacheDiagnostics() {
                       "text-align": "left",
                     }}
                     onClick={() => {
-                      // Toggle selection. selectSession refetches Lane B for the
-                      // new scope (the selected session, or the global recent
-                      // window when cleared) — no separate global-load path.
-                      const next = isActive()
-                        ? null
-                        : { harness: stat.harness, sessionId: stat.session_id };
-                      selectSession(next);
+                      // Select-only: clicking a card focuses that session's
+                      // window. Clicking the already-active card is a no-op
+                      // (there is no combined/merged view to toggle back to).
+                      if (!isActive()) {
+                        selectSession({ harness: stat.harness, sessionId: stat.session_id });
+                      }
                     }}
                   >
                     <div

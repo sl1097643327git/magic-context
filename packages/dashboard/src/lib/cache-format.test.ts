@@ -63,7 +63,7 @@ describe("normalizeEstimatedContextLimits", () => {
     expect(out).toBe(events);
   });
 
-  it("collapses each session to its OWN max in a merged (Show all) view", () => {
+  it("collapses each session to its OWN max (per session_id, not cross-session)", () => {
     const events = [
       ev({
         message_id: "a",
