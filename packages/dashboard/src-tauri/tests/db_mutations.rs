@@ -546,26 +546,6 @@ fn invalidate_all_memory_block_caches_clears_m0_m1_and_mutation_cursor() {
 }
 
 #[test]
-fn schema_v22_warning_is_reported_at_open() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let db_path = dir.path().join("context.db");
-    {
-        let conn = Connection::open(&db_path).expect("open db file");
-        conn.execute_batch(
-            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, description TEXT NOT NULL, applied_at INTEGER NOT NULL);
-             INSERT INTO schema_migrations (version, description, applied_at) VALUES (22, 'v22', 1);",
-        )
-        .expect("seed migrations");
-    }
-
-    let conn = db::open_readonly(&db_path).expect("open readonly");
-    assert_eq!(
-        db::dashboard_schema_warning_version(&conn).expect("warning"),
-        Some(22)
-    );
-}
-
-#[test]
 #[cfg(unix)]
 fn raw_path_git_resolution_happens_before_immediate_write_transaction() {
     use std::os::unix::fs::PermissionsExt;

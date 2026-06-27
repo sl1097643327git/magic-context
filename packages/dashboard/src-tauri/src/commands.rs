@@ -9,11 +9,6 @@ use tauri::State;
 
 // ── Memory commands ─────────────────────────────────────────
 
-#[tauri::command]
-pub fn get_dashboard_schema_warning(state: State<'_, AppState>) -> Option<i64> {
-    state.dashboard_schema_warning_version()
-}
-
 // `(async)` runs this synchronous body on a worker thread instead of the
 // webview main thread. get_projects is heavy (a GROUP BY over the full
 // opencode.db plus a recursive Pi session-dir scan), so on the main thread it

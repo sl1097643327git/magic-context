@@ -97,7 +97,6 @@ fn main() {
             commands::promote_user_memory_candidate,
             // Health
             commands::get_db_health,
-            commands::get_dashboard_schema_warning,
             // Workspaces
             commands::workspace_schema_ready,
             commands::list_workspaces,

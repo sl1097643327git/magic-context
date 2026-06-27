@@ -66,45 +66,6 @@ pub fn resolve_opencode_db_path() -> Option<PathBuf> {
     }
 }
 
-const DASHBOARD_DIR_IDENTITY_UNSAFE_SCHEMA_VERSION: i64 = 22;
-
-pub fn dashboard_schema_warning_version(conn: &Connection) -> Result<Option<i64>, rusqlite::Error> {
-    let has_migrations_table: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'",
-        [],
-        |row| row.get(0),
-    )?;
-    if has_migrations_table == 0 {
-        return Ok(None);
-    }
-
-    let version: i64 = conn.query_row(
-        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
-        [],
-        |row| row.get(0),
-    )?;
-    Ok((version >= DASHBOARD_DIR_IDENTITY_UNSAFE_SCHEMA_VERSION).then_some(version))
-}
-
-pub fn dashboard_schema_warning_version_for_path(
-    path: &PathBuf,
-) -> Result<Option<i64>, rusqlite::Error> {
-    let conn = Connection::open_with_flags(
-        path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
-    conn.pragma_update(None, "busy_timeout", 5000)?;
-    dashboard_schema_warning_version(&conn)
-}
-
-fn warn_if_dashboard_schema_requires_upgrade(conn: &Connection) {
-    if let Ok(Some(version)) = dashboard_schema_warning_version(conn) {
-        eprintln!(
-            "[dashboard] Magic Context schema v{version} uses v2 dir:* identity hashing; ensure the v2 dashboard/frontend is running before trusting dir:* project reads."
-        );
-    }
-}
-
 /// Opens a read-only connection to the database in WAL mode.
 pub fn open_readonly(path: &PathBuf) -> Result<Connection, rusqlite::Error> {
     let conn = Connection::open_with_flags(
@@ -114,7 +75,6 @@ pub fn open_readonly(path: &PathBuf) -> Result<Connection, rusqlite::Error> {
     // WAL mode is inherited from the plugin's read-write connection — no need to set it here.
     // busy_timeout is connection-local and safe on read-only connections.
     conn.pragma_update(None, "busy_timeout", 5000)?;
-    warn_if_dashboard_schema_requires_upgrade(&conn);
     Ok(conn)
 }
 
@@ -134,7 +94,6 @@ pub fn open_readwrite(path: &PathBuf) -> Result<Connection, rusqlite::Error> {
     conn.pragma_update(None, "busy_timeout", 5000)?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
-    warn_if_dashboard_schema_requires_upgrade(&conn);
     Ok(conn)
 }
 
