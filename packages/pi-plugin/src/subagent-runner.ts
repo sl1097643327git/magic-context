@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { openDatabase } from "@magic-context/core/features/magic-context/storage";
 import type { SubagentKind } from "@magic-context/core/features/magic-context/storage-subagent-invocations";
 import { recordChildInvocation } from "@magic-context/core/features/magic-context/subagent-token-capture";
+import { resolveModelRefForPi } from "@magic-context/core/shared/harness-provider-map";
 import { sessionLog } from "@magic-context/core/shared/logger";
 import type {
 	SubagentProgressEvent,
@@ -1071,7 +1072,13 @@ export function buildArgs(
 		// Pi's --models flag scopes the model picker list; it is not an ordered
 		// fallback chain. The runner implements fallback by spawning a fresh child
 		// per model, so each invocation receives exactly one --model.
-		args.push("--model", options.model);
+		//
+		// The shared config stores the canonical (OpenCode) provider form; Pi
+		// names a few auth-plugin providers differently (openai->openai-codex,
+		// google->google-antigravity). Translate to Pi's form HERE, at the only
+		// point the model reaches the spawned process, so options.model stays
+		// canonical everywhere else (accounting, logging, fallback selection).
+		args.push("--model", resolveModelRefForPi(options.model));
 	}
 
 	// Pass --thinking <level> only when explicitly configured.

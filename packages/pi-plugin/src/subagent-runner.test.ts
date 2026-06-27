@@ -182,6 +182,29 @@ describe("subagent-runner pure helpers", () => {
 		expect(args.at(-1)).toBe("summarize this session");
 	});
 
+	it("translates the canonical (OpenCode) provider to Pi's form at --model", () => {
+		// Shared config stores canonical ids; Pi names two auth-plugin providers
+		// differently. The spawned --model must carry Pi's form.
+		expect(
+			__test.buildArgs({ ...baseOptions, model: "openai/gpt-5.5" }),
+		).toEqual(expect.arrayContaining(["--model", "openai-codex/gpt-5.5"]));
+		expect(
+			__test.buildArgs({
+				...baseOptions,
+				model: "google/antigravity-gemini-3.5-flash",
+			}),
+		).toEqual(
+			expect.arrayContaining([
+				"--model",
+				"google-antigravity/antigravity-gemini-3.5-flash",
+			]),
+		);
+		// Anthropic and other providers pass through unchanged.
+		expect(
+			__test.buildArgs({ ...baseOptions, model: "anthropic/claude-opus-4-8" }),
+		).toEqual(expect.arrayContaining(["--model", "anthropic/claude-opus-4-8"]));
+	});
+
 	it("passes prompt last without a -- sentinel", () => {
 		const args = __test.buildArgs({
 			...baseOptions,
@@ -934,8 +957,10 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		expect(spawnImpl.mock.calls[0]?.[1]).toEqual(
 			expect.arrayContaining(["--model", "anthropic/primary"]),
 		);
+		// The canonical (OpenCode) `openai/` provider is translated to Pi's
+		// `openai-codex/` form at the spawn boundary.
 		expect(spawnImpl.mock.calls[1]?.[1]).toEqual(
-			expect.arrayContaining(["--model", "openai/fallback"]),
+			expect.arrayContaining(["--model", "openai-codex/fallback"]),
 		);
 	});
 

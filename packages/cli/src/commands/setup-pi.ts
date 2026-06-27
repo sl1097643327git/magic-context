@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { piModelRefToCanonical } from "@magic-context/core/shared/harness-provider-map";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
 import { writeFileAtomic } from "../lib/atomic-write";
 import {
@@ -151,14 +152,17 @@ export function writeMagicContextConfig(
             "https://raw.githubusercontent.com/cortexkit/magic-context/master/assets/magic-context.schema.json";
     }
 
+    // The Pi model picker yields Pi-native provider ids (openai-codex/...,
+    // google-antigravity/...). The shared config is canonical (OpenCode) form so
+    // OpenCode can read the same file; normalize before writing.
     config.historian = compactObject({
         ...((config.historian as Record<string, unknown> | undefined) ?? {}),
-        model: options.historianModel,
+        model: piModelRefToCanonical(options.historianModel),
         thinking_level: options.historianThinkingLevel,
     });
     const dreamer = {
         ...((config.dreamer as Record<string, unknown> | undefined) ?? {}),
-        model: options.dreamerModel,
+        model: options.dreamerModel ? piModelRefToCanonical(options.dreamerModel) : undefined,
         disable: options.dreamerEnabled ? undefined : true,
         enabled: undefined,
         // Dreamer v2 per-task schedules — only set when the user declined the
@@ -169,7 +173,10 @@ export function writeMagicContextConfig(
 
     const sidekick = {
         ...((config.sidekick as Record<string, unknown> | undefined) ?? {}),
-        model: options.sidekickEnabled ? options.sidekickModel : undefined,
+        model:
+            options.sidekickEnabled && options.sidekickModel
+                ? piModelRefToCanonical(options.sidekickModel)
+                : undefined,
         disable: options.sidekickEnabled ? undefined : true,
         enabled: undefined,
     };
