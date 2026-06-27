@@ -1,4 +1,3 @@
-import { ask } from "@tauri-apps/plugin-dialog";
 import {
   createEffect,
   createMemo,
@@ -27,6 +26,7 @@ import {
   updateNote,
   updateSessionFact,
 } from "../../lib/api";
+import { ask } from "../../lib/platform";
 import type {
   Compartment,
   Harness,

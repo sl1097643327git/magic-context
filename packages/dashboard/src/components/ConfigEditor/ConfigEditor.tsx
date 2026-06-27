@@ -1,4 +1,3 @@
-import { invoke } from "@tauri-apps/api/core";
 import {
   createEffect,
   createMemo,
@@ -10,6 +9,7 @@ import {
 } from "solid-js";
 import { getConfig, getProjectConfigs, saveConfig, saveProjectConfig } from "../../lib/api";
 import { jsoncErrorMessage, parseJsonc } from "../../lib/jsonc";
+import { invoke } from "../../lib/platform";
 import type { ProjectConfigEntry } from "../../lib/types";
 import { configSaveBlocker } from "./config-save-guard";
 import type { DreamTaskConfig } from "./DreamerTasksField";

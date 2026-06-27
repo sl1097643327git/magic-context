@@ -1,4 +1,3 @@
-import { ask } from "@tauri-apps/plugin-dialog";
 import { createEffect, createResource, createSignal, For, Show } from "solid-js";
 import {
   bulkDeleteMemory,
@@ -14,6 +13,7 @@ import {
   updateMemoryContent,
   updateMemoryStatus,
 } from "../../lib/api";
+import { ask } from "../../lib/platform";
 import type { Memory, MemoryCategory } from "../../lib/types";
 import HarnessBadge from "../HarnessBadge";
 import FilterSelect from "../shared/FilterSelect";

@@ -1,16 +1,15 @@
-import { ask, message } from "@tauri-apps/plugin-dialog";
-import { relaunch } from "@tauri-apps/plugin-process";
-import { check, type Update } from "@tauri-apps/plugin-updater";
+import { ask, checkTauriUpdate, isTauri, notify, relaunch, type TauriUpdate } from "./platform";
 
-let cachedUpdate: Update | null = null;
+let cachedUpdate: TauriUpdate | null = null;
 
 /**
  * Check if an update is available. Returns the version string if found, null otherwise.
  * Used by the background polling in App.tsx for the toast notification.
  */
 export async function checkForUpdate(): Promise<string | null> {
+  if (!isTauri()) return null;
   try {
-    const update = await check();
+    const update = await checkTauriUpdate();
     if (update) {
       cachedUpdate = update;
       return update.version;
@@ -26,6 +25,15 @@ export async function checkForUpdate(): Promise<string | null> {
  * Called when user clicks "Install & Restart" in the toast.
  */
 export async function installAndRelaunch(): Promise<void> {
+  if (!isTauri()) {
+    await notify(
+      "Serve mode cannot install updates. Update via your package manager or re-download Magic Context Dashboard.",
+      {
+        title: "Update Magic Context Dashboard",
+      },
+    );
+    return;
+  }
   if (!cachedUpdate) return;
   try {
     await cachedUpdate.download();
@@ -39,22 +47,34 @@ export async function installAndRelaunch(): Promise<void> {
 /**
  * Run a full interactive update check with dialogs.
  * Called from "Check for Updates..." tray menu item.
- * Following OpenCode's pattern: check → download → ask → install → relaunch.
+ * Following OpenCode's pattern: check, download, ask, install, relaunch.
  */
 export async function runUpdater({ alertOnFail }: { alertOnFail: boolean }) {
-  let update: Awaited<ReturnType<typeof check>> | undefined;
+  if (!isTauri()) {
+    if (alertOnFail) {
+      await notify(
+        "Serve mode cannot install updates. Update via your package manager or re-download Magic Context Dashboard.",
+        {
+          title: "Update Magic Context Dashboard",
+        },
+      );
+    }
+    return;
+  }
+
+  let update: TauriUpdate | null | undefined;
   try {
-    update = await check();
+    update = await checkTauriUpdate();
   } catch {
     if (alertOnFail) {
-      await message("Failed to check for updates", { title: "Update Check Failed" });
+      await notify("Failed to check for updates", { title: "Update Check Failed" });
     }
     return;
   }
 
   if (!update) {
     if (alertOnFail) {
-      await message("You are already using the latest version of Magic Context Dashboard", {
+      await notify("You are already using the latest version of Magic Context Dashboard", {
         title: "No Update Available",
       });
     }
@@ -65,7 +85,7 @@ export async function runUpdater({ alertOnFail }: { alertOnFail: boolean }) {
     await update.download();
   } catch {
     if (alertOnFail) {
-      await message("Failed to download update", { title: "Update Failed" });
+      await notify("Failed to download update", { title: "Update Failed" });
     }
     return;
   }
@@ -79,7 +99,7 @@ export async function runUpdater({ alertOnFail }: { alertOnFail: boolean }) {
   try {
     await update.install();
   } catch {
-    await message("Failed to install update", { title: "Update Failed" });
+    await notify("Failed to install update", { title: "Update Failed" });
     return;
   }
 

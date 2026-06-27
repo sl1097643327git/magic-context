@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use magic_context_dashboard_lib::{commands, AppState};
+use magic_context_dashboard_lib::{commands, serve, AppState};
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -20,6 +20,19 @@ fn show_main_window(app: &tauri::AppHandle) {
 }
 
 fn main() {
+    let argv: Vec<String> = std::env::args().collect();
+    match serve::parse_serve_args(&argv) {
+        Ok(Some(opts)) => {
+            serve::run(opts);
+            return;
+        }
+        Ok(None) => {}
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(2);
+        }
+    }
+
     tauri::Builder::default()
         // shell plugin removed — no shell:default capability needed
         .plugin(tauri_plugin_updater::Builder::new().build())

@@ -934,7 +934,7 @@ fn expand_probe_field(
     })
 }
 
-fn prepare_embedding_probe_options(
+pub(crate) fn prepare_embedding_probe_options(
     endpoint: String,
     model: String,
     api_key: Option<String>,

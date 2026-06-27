@@ -1,4 +1,3 @@
-import { listen } from "@tauri-apps/api/event";
 import { createResource, createSignal, ErrorBoundary, onCleanup, onMount, Show } from "solid-js";
 import CacheDiagnostics from "./components/CacheDiagnostics/CacheDiagnostics";
 import ConfigEditor from "./components/ConfigEditor/ConfigEditor";
@@ -10,6 +9,7 @@ import ProjectsGrid from "./components/Projects/ProjectsGrid";
 import UserMemories from "./components/UserMemories/UserMemories";
 import WorkspacesPanel from "./components/WorkspacesPanel/WorkspacesPanel";
 import { getAvailableModels, getAvailablePiModels, getDbHealth } from "./lib/api";
+import { initServeToken, listen } from "./lib/platform";
 import type { NavSection, ProjectCard } from "./lib/types";
 import { checkForUpdate, installAndRelaunch, runUpdater } from "./lib/updater";
 
@@ -36,6 +36,8 @@ function loadCachedPiModels(): string[] {
 }
 
 export default function App() {
+  initServeToken();
+
   const [activeSection, setActiveSection] = createSignal<NavSection>("projects");
   // Projects drill-down: null = card grid, set = that project's detail view.
   const [selectedProject, setSelectedProject] = createSignal<ProjectCard | null>(null);
