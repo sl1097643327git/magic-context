@@ -25,7 +25,9 @@ jobs:
       # #149; the manual pnpm-layout steps below are corroborating only.
       - name: Rust tests (Windows .cmd execution + pnpm candidates)
         working-directory: packages/dashboard/src-tauri
-        run: cargo test win_run_bounded_binary_executes_cmd_shim windows_candidates -- --nocapture
+        # cargo test takes a single TESTNAME filter; run the commands::tests
+        # module, which includes the #149 regression + pnpm-candidate tests.
+        run: cargo test commands::tests -- --nocapture
 
       # --- Real-world reproduction: a pnpm-global opencode, exactly like #149. ---
       - name: Confirm pnpm global .cmd shim layout (#149 mechanism 1)
