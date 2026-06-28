@@ -17,6 +17,43 @@ Grab the file for your platform from the newest `dashboard-vX.Y.Z` release. The 
 
 You can also build from source: see the dashboard `README` in the [magic-context](https://github.com/cortexkit/magic-context) repo (`packages/dashboard`).
 
+## Browser mode (`--serve`)
+
+The dashboard normally runs as a desktop window (an embedded WebView). On some Linux distributions and under WSL2 that embedded WebView fails to start (a blank window, often with `Could not create default EGL display` in the terminal) because the bundled WebKitGTK does not match the host's graphics stack. For those cases the same binary can run as a **local web server** instead, which you then open in your normal browser. No WebView is created, so the graphics issue is bypassed entirely.
+
+Run the installed binary with `--serve`:
+
+```sh
+# Linux (.deb / .rpm install puts it on PATH)
+magic-context-dashboard --serve
+
+# Linux AppImage
+./Magic_Context_Dashboard.AppImage --serve
+
+# macOS
+"/Applications/Magic Context Dashboard.app/Contents/MacOS/magic-context-dashboard" --serve
+
+# Windows
+"%LOCALAPPDATA%\Programs\Magic Context Dashboard\Magic Context Dashboard.exe" --serve
+```
+
+It prints a URL with a one-time access token in the fragment and opens it in your default browser automatically when a desktop display is present:
+
+```
+Magic Context Dashboard serve mode listening on 127.0.0.1:9077
+Open this URL: http://127.0.0.1:9077/#token=<token>
+```
+
+On a headless or WSL2 host (no display) it just prints the URL; open it in a browser yourself. Under WSL2, `localhost` is forwarded to the Windows host, so the URL works in your **Windows** browser.
+
+**Options:**
+
+- `--serve`: serve on `127.0.0.1:9077` (default).
+- `--serve <port>`: use a different port, e.g. `--serve 8080`.
+- `--host 0.0.0.0 --allow-remote`: bind all interfaces so another machine can reach it. This is **off by default and requires the explicit `--allow-remote` flag**, because the dashboard can read every session transcript, edit your config, and run model-discovery subprocesses, all over plain bearer-token HTTP. Prefer an SSH tunnel over binding to an open network.
+
+**Security:** access is gated by a per-process random token delivered in the URL fragment (never sent to the server or logged) and sent as an `Authorization: Bearer` header on each request. By default the server only binds loopback (`127.0.0.1`) and only accepts requests whose `Host` is loopback, which blocks DNS-rebinding. The token is required for every data request; the page shell itself carries no data.
+
 ## Updates
 
 Production builds use Tauri’s updater against the project release manifest (`latest.json` on the project GitHub Pages site). When an update is available, the app shows an **Update available** toast with **Install & Restart**. You can also use the tray **Check for Updates** action for an interactive download-and-install flow.
