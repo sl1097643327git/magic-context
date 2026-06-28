@@ -26,7 +26,12 @@ function readCachedPluginVersion(pluginCacheDir: string): string | undefined {
 
 export async function clearPluginCache(
     options: { force?: boolean; latestVersion?: string | null } = {},
+    deps: { remove?: (path: string) => void } = {},
 ): Promise<PluginCacheResult> {
+    // Injected remover keeps the per-root deletion failure path deterministically
+    // testable; defaults to a real recursive remove.
+    const remove =
+        deps.remove ?? ((path: string) => rmSync(path, { recursive: true, force: true }));
     const pluginCacheRoots = getOpenCodePluginCacheRoots();
     const existingRoots = pluginCacheRoots.filter((root) => existsSync(root));
 
@@ -66,24 +71,39 @@ export async function clearPluginCache(
         };
     }
 
-    try {
-        for (const entry of clearTargets) {
-            rmSync(entry.path, { recursive: true, force: true });
+    // Clear each root independently so one root's failure neither aborts the
+    // others nor mislabels an already-deleted path as the one needing manual
+    // cleanup. The error result points at the root that actually failed.
+    const cleared: typeof clearTargets = [];
+    const failed: Array<{ path: string; error: string }> = [];
+    for (const entry of clearTargets) {
+        try {
+            remove(entry.path);
+            cleared.push(entry);
+        } catch (err: unknown) {
+            failed.push({
+                path: entry.path,
+                error: err instanceof Error ? err.message : String(err),
+            });
         }
-        const firstTarget = clearTargets[0];
-        return {
-            action: "cleared",
-            path: firstTarget?.path ?? pluginCacheRoots[0] ?? "",
-            paths: clearTargets.map((entry) => entry.path),
-            cached: firstTarget?.cached,
-            latest: latestVersion,
-        };
-    } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
+    }
+
+    if (failed.length > 0) {
+        const firstFailure = failed[0];
         return {
             action: "error",
-            path: clearTargets[0]?.path ?? existingRoots[0] ?? "",
-            error: message,
+            path: firstFailure?.path ?? clearTargets[0]?.path ?? existingRoots[0] ?? "",
+            paths: failed.map((entry) => entry.path),
+            error: firstFailure?.error,
         };
     }
+
+    const firstTarget = cleared[0];
+    return {
+        action: "cleared",
+        path: firstTarget?.path ?? pluginCacheRoots[0] ?? "",
+        paths: cleared.map((entry) => entry.path),
+        cached: firstTarget?.cached,
+        latest: latestVersion,
+    };
 }

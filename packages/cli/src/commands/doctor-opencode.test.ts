@@ -253,6 +253,43 @@ describe("doctor OpenCode plugin cache", () => {
         expect(result.latest).toBeUndefined();
         expect(existsSync(pluginCachePath)).toBe(false);
     });
+
+    it("reports the actually-failed root and clears the rest when one root fails", async () => {
+        const cacheRoot = makeTempDir("mc-opencode-cache-");
+        originalXdgCacheHome = process.env.XDG_CACHE_HOME;
+        process.env.XDG_CACHE_HOME = cacheRoot;
+        const latestCachePath = createCachedOpenCodePlugin(cacheRoot, "0.26.0");
+        const versionlessCachePath = createCachedOpenCodePlugin(
+            cacheRoot,
+            "0.26.0",
+            OPENCODE_PLUGIN_NAME,
+        );
+
+        // Fail only the second root: the first must still be removed, and the
+        // error must point at the failed root, not the already-removed one.
+        const removed: string[] = [];
+        const result = await clearPluginCache(
+            { latestVersion: "0.29.1" },
+            {
+                remove: (path) => {
+                    if (path === versionlessCachePath) {
+                        throw new Error("EACCES: permission denied");
+                    }
+                    rmSync(path, { recursive: true, force: true });
+                    removed.push(path);
+                },
+            },
+        );
+
+        expect(result).toMatchObject({
+            action: "error",
+            path: versionlessCachePath,
+            paths: [versionlessCachePath],
+            error: "EACCES: permission denied",
+        });
+        expect(removed).toEqual([latestCachePath]);
+        expect(existsSync(latestCachePath)).toBe(false);
+    });
 });
 
 describe("doctor v22 backfill commands", () => {
