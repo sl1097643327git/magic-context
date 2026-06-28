@@ -1,0 +1,70 @@
+name: Windows opencode discovery probe
+
+# Manual, exploratory probe for #149 (pnpm/npm `.cmd` shim discovery on Windows).
+# It answers one question deterministically: can the dashboard's discovery path
+# execute a `.cmd` shim, or does it need `cmd /C`? CI runs with a full PATH, so
+# it CANNOT reproduce the GUI PATH-inheritance angle — only the .cmd-execution
+# mechanism, which is the part we need to confirm before fixing.
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    name: Probe .cmd shim execution
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      # --- Faithful probe: uses the dashboard crate's REAL tokio::process::Command
+      #     path via run_bounded_binary, and prints raw outcomes. ---
+      - name: Rust probe (real discovery path on a temp .cmd)
+        working-directory: packages/dashboard/src-tauri
+        run: cargo test win_cmd_shim_execution_probe -- --ignored --nocapture
+
+      # --- Real-world reproduction: a pnpm-global opencode, exactly like #149. ---
+      - name: Install opencode via pnpm (reproduce #149 layout)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          npm install -g pnpm
+          pnpm add -g opencode-ai
+          Write-Host "PNPM_HOME=$env:PNPM_HOME"
+          Write-Host "LOCALAPPDATA=$env:LOCALAPPDATA"
+          Write-Host "--- pnpm dir contents ---"
+          Get-ChildItem -Recurse -Filter "opencode*" "$env:LOCALAPPDATA\pnpm" -ErrorAction SilentlyContinue | Select-Object FullName
+          Write-Host "--- where.exe opencode ---"
+          where.exe opencode
+
+      - name: Probe the real pnpm shim (direct vs cmd /C)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          # Resolve the pnpm shim the way discovery would, then try to launch it
+          # via CreateProcessW (UseShellExecute=$false — identical to Rust's
+          # Command) vs through cmd /C.
+          $shim = (where.exe opencode 2>$null | Select-Object -First 1)
+          if (-not $shim) { Write-Host "no opencode on PATH; skipping"; exit 0 }
+          Write-Host "resolved shim: $shim"
+
+          function Try-Launch($file, $arguments) {
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $file
+            $psi.Arguments = $arguments
+            $psi.UseShellExecute = $false   # CreateProcessW path, same as Rust Command
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            try {
+              $p = [System.Diagnostics.Process]::Start($psi)
+              $out = $p.StandardOutput.ReadToEnd()
+              $p.WaitForExit()
+              return "LAUNCHED exit=$($p.ExitCode) out=$($out.Trim())"
+            } catch {
+              return "FAILED: $($_.Exception.Message)"
+            }
+          }
+
+          Write-Host "[direct] $(Try-Launch $shim '--version')"
+          Write-Host "[cmd /C] $(Try-Launch 'cmd.exe' "/C `"$shim`" --version")"

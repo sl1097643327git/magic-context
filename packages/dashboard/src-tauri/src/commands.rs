@@ -1425,6 +1425,75 @@ mod tests {
         );
     }
 
+    // Exploratory probe for #149: can the dashboard's discovery path execute a
+    // pnpm/npm `.cmd` shim at all? Rust's Command (like every CreateProcessW
+    // caller) does not run batch files directly, so a resolved `opencode.cmd`
+    // may fail to launch even when discovery FINDS it. Run on Windows CI with:
+    //   cargo test --ignored --nocapture win_cmd_shim_execution_probe
+    // It prints the raw outcomes; the fix is then asserted by a real regression
+    // test once the mechanism is confirmed.
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "manual Windows discovery probe; run with --ignored --nocapture"]
+    async fn win_cmd_shim_execution_probe() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let shim = dir.path().join("opencode.cmd");
+        std::fs::write(&shim, "@echo off\r\necho probe-opencode 9.9.9\r\n").expect("write shim");
+        let shim_str = shim.to_string_lossy().to_string();
+        println!("\n[probe] shim at: {shim_str}");
+
+        // 1. What the REAL discovery path does: run_bounded_binary(<.cmd>, ...).
+        //    It swallows the launch error, so a None here means "could not run".
+        let via_helper = run_bounded_binary(&shim_str, &["--version"]).await;
+        println!("[probe] run_bounded_binary(.cmd) -> {via_helper:?}");
+
+        // 2. Raw Command on the .cmd to expose the actual OS error kind.
+        let raw = tokio::process::Command::new(&shim_str)
+            .arg("--version")
+            .output()
+            .await;
+        match &raw {
+            Ok(o) => println!(
+                "[probe] raw Command(.cmd): launched status={} stdout={:?}",
+                o.status,
+                String::from_utf8_lossy(&o.stdout).trim()
+            ),
+            Err(e) => println!(
+                "[probe] raw Command(.cmd): FAILED kind={:?} msg={e}",
+                e.kind()
+            ),
+        }
+
+        // 3. The proposed fix path: cmd /C <.cmd>.
+        let via_cmd = tokio::process::Command::new("cmd")
+            .args(["/C", &shim_str, "--version"])
+            .output()
+            .await;
+        match &via_cmd {
+            Ok(o) => println!(
+                "[probe] cmd /C .cmd: launched status={} stdout={:?}",
+                o.status,
+                String::from_utf8_lossy(&o.stdout).trim()
+            ),
+            Err(e) => println!("[probe] cmd /C .cmd: FAILED {e}"),
+        }
+
+        // 4. where.exe sanity: CI has full PATH, so this isolates the failure to
+        //    execution rather than discovery (the GUI PATH-inheritance angle of
+        //    #149 cannot be reproduced in a shell-launched CI runner).
+        let where_out = tokio::process::Command::new("where.exe")
+            .arg("cmd")
+            .output()
+            .await;
+        println!(
+            "[probe] where.exe cmd -> {:?}",
+            where_out
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        );
+        println!("[probe] done\n");
+    }
+
     #[test]
     fn test_parse_pi_models_output_normal() {
         let input = "provider        model                           context  max-out  thinking  images\nanthropic       claude-opus-4-5                 200K     64K      yes       yes   \ncerebras        gpt-oss-120b                    131.1K   32.8K    yes       no    \ngithub-copilot  claude-opus-4.7                 144K     64K      yes       yes   \n";
