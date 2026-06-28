@@ -1,0 +1,174 @@
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { findOnPath } from "./find-on-path";
+
+/**
+ * How OpenCode is present on this machine.
+ *
+ * - `cli`: a runnable `opencode` binary exists (stock install, PATH, or a
+ *   version-manager / package-manager shim). `opencode models` /
+ *   `opencode --version` work.
+ * - `desktop`: only the OpenCode Desktop app is installed. Desktop ships NO
+ *   invocable `opencode` CLI on any OS (its server runs as a JS sidecar inside
+ *   Electron), so the CLI commands are unavailable; setup must degrade to
+ *   manual model entry rather than claim OpenCode is absent (issue #196).
+ * - `none`: no sign of OpenCode at all.
+ */
+export type OpenCodeDetection =
+    | { kind: "cli"; binary: string }
+    | { kind: "desktop"; marker: string }
+    | { kind: "none" };
+
+// Electron userData appIds the Desktop app uses per release channel. The
+// settings file under any of these is the most reliable "Desktop has run"
+// marker (the GUI app path is a weaker "installed but maybe never run" signal).
+export const OPENCODE_DESKTOP_APP_IDS = [
+    "ai.opencode.desktop",
+    "ai.opencode.desktop.beta",
+    "ai.opencode.desktop.dev",
+] as const;
+
+// electron-store settings file Desktop writes into its userData dir.
+const OPENCODE_DESKTOP_SETTINGS_FILE = "opencode.settings";
+
+/**
+ * Injectable seams so detection is hermetically testable (no host filesystem,
+ * no real `$HOME`). Defaults bind to the real OS at call time.
+ */
+export interface DetectDeps {
+    exists: (path: string) => boolean;
+    home: string;
+    platform: NodeJS.Platform;
+    env: NodeJS.ProcessEnv;
+    /** PATH lookup for a bare `opencode` (the host PATH walk). */
+    onPath: (binary: string) => string | null;
+}
+
+function defaultDeps(): DetectDeps {
+    return {
+        exists: existsSync,
+        home: homedir(),
+        platform: process.platform,
+        env: process.env,
+        onPath: findOnPath,
+    };
+}
+
+/** Stock OpenCode CLI location (~/.opencode/bin), OS-specific binary name. */
+function stockCliBinary(d: DetectDeps): string {
+    return d.platform === "win32"
+        ? join(d.home, ".opencode", "bin", "opencode.exe")
+        : join(d.home, ".opencode", "bin", "opencode");
+}
+
+/** Extra absolute CLI locations beyond stock-bin + PATH, per OS. */
+function extraCliCandidates(d: DetectDeps): string[] {
+    if (d.platform === "win32") {
+        const appdata = d.env.APPDATA ?? "";
+        const localappdata = d.env.LOCALAPPDATA ?? "";
+        const userprofile = d.env.USERPROFILE ?? d.home;
+        const out: string[] = [];
+        if (appdata) {
+            out.push(join(appdata, "npm", "opencode.cmd"));
+            out.push(join(appdata, "npm", "opencode.exe"));
+        }
+        if (localappdata) {
+            out.push(join(localappdata, "Microsoft", "WinGet", "Links", "opencode.exe"));
+            out.push(join(localappdata, "opencode", "bin", "opencode.exe"));
+        }
+        if (userprofile) {
+            out.push(join(userprofile, "scoop", "shims", "opencode.exe"));
+        }
+        return out;
+    }
+    return [
+        "/usr/local/bin/opencode",
+        "/opt/homebrew/bin/opencode",
+        join(d.home, ".local", "bin", "opencode"),
+        join(d.home, ".local", "share", "mise", "shims", "opencode"),
+        join(d.home, ".asdf", "shims", "opencode"),
+        join(d.home, ".volta", "bin", "opencode"),
+    ];
+}
+
+/** Resolve a runnable `opencode` CLI binary, or null. */
+function resolveCliBinary(d: DetectDeps): string | null {
+    const stockBin = stockCliBinary(d);
+    if (d.exists(stockBin)) return stockBin;
+    const onPath = d.onPath("opencode");
+    if (onPath) return onPath;
+    for (const candidate of extraCliCandidates(d)) {
+        if (d.exists(candidate)) return candidate;
+    }
+    return null;
+}
+
+/** XDG-aware config base used for the Linux Desktop userData location. */
+function xdgConfigHome(d: DetectDeps): string {
+    const xdg = d.env.XDG_CONFIG_HOME;
+    if (xdg && xdg.length > 0) return xdg;
+    return join(d.home, ".config");
+}
+
+/** Per-OS Electron userData dir for a given Desktop appId. */
+function desktopUserDataDir(d: DetectDeps, appId: string): string {
+    switch (d.platform) {
+        case "darwin":
+            return join(d.home, "Library", "Application Support", appId);
+        case "win32":
+            return join(d.env.APPDATA ?? join(d.home, "AppData", "Roaming"), appId);
+        default:
+            return join(xdgConfigHome(d), appId);
+    }
+}
+
+/** Per-OS GUI app install paths (secondary "installed but maybe never run"). */
+function desktopAppPaths(d: DetectDeps): string[] {
+    switch (d.platform) {
+        case "darwin":
+            return ["/Applications/OpenCode.app", join(d.home, "Applications", "OpenCode.app")];
+        case "win32": {
+            const localappdata = d.env.LOCALAPPDATA ?? join(d.home, "AppData", "Local");
+            return [join(localappdata, "Programs", "OpenCode", "OpenCode.exe")];
+        }
+        default: {
+            const dataHome =
+                d.env.XDG_DATA_HOME && d.env.XDG_DATA_HOME.length > 0
+                    ? d.env.XDG_DATA_HOME
+                    : join(d.home, ".local", "share");
+            return OPENCODE_DESKTOP_APP_IDS.map((appId) =>
+                join(dataHome, "applications", `${appId}.desktop`),
+            );
+        }
+    }
+}
+
+/** The Desktop "has run" settings markers across all release channels. */
+export function openCodeDesktopSettingsMarkers(deps?: Partial<DetectDeps>): string[] {
+    const d = { ...defaultDeps(), ...deps };
+    return OPENCODE_DESKTOP_APP_IDS.map((appId) =>
+        join(desktopUserDataDir(d, appId), OPENCODE_DESKTOP_SETTINGS_FILE),
+    );
+}
+
+/**
+ * Detect how OpenCode is installed, CLI-first then Desktop. Pure filesystem
+ * checks (no exec), so it works in sandboxes where exec is blocked. Pass `deps`
+ * to test against a virtual filesystem.
+ */
+export function detectOpenCode(deps?: Partial<DetectDeps>): OpenCodeDetection {
+    const d = { ...defaultDeps(), ...deps };
+
+    const binary = resolveCliBinary(d);
+    if (binary) return { kind: "cli", binary };
+
+    for (const appId of OPENCODE_DESKTOP_APP_IDS) {
+        const marker = join(desktopUserDataDir(d, appId), OPENCODE_DESKTOP_SETTINGS_FILE);
+        if (d.exists(marker)) return { kind: "desktop", marker };
+    }
+    for (const appPath of desktopAppPaths(d)) {
+        if (d.exists(appPath)) return { kind: "desktop", marker: appPath };
+    }
+    return { kind: "none" };
+}

@@ -25,7 +25,7 @@ import { checkLocalEmbeddingRuntime } from "../lib/embedding-runtime";
 import { bundleIssueReport } from "../lib/logs-opencode";
 import { migrateDreamerV2ForDoctor } from "../lib/migrate-dreamer-v2-doctor";
 import { migrateExperimentalPinKeyFilesForDoctor } from "../lib/migrate-experimental-doctor";
-import { isOpenCodeInstalled } from "../lib/opencode-helpers";
+import { detectOpenCode } from "../lib/opencode-detect";
 import {
     getOpenCodePluginCacheRoots,
     OPENCODE_PLUGIN_ENTRY_WITH_VERSION as PLUGIN_ENTRY_WITH_VERSION,
@@ -529,7 +529,8 @@ export async function runDoctor(
     };
 
     // 1. Check OpenCode is installed
-    if (!isOpenCodeInstalled()) {
+    const detection = detectOpenCode();
+    if (detection.kind === "none") {
         fail("OpenCode is not installed or not in PATH");
         // Help users whose binary IS on PATH but is shadowed by a wrapper
         // script or lives in a directory not searched by our detection
@@ -541,7 +542,13 @@ export async function runDoctor(
         outro("Doctor failed — install OpenCode first");
         return 1;
     }
-    pass("OpenCode installed");
+    if (detection.kind === "desktop") {
+        // Desktop ships no invocable CLI; the rest of doctor operates on config
+        // and the plugin cache (both present for a Desktop install), so continue.
+        pass("OpenCode Desktop detected (CLI not installed)");
+    } else {
+        pass("OpenCode installed");
+    }
 
     // 1b. CLI vs npm latest
     const selfVersion = getSelfVersion();

@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
 import { writeFileAtomic } from "../lib/atomic-write";
-import { isOpenCodeInstalledOnSystem } from "../lib/opencode-install";
+import { detectOpenCode } from "../lib/opencode-detect";
 import {
     getOpenCodePluginPackageJsonPaths,
     OPENCODE_PLUGIN_ENTRY_WITH_VERSION as PLUGIN_ENTRY,
@@ -27,7 +27,10 @@ export class OpenCodeAdapter implements HarnessAdapter {
     readonly pluginPackageName = PLUGIN_NAME;
 
     isInstalled(): boolean {
-        return isOpenCodeInstalledOnSystem();
+        // A Desktop-only install (no CLI on PATH) still counts as installed:
+        // OpenCode Desktop ships no invocable `opencode` binary, so a binary
+        // check alone would wrongly report OpenCode as absent.
+        return detectOpenCode().kind !== "none";
     }
 
     hasPluginEntry(): boolean {

@@ -16,7 +16,8 @@ import { parseCompartmentOutput } from "@magic-context/core/hooks/magic-context/
 import { detectConflicts } from "@magic-context/core/shared/conflict-detector";
 import { getProjectMagicContextHistorianDir } from "@magic-context/core/shared/data-path";
 import { parse as parseJsonc } from "comment-json";
-import { getOpenCodeVersion, isOpenCodeInstalled } from "./opencode-helpers";
+import { detectOpenCode } from "./opencode-detect";
+import { getOpenCodeVersion } from "./opencode-helpers";
 import {
     getOpenCodePluginCacheRoots,
     getOpenCodePluginPackageJsonPaths,
@@ -38,6 +39,7 @@ export interface DiagnosticReport {
     nodeVersion: string;
     pluginVersion: string;
     opencodeInstalled: boolean;
+    opencodeInstallKind: "cli" | "desktop" | "none";
     opencodeVersion: string | null;
     configPaths: ConfigPaths;
     opencodeConfigHasPlugin: boolean;
@@ -724,6 +726,7 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
 
     const conflictResult = detectConflicts(process.cwd());
     const recentSessions = await collectRecentSessions();
+    const openCodeInstallKind = detectOpenCode().kind;
 
     return {
         timestamp: new Date().toISOString(),
@@ -731,7 +734,8 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
         arch: process.arch,
         nodeVersion: process.version,
         pluginVersion,
-        opencodeInstalled: isOpenCodeInstalled(),
+        opencodeInstalled: openCodeInstallKind !== "none",
+        opencodeInstallKind: openCodeInstallKind,
         opencodeVersion: getOpenCodeVersion(),
         configPaths,
         opencodeConfigHasPlugin: configHasPluginEntry(opencodeConfig.value),
@@ -822,7 +826,7 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         `- Plugin: v${report.pluginVersion}`,
         `- OS: ${report.platform} ${report.arch}`,
         `- Node: ${report.nodeVersion}`,
-        `- OpenCode installed: ${report.opencodeInstalled}${report.opencodeVersion ? ` (${report.opencodeVersion})` : ""}`,
+        `- OpenCode installed: ${report.opencodeInstalled} [${report.opencodeInstallKind}]${report.opencodeVersion ? ` (${report.opencodeVersion})` : ""}`,
         `- Plugin registered in opencode config: ${report.opencodeConfigHasPlugin}`,
         `- Plugin registered in tui config: ${report.tuiConfigHasPlugin}`,
         `- magic-context.jsonc parse error: ${report.magicContextConfig.parseError ?? "none"}`,

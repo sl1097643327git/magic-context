@@ -11,11 +11,8 @@ import {
 } from "../lib/config-location-migration";
 import { runDreamerSetup } from "../lib/dreamer-setup";
 import { pickModel } from "../lib/model-picker";
-import {
-    getAvailableModels,
-    getOpenCodeVersion,
-    isOpenCodeInstalled,
-} from "../lib/opencode-helpers";
+import { detectOpenCode } from "../lib/opencode-detect";
+import { getAvailableModels, getOpenCodeVersion } from "../lib/opencode-helpers";
 import {
     OPENCODE_PLUGIN_ENTRY_WITH_VERSION as PLUGIN_ENTRY,
     OPENCODE_PLUGIN_NAME as PLUGIN_NAME,
@@ -249,8 +246,8 @@ export async function runSetup(dryRun = false): Promise<number> {
     const s = spinner();
     s.start("Checking OpenCode installation");
 
-    const installed = isOpenCodeInstalled();
-    if (!installed) {
+    const detection = detectOpenCode();
+    if (detection.kind === "none") {
         s.stop("OpenCode not found");
         const shouldContinue = await confirm(
             "OpenCode not found on PATH. Continue setup anyway?",
@@ -261,6 +258,16 @@ export async function runSetup(dryRun = false): Promise<number> {
             outro("Setup cancelled");
             return 1;
         }
+    } else if (detection.kind === "desktop") {
+        // OpenCode Desktop ships no invocable `opencode` CLI on any OS (its
+        // server runs as a JS sidecar inside Electron), so `opencode models`
+        // and `opencode --version` are unavailable. Recognize the install and
+        // fall through to manual model entry instead of claiming OpenCode is
+        // absent.
+        s.stop("OpenCode Desktop detected (CLI not installed)");
+        log.info(
+            "Model auto-discovery needs the OpenCode CLI; you will enter models manually. Install the CLI to auto-populate: https://opencode.ai",
+        );
     } else {
         const version = getOpenCodeVersion();
         s.stop(`OpenCode ${version ?? ""} detected`);
@@ -269,7 +276,10 @@ export async function runSetup(dryRun = false): Promise<number> {
     // ─── Step 2: Get available models ───────────────────
     s.start("Fetching available models");
 
-    const allModels = installed ? getAvailableModels() : [];
+    // Only the CLI can enumerate the authed/resolved model list; Desktop-only
+    // installs have no on-disk equivalent, so models stay empty and the model
+    // prompts fall back to free-text entry.
+    const allModels = detection.kind === "cli" ? getAvailableModels() : [];
     if (allModels.length > 0) {
         s.stop(`Found ${allModels.length} models`);
     } else {
