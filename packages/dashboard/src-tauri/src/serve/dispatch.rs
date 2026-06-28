@@ -666,6 +666,10 @@ pub async fn dispatch(state: &AppState, cmd: &str, args: Value) -> Result<Value,
                     .to_string(),
             )
         }
+        "get_opencode_install_state" => {
+            parse_args::<NoArgs>(args)?;
+            json(commands::get_opencode_install_state().await)
+        }
         "get_available_models" => {
             parse_args::<NoArgs>(args)?;
             json(commands::get_available_models().await)
@@ -745,7 +749,10 @@ pub async fn dispatch(state: &AppState, cmd: &str, args: Value) -> Result<Value,
 pub fn uses_subprocess_or_network_probe(cmd: &str) -> bool {
     matches!(
         cmd,
-        "get_available_models" | "get_available_pi_models" | "test_embedding_endpoint"
+        "get_opencode_install_state"
+            | "get_available_models"
+            | "get_available_pi_models"
+            | "test_embedding_endpoint"
     )
 }
 

@@ -97,6 +97,7 @@ fn main() {
             magic_context_dashboard_lib::config::write_pi_config,
             magic_context_dashboard_lib::config::pi_config_path,
             // Models
+            commands::get_opencode_install_state,
             commands::get_available_models,
             commands::get_available_pi_models,
             commands::test_embedding_endpoint,

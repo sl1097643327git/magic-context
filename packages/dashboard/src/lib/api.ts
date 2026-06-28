@@ -15,6 +15,7 @@ import type {
   Memory,
   MemoryStats,
   Note,
+  OpencodeInstallState,
   PagedSessions,
   Primer,
   PrimerCandidate,
@@ -404,6 +405,10 @@ export async function getProjectConfigs(): Promise<import("./types").ProjectConf
 
 export async function saveProjectConfig(projectPath: string, content: string): Promise<void> {
   return invoke("save_project_config", { projectPath, content });
+}
+
+export async function getOpencodeInstallState(): Promise<OpencodeInstallState> {
+  return invoke("get_opencode_install_state");
 }
 
 export async function getAvailableModels(): Promise<string[]> {

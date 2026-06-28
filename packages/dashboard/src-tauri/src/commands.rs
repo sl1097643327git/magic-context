@@ -559,6 +559,189 @@ pub fn save_project_config(project_path: String, content: String) -> Result<(), 
 
 // ── Model commands ──────────────────────────────────────────
 
+const OPENCODE_DESKTOP_APP_IDS: [&str; 3] = [
+    "ai.opencode.desktop",
+    "ai.opencode.desktop.beta",
+    "ai.opencode.desktop.dev",
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DesktopPlatform {
+    Macos,
+    Windows,
+    Linux,
+}
+
+#[derive(Clone, Debug)]
+struct OpencodeDesktopEnv {
+    home: Option<PathBuf>,
+    appdata: Option<PathBuf>,
+    localappdata: Option<PathBuf>,
+    xdg_config_home: Option<PathBuf>,
+    xdg_data_home: Option<PathBuf>,
+    mac_system_applications: PathBuf,
+}
+
+impl OpencodeDesktopEnv {
+    fn from_process() -> Self {
+        Self {
+            home: env_path("HOME"),
+            appdata: env_path("APPDATA"),
+            localappdata: env_path("LOCALAPPDATA"),
+            xdg_config_home: env_path("XDG_CONFIG_HOME"),
+            xdg_data_home: env_path("XDG_DATA_HOME"),
+            mac_system_applications: PathBuf::from("/Applications"),
+        }
+    }
+}
+
+fn env_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name).and_then(|value| {
+        if value.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(value))
+        }
+    })
+}
+
+fn current_desktop_platform() -> DesktopPlatform {
+    if cfg!(target_os = "macos") {
+        DesktopPlatform::Macos
+    } else if cfg!(target_os = "windows") {
+        DesktopPlatform::Windows
+    } else {
+        DesktopPlatform::Linux
+    }
+}
+
+fn opencode_cli_candidates() -> Vec<String> {
+    // GUI apps do not inherit every shell PATH, so keep this list in one place
+    // for model discovery and install-state detection.
+    if cfg!(target_os = "windows") {
+        let userprofile = std::env::var("USERPROFILE").unwrap_or_default();
+        let appdata = std::env::var("APPDATA").unwrap_or_default();
+        let localappdata = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        let mut list = Vec::new();
+        if !userprofile.is_empty() {
+            list.push(format!("{}\\.opencode\\bin\\opencode.exe", userprofile));
+        }
+        if !appdata.is_empty() {
+            list.push(format!("{}\\npm\\opencode.cmd", appdata));
+            list.push(format!("{}\\npm\\opencode.exe", appdata));
+        }
+        if !localappdata.is_empty() {
+            list.push(format!(
+                "{}\\Microsoft\\WinGet\\Links\\opencode.exe",
+                localappdata
+            ));
+        }
+        if !userprofile.is_empty() {
+            list.push(format!("{}\\scoop\\shims\\opencode.exe", userprofile));
+        }
+        if !localappdata.is_empty() {
+            list.push(format!("{}\\opencode\\bin\\opencode.exe", localappdata));
+        }
+        list.push("opencode".to_string());
+        list.push("opencode.exe".to_string());
+        list
+    } else {
+        let home = std::env::var("HOME").unwrap_or_default();
+        vec![
+            format!("{}/.opencode/bin/opencode", home),
+            "opencode".to_string(),
+            format!("{}/.local/bin/opencode", home),
+            "/usr/local/bin/opencode".to_string(),
+            "/opt/homebrew/bin/opencode".to_string(),
+            format!("{}/.local/share/mise/shims/opencode", home),
+            format!("{}/.asdf/shims/opencode", home),
+            format!("{}/.volta/bin/opencode", home),
+        ]
+    }
+}
+
+fn opencode_desktop_settings_paths(
+    platform: DesktopPlatform,
+    env: &OpencodeDesktopEnv,
+) -> Vec<PathBuf> {
+    let Some(user_data_dir) = (match platform {
+        DesktopPlatform::Macos => env
+            .home
+            .as_ref()
+            .map(|home| home.join("Library").join("Application Support")),
+        DesktopPlatform::Windows => env.appdata.clone(),
+        DesktopPlatform::Linux => env
+            .xdg_config_home
+            .clone()
+            .or_else(|| env.home.as_ref().map(|home| home.join(".config"))),
+    }) else {
+        return Vec::new();
+    };
+
+    OPENCODE_DESKTOP_APP_IDS
+        .iter()
+        .map(|app_id| user_data_dir.join(app_id).join("opencode.settings"))
+        .collect()
+}
+
+fn opencode_desktop_app_paths(platform: DesktopPlatform, env: &OpencodeDesktopEnv) -> Vec<PathBuf> {
+    match platform {
+        DesktopPlatform::Macos => {
+            let mut paths = vec![env.mac_system_applications.join("OpenCode.app")];
+            if let Some(home) = &env.home {
+                paths.push(home.join("Applications").join("OpenCode.app"));
+            }
+            paths
+        }
+        DesktopPlatform::Windows => env
+            .localappdata
+            .as_ref()
+            .map(|localappdata| {
+                vec![localappdata
+                    .join("Programs")
+                    .join("OpenCode")
+                    .join("OpenCode.exe")]
+            })
+            .unwrap_or_default(),
+        DesktopPlatform::Linux => {
+            let Some(data_dir) = env.xdg_data_home.clone().or_else(|| {
+                env.home
+                    .as_ref()
+                    .map(|home| home.join(".local").join("share"))
+            }) else {
+                return Vec::new();
+            };
+            OPENCODE_DESKTOP_APP_IDS
+                .iter()
+                .map(|app_id| {
+                    data_dir
+                        .join("applications")
+                        .join(format!("{app_id}.desktop"))
+                })
+                .collect()
+        }
+    }
+}
+
+fn opencode_desktop_detected_for_env(platform: DesktopPlatform, env: &OpencodeDesktopEnv) -> bool {
+    // OpenCode Desktop runs its server as an Electron sidecar, so a Desktop-only
+    // install has no CLI for model discovery. These canonical markers are shared
+    // with packages/cli/src/lib/opencode-detect.ts and must stay in lockstep.
+    opencode_desktop_settings_paths(platform, env)
+        .iter()
+        .any(|path| path.is_file())
+        || opencode_desktop_app_paths(platform, env)
+            .iter()
+            .any(|path| path.exists())
+}
+
+fn opencode_desktop_detected() -> bool {
+    opencode_desktop_detected_for_env(
+        current_desktop_platform(),
+        &OpencodeDesktopEnv::from_process(),
+    )
+}
+
 /// Upper bound for model-discovery subprocesses so a hung CLI shim cannot block
 /// the dashboard worker thread indefinitely.
 const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
@@ -646,62 +829,40 @@ async fn resolve_via_where(_tool: &str) -> Option<String> {
     None
 }
 
+async fn opencode_cli_available() -> bool {
+    for bin in opencode_cli_candidates() {
+        if run_bounded_binary(&bin, &["--version"]).await.is_some() {
+            return true;
+        }
+    }
+
+    if cfg!(target_os = "windows") {
+        if let Some(bin) = resolve_via_where("opencode").await {
+            if run_bounded_binary(&bin, &["--version"]).await.is_some() {
+                return true;
+            }
+        }
+    }
+
+    run_via_login_shell("opencode --version".to_string())
+        .await
+        .is_some()
+}
+
+#[tauri::command]
+pub async fn get_opencode_install_state() -> String {
+    if opencode_cli_available().await {
+        "cli".to_string()
+    } else if opencode_desktop_detected() {
+        "desktop".to_string()
+    } else {
+        "none".to_string()
+    }
+}
+
 #[tauri::command]
 pub async fn get_available_models() -> Vec<String> {
-    // GUI apps on macOS don't inherit shell PATH; try common locations.
-    //
-    // The first candidate must be `~/.opencode/bin/opencode` because that's
-    // the path the official OpenCode installer (`curl -fsSL ... | bash`)
-    // writes to and it's NOT on the GUI launcher's $PATH on macOS. Without
-    // this candidate, every dashboard model dropdown silently returned
-    // empty for users with a stock OpenCode install — the historian /
-    // dreamer / sidekick fallback "Add fallback model" dropdown would show
-    // "No models found" because `props.models = []`, so `grouped()`
-    // returned no groups and the `<For fallback>` rendered.
-    //
-    // Additional fallback paths cover pre-CI installs, custom installs,
-    // Homebrew on Intel + ARM, and shell-PATH discovery for users who
-    // launched OpenCode from a terminal.
-    let candidates = if cfg!(target_os = "windows") {
-        let userprofile = std::env::var("USERPROFILE").unwrap_or_default();
-        let appdata = std::env::var("APPDATA").unwrap_or_default();
-        let localappdata = std::env::var("LOCALAPPDATA").unwrap_or_default();
-        let mut list = Vec::new();
-        if !userprofile.is_empty() {
-            list.push(format!("{}\\.opencode\\bin\\opencode.exe", userprofile));
-        }
-        if !appdata.is_empty() {
-            list.push(format!("{}\\npm\\opencode.cmd", appdata));
-            list.push(format!("{}\\npm\\opencode.exe", appdata));
-        }
-        if !localappdata.is_empty() {
-            list.push(format!(
-                "{}\\Microsoft\\WinGet\\Links\\opencode.exe",
-                localappdata
-            ));
-        }
-        if !userprofile.is_empty() {
-            list.push(format!("{}\\scoop\\shims\\opencode.exe", userprofile));
-        }
-        if !localappdata.is_empty() {
-            list.push(format!("{}\\opencode\\bin\\opencode.exe", localappdata));
-        }
-        list.push("opencode".to_string());
-        list.push("opencode.exe".to_string());
-        list
-    } else {
-        let home = std::env::var("HOME").unwrap_or_default();
-        vec![
-            format!("{}/.opencode/bin/opencode", home),
-            "opencode".to_string(),
-            format!("{}/.local/bin/opencode", home),
-            "/usr/local/bin/opencode".to_string(),
-            "/opt/homebrew/bin/opencode".to_string(),
-            format!("{}/.local/share/mise/shims/opencode", home),
-            format!("{}/.asdf/shims/opencode", home),
-            format!("{}/.volta/bin/opencode", home),
-        ]
-    };
+    let candidates = opencode_cli_candidates();
 
     let parse = |text: &str| -> Vec<String> {
         text.lines()
@@ -1089,11 +1250,118 @@ pub fn get_db_health(state: State<'_, AppState>) -> db::DbHealth {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_pi_models_output, pick_first_line, prepare_embedding_probe_options,
-        run_bounded_binary,
+        opencode_desktop_detected_for_env, parse_pi_models_output, pick_first_line,
+        prepare_embedding_probe_options, run_bounded_binary, DesktopPlatform, OpencodeDesktopEnv,
+        OPENCODE_DESKTOP_APP_IDS,
     };
     use crate::embedding_probe::EmbeddingProbeOutcome;
+    use std::path::{Path, PathBuf};
     use std::time::Instant;
+
+    fn test_desktop_env(root: &Path) -> OpencodeDesktopEnv {
+        OpencodeDesktopEnv {
+            home: Some(root.join("home")),
+            appdata: Some(root.join("appdata")),
+            localappdata: Some(root.join("localappdata")),
+            xdg_config_home: Some(root.join("xdg_config")),
+            xdg_data_home: Some(root.join("xdg_data")),
+            mac_system_applications: root.join("system_applications"),
+        }
+    }
+
+    fn write_file(path: PathBuf) {
+        let parent = path.parent().expect("test path has parent");
+        std::fs::create_dir_all(parent).expect("create marker parent");
+        std::fs::write(path, "{}").expect("write marker");
+    }
+
+    #[test]
+    fn opencode_desktop_app_ids_match_canonical_markers() {
+        assert_eq!(
+            OPENCODE_DESKTOP_APP_IDS,
+            [
+                "ai.opencode.desktop",
+                "ai.opencode.desktop.beta",
+                "ai.opencode.desktop.dev",
+            ]
+        );
+    }
+
+    #[test]
+    fn opencode_desktop_settings_marker_detects_each_channel() {
+        for app_id in OPENCODE_DESKTOP_APP_IDS {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let env = test_desktop_env(dir.path());
+            write_file(
+                env.xdg_config_home
+                    .as_ref()
+                    .expect("xdg config")
+                    .join(app_id)
+                    .join("opencode.settings"),
+            );
+
+            assert!(opencode_desktop_detected_for_env(
+                DesktopPlatform::Linux,
+                &env
+            ));
+        }
+    }
+
+    #[test]
+    fn opencode_desktop_settings_marker_uses_home_and_appdata_roots() {
+        let mac_dir = tempfile::tempdir().expect("mac tempdir");
+        let mac_env = test_desktop_env(mac_dir.path());
+        write_file(
+            mac_env
+                .home
+                .as_ref()
+                .expect("home")
+                .join("Library")
+                .join("Application Support")
+                .join(OPENCODE_DESKTOP_APP_IDS[0])
+                .join("opencode.settings"),
+        );
+        assert!(opencode_desktop_detected_for_env(
+            DesktopPlatform::Macos,
+            &mac_env
+        ));
+
+        let win_dir = tempfile::tempdir().expect("windows tempdir");
+        let win_env = test_desktop_env(win_dir.path());
+        write_file(
+            win_env
+                .appdata
+                .as_ref()
+                .expect("appdata")
+                .join(OPENCODE_DESKTOP_APP_IDS[0])
+                .join("opencode.settings"),
+        );
+        assert!(opencode_desktop_detected_for_env(
+            DesktopPlatform::Windows,
+            &win_env
+        ));
+    }
+
+    #[test]
+    fn opencode_core_config_dir_is_not_a_desktop_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(home.join(".config").join("opencode"))
+            .expect("create core config dir");
+        let env = OpencodeDesktopEnv {
+            home: Some(home),
+            appdata: Some(dir.path().join("appdata")),
+            localappdata: Some(dir.path().join("localappdata")),
+            xdg_config_home: None,
+            xdg_data_home: Some(dir.path().join("xdg_data")),
+            mac_system_applications: dir.path().join("system_applications"),
+        };
+
+        assert!(!opencode_desktop_detected_for_env(
+            DesktopPlatform::Linux,
+            &env
+        ));
+    }
 
     #[tokio::test]
     async fn run_bounded_binary_times_out_on_sleep() {

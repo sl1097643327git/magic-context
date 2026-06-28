@@ -10,7 +10,7 @@ import {
 import { getConfig, getProjectConfigs, saveConfig, saveProjectConfig } from "../../lib/api";
 import { jsoncErrorMessage, parseJsonc } from "../../lib/jsonc";
 import { invoke } from "../../lib/platform";
-import type { ProjectConfigEntry } from "../../lib/types";
+import type { OpencodeInstallState, ProjectConfigEntry } from "../../lib/types";
 import { configSaveBlocker } from "./config-save-guard";
 import type { DreamTaskConfig } from "./DreamerTasksField";
 import DreamerTasksField from "./DreamerTasksField";
@@ -245,6 +245,7 @@ function ConfigForm(props: {
   onSave: (content: string) => void | Promise<void>;
   saveStatus: string | null;
   models: string[];
+  opencodeInstallState: OpencodeInstallState;
   /** "user" or "project". Project configs are untrusted repository input: the
    *  runtime strips embedding endpoint/provider from them, and the Test
    *  Connection probe refuses project scope (it would expand the repo's
@@ -347,6 +348,19 @@ function ConfigForm(props: {
     }
   }
   const models = () => props.models;
+  const showManualModelHint = () =>
+    props.opencodeInstallState === "desktop" || models().length === 0;
+  const manualModelHint = () => (
+    <Show when={showManualModelHint()}>
+      <span
+        class="config-field-desc"
+        style={{ color: "var(--text-muted)", "font-style": "italic" }}
+      >
+        OpenCode Desktop detected, CLI not installed. Type a model id manually, or install the
+        OpenCode CLI to auto-populate models.
+      </span>
+    </Show>
+  );
 
   const parsedState = createMemo(() => parseConfigContent(props.content));
   const parsed = createMemo(() => parsedState().value);
@@ -891,6 +905,7 @@ function ConfigForm(props: {
                               <span class="config-field-label">Model</span>
                             </div>
                             <span class="config-field-desc">Primary model for historian agent</span>
+                            {manualModelHint()}
                             <ModelSelect
                               models={models() ?? []}
                               value={
@@ -1189,6 +1204,7 @@ function ConfigForm(props: {
                     <span class="config-field-label">Model</span>
                   </div>
                   <span class="config-field-desc">Primary model for dreamer agent</span>
+                  {manualModelHint()}
                   <ModelSelect
                     models={models() ?? []}
                     value={getNestedValue(formData(), "dreamer.model") as string | undefined}
@@ -1322,6 +1338,7 @@ function ConfigForm(props: {
                   <span class="config-field-label">Model</span>
                 </div>
                 <span class="config-field-desc">Primary model for sidekick agent</span>
+                {manualModelHint()}
                 <ModelSelect
                   models={models() ?? []}
                   value={getNestedValue(formData(), "sidekick.model") as string | undefined}
@@ -1944,6 +1961,7 @@ function ProjectConfigDetail(props: {
   entry: ProjectConfigEntry;
   onBack: () => void;
   models: string[];
+  opencodeInstallState: OpencodeInstallState;
 }) {
   const configPath = () => props.entry.config_path;
 
@@ -2004,6 +2022,7 @@ function ProjectConfigDetail(props: {
               onSave={handleSave}
               saveStatus={saveStatus()}
               models={props.models}
+              opencodeInstallState={props.opencodeInstallState}
               scope="project"
             />
           }
@@ -2017,7 +2036,11 @@ function ProjectConfigDetail(props: {
 
 // ── Main ConfigEditor ───────────────────────────────────────
 
-export default function ConfigEditor(props: { models: string[]; piModels: string[] }) {
+export default function ConfigEditor(props: {
+  models: string[];
+  piModels: string[];
+  opencodeInstallState: OpencodeInstallState;
+}) {
   const [configTarget, setConfigTarget] = createSignal<ConfigTarget>(loadConfigTarget());
   const [userConfig, { refetch: refetchUser }] = createResource(() => getConfig("user"));
   const [projectConfigs, { refetch: refetchProjects }] = createResource(getProjectConfigs);
@@ -2150,6 +2173,7 @@ export default function ConfigEditor(props: { models: string[]; piModels: string
                     onSave={handleUserSave}
                     saveStatus={saveStatus()}
                     models={effectiveModels()}
+                    opencodeInstallState={props.opencodeInstallState}
                     scope="user"
                   />
                 }
@@ -2206,6 +2230,7 @@ export default function ConfigEditor(props: { models: string[]; piModels: string
                 entry={proj()}
                 onBack={() => setSelectedProject(null)}
                 models={props.models}
+                opencodeInstallState={props.opencodeInstallState}
               />
             )}
           </Show>

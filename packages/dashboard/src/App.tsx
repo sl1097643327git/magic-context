@@ -8,9 +8,14 @@ import ProjectDetail from "./components/Projects/ProjectDetail";
 import ProjectsGrid from "./components/Projects/ProjectsGrid";
 import UserMemories from "./components/UserMemories/UserMemories";
 import WorkspacesPanel from "./components/WorkspacesPanel/WorkspacesPanel";
-import { getAvailableModels, getAvailablePiModels, getDbHealth } from "./lib/api";
+import {
+  getAvailableModels,
+  getAvailablePiModels,
+  getDbHealth,
+  getOpencodeInstallState,
+} from "./lib/api";
 import { initServeToken, listen } from "./lib/platform";
-import type { NavSection, ProjectCard } from "./lib/types";
+import type { NavSection, OpencodeInstallState, ProjectCard } from "./lib/types";
 import { checkForUpdate, installAndRelaunch, runUpdater } from "./lib/updater";
 
 const MODELS_CACHE_KEY = "mc_dashboard_models_cache";
@@ -49,12 +54,20 @@ export default function App() {
   const [health] = createResource(getDbHealth);
   const [availableModels, setAvailableModels] = createSignal<string[]>(loadCachedModels());
   const [availablePiModels, setAvailablePiModels] = createSignal<string[]>(loadCachedPiModels());
+  const [opencodeInstallState, setOpencodeInstallState] =
+    createSignal<OpencodeInstallState>("none");
   const [updateVersion, setUpdateVersion] = createSignal<string | null>(null);
   const [updateInstalling, setUpdateInstalling] = createSignal(false);
   const [updateDismissed, setUpdateDismissed] = createSignal(false);
 
   // Background model refresh
   onMount(() => {
+    getOpencodeInstallState()
+      .then(setOpencodeInstallState)
+      .catch(() => {
+        setOpencodeInstallState("none");
+      });
+
     getAvailableModels()
       .then((fresh) => {
         setAvailableModels(fresh);
@@ -177,7 +190,11 @@ export default function App() {
             <UserMemories />
           </Show>
           <Show when={activeSection() === "config"}>
-            <ConfigEditor models={availableModels()} piModels={availablePiModels()} />
+            <ConfigEditor
+              models={availableModels()}
+              piModels={availablePiModels()}
+              opencodeInstallState={opencodeInstallState()}
+            />
           </Show>
           <Show when={activeSection() === "logs"}>
             <LogViewer />

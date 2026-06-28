@@ -40,9 +40,12 @@ export default function ModelSelect(props: ModelSelectProps) {
     return Object.entries(groups).sort(([a], [b]) => a.localeCompare(b));
   });
 
+  const canUseFreeText = () => props.models.length === 0;
+  const typedModel = () => search().trim();
+
   const openDropdown = () => {
     setOpen(true);
-    setSearch("");
+    setSearch(canUseFreeText() ? valueStr() : "");
     startListening();
     requestAnimationFrame(() => inputRef?.focus());
   };
@@ -58,6 +61,12 @@ export default function ModelSelect(props: ModelSelectProps) {
     props.onChange("");
     setOpen(false);
     stopListening();
+  };
+
+  const commitTypedModel = () => {
+    if (!canUseFreeText()) return;
+    const model = typedModel();
+    if (model) selectModel(model);
   };
 
   // Memoize a normalized string view of props.value so JSX reads can't
@@ -80,6 +89,11 @@ export default function ModelSelect(props: ModelSelectProps) {
     return slash >= 0 ? model.substring(0, slash) : "";
   };
 
+  const modelName = (model: string) => {
+    const slash = model.indexOf("/");
+    return slash >= 0 ? model.substring(slash + 1) : model;
+  };
+
   return (
     <div class="model-select" ref={containerRef}>
       {/* Trigger button */}
@@ -87,8 +101,10 @@ export default function ModelSelect(props: ModelSelectProps) {
         <span class={`model-select-value ${!valueStr() ? "placeholder" : ""}`}>
           {valueStr() ? (
             <>
-              <span class="model-select-provider">{providerOf(valueStr())}/</span>
-              {valueStr().substring(valueStr().indexOf("/") + 1)}
+              <Show when={providerOf(valueStr())}>
+                {(provider) => <span class="model-select-provider">{provider()}/</span>}
+              </Show>
+              {modelName(valueStr())}
             </>
           ) : (
             displayValue()
@@ -118,36 +134,62 @@ export default function ModelSelect(props: ModelSelectProps) {
               ref={inputRef}
               class="model-select-search"
               type="text"
-              placeholder="Search models..."
+              placeholder={canUseFreeText() ? "Type model id..." : "Search models..."}
               value={search()}
               onInput={(e) => setSearch(e.currentTarget.value)}
               onKeyDown={(e) => {
                 if (e.key === "Escape") {
                   setOpen(false);
                   stopListening();
+                } else if (e.key === "Enter" && canUseFreeText()) {
+                  e.preventDefault();
+                  commitTypedModel();
                 }
               }}
             />
           </div>
           <div class="model-select-options">
-            <For each={grouped()} fallback={<div class="model-select-empty">No models found</div>}>
-              {([provider, models]) => (
-                <div class="model-select-group">
-                  <div class="model-select-group-label">{provider}</div>
-                  <For each={models}>
-                    {(model) => (
-                      <button
-                        class={`model-select-option ${props.value === model ? "active" : ""}`}
-                        onClick={() => selectModel(model)}
-                        type="button"
-                      >
-                        {model.substring(model.indexOf("/") + 1)}
-                      </button>
-                    )}
-                  </For>
-                </div>
-              )}
-            </For>
+            <Show
+              when={canUseFreeText()}
+              fallback={
+                <For
+                  each={grouped()}
+                  fallback={<div class="model-select-empty">No models found</div>}
+                >
+                  {([provider, models]) => (
+                    <div class="model-select-group">
+                      <div class="model-select-group-label">{provider}</div>
+                      <For each={models}>
+                        {(model) => (
+                          <button
+                            class={`model-select-option ${props.value === model ? "active" : ""}`}
+                            onClick={() => selectModel(model)}
+                            type="button"
+                          >
+                            {modelName(model)}
+                          </button>
+                        )}
+                      </For>
+                    </div>
+                  )}
+                </For>
+              }
+            >
+              <Show
+                when={typedModel()}
+                fallback={<div class="model-select-empty">Type a model id and press Enter</div>}
+              >
+                {(model) => (
+                  <button
+                    class={`model-select-option ${props.value === model() ? "active" : ""}`}
+                    onClick={() => selectModel(model())}
+                    type="button"
+                  >
+                    Use "{model()}"
+                  </button>
+                )}
+              </Show>
+            </Show>
           </div>
         </div>
       </Show>

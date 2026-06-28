@@ -455,6 +455,8 @@ export interface ConfigFile {
   error?: string | null;
 }
 
+export type OpencodeInstallState = "cli" | "desktop" | "none";
+
 export interface ProjectConfigEntry {
   project_name: string;
   worktree: string;
