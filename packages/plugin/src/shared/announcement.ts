@@ -24,14 +24,14 @@ import { getMagicContextStorageDir } from "./data-path";
  * Bump only when there are user-visible changes worth a startup dialog.
  * Does NOT need to match the published package version.
  */
-export const ANNOUNCEMENT_VERSION = "0.30.1";
+export const ANNOUNCEMENT_VERSION = "0.30.2";
 
 /**
  * Short, user-facing bullet strings. Keep each line ~80 chars or shorter so the
  * TUI dialog renders cleanly without horizontal scroll on a typical terminal.
  */
 export const ANNOUNCEMENT_FEATURES: ReadonlyArray<string> = [
-    "Local embeddings work on OpenCode Desktop again (#195): /ctx-embed no longer fails with 'Unsupported device: cpu' on the Desktop app.",
+    "Fixed high idle CPU in the OpenCode TUI sidebar (#200): OpenTUI is pinned to match OpenCode 1.17.11, so the sidebar no longer burns CPU when idle.",
 ];
 
 /**
