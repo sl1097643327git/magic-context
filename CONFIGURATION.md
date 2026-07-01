@@ -109,6 +109,8 @@ Higher-tier models with longer cache windows benefit from a longer TTL. Setting 
 | `historian_timeout_ms` | `number` | `300000` | Timeout per historian call (ms). |
 | `history_budget_percentage` | `number` (0.05–0.5) | `0.15` | Fraction of usable context (`context_limit × execute_threshold`) reserved for the history block. Triggers compression when exceeded. |
 | `commit_cluster_trigger` | `object` | See below | Controls the commit-cluster historian trigger. |
+| `system_prompt_injection` | `object` | See below | Controls whether and where Magic Context augments the system prompt; lets you opt specific agents out. |
+| `keep_subagents` | `boolean` | `false` | Debug: keep the child sessions Magic Context spawns for its own subagents (historian, dreamer, sidekick, memory-migration) instead of deleting them on success, so their full transcript stays in the host session store for inspection. Kept sessions accumulate until cleared manually — leave `false` for normal use. |
 | `sqlite` | `object` | See below | Per-connection SQLite tuning for Magic Context's own `context.db`. |
 
 ### `language`
@@ -144,6 +146,22 @@ A **commit cluster** is a distinct work phase where the agent made one or more g
 | `min_clusters` | `number` | `3` | Minimum number of commit clusters in the unsummarized tail before historian fires. The tail must also contain at least one `trigger_budget` worth of tokens, where `trigger_budget = main_context × execute_threshold × 5%` clamped to `[5K, 50K]`. |
 
 Set `enabled: false` to disable this trigger entirely and rely only on pressure-based and tail-size triggers for historian.
+
+### `system_prompt_injection`
+
+Controls whether and where Magic Context augments the system prompt (its guidance block plus the surrounding project-docs and user-profile blocks). OpenCode's internal hidden agents — `title`, `summary`, and `compaction` — are always skipped automatically; this section lets you opt out additional agents, or disable injection globally.
+
+```jsonc
+{
+  "system_prompt_injection": {
+    "enabled": true,                               // default: true
+    "skip_signatures": ["<!-- magic-context: skip -->"]  // default
+  }
+}
+```
+
+- **`enabled`** — when `false`, NO injection happens for ANY agent. Global escape hatch; Magic Context's transform and compaction still run, but nothing is added to the system prompt.
+- **`skip_signatures`** — substring opt-out list. If an agent's system prompt contains any of these strings, Magic Context skips ALL injection for that call. Use it to exempt a specific custom agent by putting the signature (e.g. the default `<!-- magic-context: skip -->`) in that agent's prompt.
 
 ### `sqlite`
 
