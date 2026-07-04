@@ -95,10 +95,10 @@ function compactTokens(value: number): string {
 
 function relativeTime(ms: number): string {
     const diff = Date.now() - ms
-    if (diff < 60_000) return "just now"
-    if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`
-    if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`
-    return `${Math.floor(diff / 86_400_000)}d ago`
+    if (diff < 60_000) return "刚刚"
+    if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}分钟前"
+    if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}小时前"
+    return `${Math.floor(diff / 86_400_000)}天前"
 }
 
 // Text progress bar, e.g. [██████░░░░] for the recomp/upgrade live indicator.
@@ -157,7 +157,7 @@ const TokenBreakdown = (props: {
                 key: "sys",
                 tokens: s.systemPromptTokens,
                 color: COLORS.system,
-                label: "System",
+                label: "系统",
             })
         }
 
@@ -167,7 +167,7 @@ const TokenBreakdown = (props: {
                 key: "docs",
                 tokens: s.docsTokens,
                 color: COLORS.docs,
-                label: "Docs",
+                label: "文档",
             })
         }
 
@@ -177,7 +177,7 @@ const TokenBreakdown = (props: {
                 key: "comp",
                 tokens: s.compartmentTokens,
                 color: COLORS.compartments,
-                label: "Compartments",
+                label: "隔间",
             })
         }
 
@@ -187,7 +187,7 @@ const TokenBreakdown = (props: {
                 key: "fact",
                 tokens: s.factTokens,
                 color: COLORS.facts,
-                label: "Facts",
+                label: "事实",
             })
         }
 
@@ -197,7 +197,7 @@ const TokenBreakdown = (props: {
                 key: "mem",
                 tokens: s.memoryTokens,
                 color: COLORS.memories,
-                label: "Memories",
+                label: "记忆",
             })
         }
 
@@ -207,7 +207,7 @@ const TokenBreakdown = (props: {
                 key: "profile",
                 tokens: s.profileTokens,
                 color: COLORS.profile,
-                label: "User Profile",
+                label: "用户档案",
             })
         }
 
@@ -227,7 +227,7 @@ const TokenBreakdown = (props: {
             key: "conv",
             tokens: s.conversationTokens,
             color: COLORS.conversation,
-            label: "Conversation",
+            label: "对话",
         })
 
         // Tool Calls = tool_use/tool_result/tool/tool-invocation parts in messages
@@ -237,7 +237,7 @@ const TokenBreakdown = (props: {
                 key: "tool-calls",
                 tokens: s.toolCallTokens,
                 color: COLORS.toolCalls,
-                label: "Tool Calls",
+                label: "工具调用",
             })
         }
 
@@ -250,7 +250,7 @@ const TokenBreakdown = (props: {
                 key: "tool-defs",
                 tokens: s.toolDefinitionTokens,
                 color: COLORS.toolDefs,
-                label: "Tool Defs",
+                label: "工具定义",
             })
         }
 
@@ -373,17 +373,17 @@ const RecompProgressSection = (props: {
     // run, so a plain /ctx-recomp never renders as an "Upgrade" (dogfood 2026-06-04).
     const verb = () =>
         props.progress.kind === "upgrade"
-            ? "Upgrade"
+            ? "升级"
             : props.progress.kind === "embed"
-              ? "Embed"
-              : "Recomp"
+              ? "嵌入"
+              : "重编译"
     const activeText = () =>
         props.progress.kind === "upgrade"
-            ? "upgrading ⟳"
+            ? "升级中 ⟳"
             : props.progress.kind === "embed"
-              ? "embedding ⟳"
-              : "comparting ⟳"
-    const label = createMemo(() => {
+              ? "嵌入中 ⟳"
+              : "整理中 ⟳"
+const label = createMemo(() => {
         switch (props.progress.phase) {
             case "recomp":
                 return {
@@ -391,9 +391,9 @@ const RecompProgressSection = (props: {
                     color: props.theme.warning,
                 }
             case "migration":
-                return { text: "Migrating memories ⟳", color: props.theme.warning }
+                return { text: "迁移记忆中 ⟳", color: props.theme.warning }
             case "done":
-                return { text: `✓ ${verb()} complete`, color: props.theme.success ?? props.theme.accent }
+                return { text: `✓ ${verb()} 完成`, color: props.theme.success ?? props.theme.accent }
             case "skipped":
                 // Neutral terse status next to the bold verb header; the full,
                 // self-contained reason (lease-busy "try again shortly" vs a
@@ -401,9 +401,9 @@ const RecompProgressSection = (props: {
                 // line below. Don't re-prepend verb here (it's already the bold
                 // header — doing so read as "EmbedEmbed"), and don't hardcode
                 // "retry shortly" (wrong for a partial stall).
-                return { text: "stopped", color: props.theme.textMuted }
+                return { text: "已停止", color: props.theme.textMuted }
             case "failed":
-                return { text: `✗ ${verb()} failed`, color: props.theme.error }
+                return { text: `✗ ${verb()} 失败`, color: props.theme.error }
         }
     })
 
@@ -431,16 +431,16 @@ const RecompProgressSection = (props: {
             {phase() === "recomp" && props.progress.kind !== "embed" && (
                 <StatRow
                     theme={props.theme}
-                    label="Compartments"
-                    value={`${props.progress.compartmentsCreated} (${props.progress.passCount} pass${props.progress.passCount === 1 ? "" : "es"})`}
+                    label="隔间"
+                    value={`${props.progress.compartmentsCreated} (${props.progress.passCount} 遍${props.progress.passCount === 1 ? "" : ""})`}
                     dim
                 />
             )}
             {phase() === "recomp" && props.progress.kind === "embed" && (
                 <StatRow
                     theme={props.theme}
-                    label="Compartments"
-                    value={`${props.progress.processedMessages}/${props.progress.totalMessages} embedded`}
+                    label="隔间"
+                    value={`${props.progress.processedMessages}/${props.progress.totalMessages} 嵌入`}
                     dim
                 />
             )}
@@ -739,15 +739,15 @@ const SidebarContent = (props: {
                         bold/accent — they're a glanceable summary, so the label
                         and value share the muted tone (matches Memories row). */}
                     <box width="100%" flexDirection="row" justifyContent="space-between">
-                        <text fg={props.theme.textMuted}>Historian</text>
+                        <text fg={props.theme.textMuted}>历史学家</text>
                         {s()?.historianRunning ? (
-                            <text fg={props.theme.warning}>comparting ⟳</text>
+                            <text fg={props.theme.warning}>整理中 ⟳</text>
                         ) : (
-                            <text fg={props.theme.textMuted}>idle</text>
+                            <text fg={props.theme.textMuted}>空闲</text>
                         )}
                     </box>
                     <box width="100%" flexDirection="row" justifyContent="space-between">
-                        <text fg={props.theme.textMuted}>Memories</text>
+                        <text fg={props.theme.textMuted}>记忆</text>
                         <text fg={props.theme.textMuted}>
                             {(s()?.memoryBlockCount ?? 0) > 0
                                 ? `${s()!.memoryBlockCount}/${s()?.memoryCount ?? 0}`
@@ -755,7 +755,7 @@ const SidebarContent = (props: {
                         </text>
                     </box>
                     <box width="100%" flexDirection="row" justifyContent="space-between">
-                        <text fg={props.theme.textMuted}>Status</text>
+                        <text fg={props.theme.textMuted}>状态</text>
                         <text fg={props.theme.textMuted}>
                             C:{s()?.compartmentCount ?? 0} Q:{s()?.pendingOpsCount ?? 0} N:{s()?.sessionNoteCount ?? 0}
                         </text>
@@ -776,22 +776,22 @@ const SidebarContent = (props: {
                 <>
             <box width="100%" marginTop={1} flexDirection="row" justifyContent="space-between">
                 <text fg={props.theme.text}>
-                    <b>Historian</b>
+                    <b>历史学家</b>
                 </text>
                 {s()?.historianRunning ? (
-                    <text fg={props.theme.warning}>comparting ⟳</text>
+                    <text fg={props.theme.warning}>整理中 ⟳</text>
                 ) : (
-                    <text fg={props.theme.textMuted}>idle</text>
+                    <text fg={props.theme.textMuted}>空闲</text>
                 )}
             </box>
             <StatRow
                 theme={props.theme}
-                label="Compartments"
+                label="隔间"
                 value={String(s()?.compartmentCount ?? 0)}
             />
             <StatRow
                 theme={props.theme}
-                label="Facts"
+                label="事实"
                 value={String(s()?.factCount ?? 0)}
             />
 
@@ -807,17 +807,17 @@ const SidebarContent = (props: {
             {/* Memory section */}
             {sections().memory && (
                 <>
-            <SectionHeader theme={props.theme} title="Memory" />
+            <SectionHeader theme={props.theme} title="记忆" />
             <StatRow
                 theme={props.theme}
-                label="Memories"
+                label="记忆"
                 value={String(s()?.memoryCount ?? 0)}
                 accent
             />
             {(s()?.memoryBlockCount ?? 0) > 0 && (
                 <StatRow
                     theme={props.theme}
-                    label="Injected"
+                    label="已注入"
                     value={String(s()!.memoryBlockCount)}
                     dim
                 />
@@ -831,28 +831,28 @@ const SidebarContent = (props: {
                 (s()?.sessionNoteCount ?? 0) > 0 ||
                 (s()?.readySmartNoteCount ?? 0) > 0) && (
                 <>
-                    <SectionHeader theme={props.theme} title="Status" />
+                    <SectionHeader theme={props.theme} title="状态" />
                     {(s()?.pendingOpsCount ?? 0) > 0 && (
                         <StatRow
                             theme={props.theme}
-                            label="Queue"
-                            value={`${s()!.pendingOpsCount} pending`}
+                            label="队列"
+                            value={`${s()!.pendingOpsCount} 待处理`}
                             warning
                         />
                     )}
                     {(s()?.sessionNoteCount ?? 0) > 0 && (
                         <StatRow
                             theme={props.theme}
-                            label="Notes"
-                            value={String(s()!.sessionNoteCount)}
+label="笔记"
+                        value={String(s()!.sessionNoteCount)}
                         />
                     )}
                     {(s()?.readySmartNoteCount ?? 0) > 0 && (
                         <StatRow
                             theme={props.theme}
-                            label="Smart Notes"
-                            value={`${s()!.readySmartNoteCount} ready`}
-                            accent
+label="智能笔记"
+                        value={`${s()!.readySmartNoteCount} 就绪`}
+                        accent
                         />
                     )}
                 </>
@@ -861,10 +861,10 @@ const SidebarContent = (props: {
             {/* Dreamer */}
             {sections().dreamer && s()?.lastDreamerRunAt && (
                 <>
-                    <SectionHeader theme={props.theme} title="Dreamer" />
+                    <SectionHeader theme={props.theme} title="梦想家" />
                     <StatRow
                         theme={props.theme}
-                        label="Last run"
+                        label="上次运行"
                         value={relativeTime(s()!.lastDreamerRunAt!)}
                         dim
                     />
@@ -879,10 +879,10 @@ const SidebarContent = (props: {
                 simplified for now. */}
             {sections().stats && s()?.totalInputTokens != null && (
                 <>
-                    <SectionHeader theme={props.theme} title="Stats" />
+                    <SectionHeader theme={props.theme} title="统计" />
                     <StatRow
                         theme={props.theme}
-                        label="Total tokens"
+                        label="总令牌数"
                         value={compactTokens(s()!.totalInputTokens ?? 0)}
                         dim
                     />

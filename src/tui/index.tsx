@@ -56,22 +56,22 @@ function showToast(
 function showConflictDialog(api: TuiPluginApi, directory: string, reasons: string[], conflicts: ReturnType<typeof detectConflicts>["conflicts"]) {
     api.ui.dialog.replace(() => (
         <api.ui.DialogConfirm
-            title="⚠️ Magic Context Disabled"
-            message={`${reasons.join("\n")}\n\nFix these conflicts automatically?`}
+            title="⚠️ Magic Context 已禁用"
+            message={`${reasons.join("\n")}\n\n是否自动修复这些冲突？`}
             onConfirm={() => {
                 const actions = fixConflicts(directory, conflicts)
                 const actionSummary = actions.length > 0
                     ? actions.map(a => `• ${a}`).join("\n")
-                    : "No changes needed"
+                    : "无需更改"
                 // DialogConfirm calls dialog.clear() after onConfirm, so defer the next dialog
                 setTimeout(() => {
                     api.ui.dialog.replace(() => (
                         <api.ui.DialogAlert
-                            title="✅ Configuration Fixed"
-                            message={`${actionSummary}\n\nPlease restart OpenCode for changes to take effect.`}
+                            title="✅ 配置已修复"
+                            message={`${actionSummary}\n\n请重启 OpenCode 使更改生效。`}
                             onConfirm={() => {
                                 showToast(api, {
-                                    message: "Restart OpenCode to enable Magic Context",
+                                    message: "重启 OpenCode 以启用 Magic Context",
                                     variant: "warning",
                                     durationOverrideMs: 10_000,
                                 })
@@ -81,7 +81,7 @@ function showConflictDialog(api: TuiPluginApi, directory: string, reasons: strin
                 }, 50)
             }}
             onCancel={() => {
-                showToast(api, { message: "Magic Context remains disabled. Run: npx @cortexkit/opencode-magic-context@latest doctor", variant: "warning" })
+                showToast(api, { message: "Magic Context 仍处于禁用状态。请运行: npx @cortexkit/opencode-magic-context@latest doctor", variant: "warning" })
             }}
         />
     ))
@@ -214,7 +214,7 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
         <box flexDirection="column" width="100%" paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
             {/* Title */}
             <box justifyContent="center" width="100%" marginBottom={1} flexDirection="row" gap={2}>
-                <text fg={t().accent}><b>⚡ Magic Context Status</b></text>
+                <text fg={t().accent}><b>⚡ Magic Context 状态</b></text>
                 <text fg={t().textMuted}>v{packageJson.version}</text>
             </box>
 
@@ -227,7 +227,7 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                     <b>{s().usagePercentage.toFixed(1)}%</b> / {formatThresholdPercent(s().executeThreshold)}%
                 </text>
                 <text fg={s().usagePercentage >= 80 ? t().error : s().usagePercentage >= 65 ? t().warning : t().accent}>
-                    {fmt(s().inputTokens)} / {contextLimit() > 0 ? fmt(contextLimit()) : "?"} tokens
+                    {fmt(s().inputTokens)} / {contextLimit() > 0 ? fmt(contextLimit()) : "?"} 令牌
                 </text>
             </box>
 
@@ -264,7 +264,7 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                 const p = s().recompProgress!
                 // Label follows the flow that started the run, so a plain
                 // /ctx-recomp never reads as an "Upgrade" (dogfood 2026-06-04).
-                const verb = p.kind === "upgrade" ? "Upgrade" : p.kind === "embed" ? "Embed" : "Recomp"
+                const verb = p.kind === "upgrade" ? "升级" : p.kind === "embed" ? "嵌入" : "重编译"
                 return (
                 <box marginTop={1} width="100%" flexDirection="column">
                     <text fg={t().text}><b>{verb}</b></text>
@@ -275,22 +275,22 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                             const filled = Math.round(Math.max(0, Math.min(1, frac)) * width)
                             const bar = p.totalMessages > 0
                                 ? `[${"█".repeat(filled)}${"░".repeat(width - filled)}]`
-                                : "(starting…)"
-                            const activeLabel = p.kind === "upgrade" ? "upgrading" : p.kind === "embed" ? "embedding" : "comparting"
+                                : "(启动中…)"
+                            const activeLabel = p.kind === "upgrade" ? "升级中" : p.kind === "embed" ? "嵌入中" : "整理中"
                             return (
                                 <>
                                     <R t={t()} l={activeLabel} v={p.totalMessages > 0 ? `${bar} ${Math.round(frac * 100)}%` : bar} fg={t().warning} />
-                                    {p.note ? <R t={t()} l="Status" v={p.note} fg={t().textMuted} /> : null}
+                                    {p.note ? <R t={t()} l="状态" v={p.note} fg={t().textMuted} /> : null}
                                     {p.kind === "embed"
-                                        ? <R t={t()} l="Compartments" v={`${p.processedMessages}/${p.totalMessages} embedded`} fg={t().textMuted} />
-                                        : <R t={t()} l="Compartments" v={`${p.compartmentsCreated} (${p.passCount} pass${p.passCount === 1 ? "" : "es"})`} fg={t().textMuted} />}
+                                        ? <R t={t()} l="隔间" v={`${p.processedMessages}/${p.totalMessages} 已嵌入`} fg={t().textMuted} />
+                                        : <R t={t()} l="隔间" v={`${p.compartmentsCreated} (${p.passCount} 遍)`} fg={t().textMuted} />}
                                 </>
                             )
                         }
-                        if (p.phase === "migration") return <R t={t()} l="Status" v={p.note ?? "Migrating memories ⟳"} fg={t().warning} />
-                        if (p.phase === "done") return <R t={t()} l="Status" v={`✓ ${verb} complete`} fg={t().accent} />
-                        if (p.phase === "skipped") return <R t={t()} l="Status" v={p.message ?? `${verb} stopped early`} fg={t().textMuted} />
-                        return <R t={t()} l="Status" v={`✗ ${verb} failed${p.message ? `: ${p.message}` : ""}`} fg={t().error} />
+                        if (p.phase === "migration") return <R t={t()} l="状态" v={p.note ?? "迁移记忆中 ⟳"} fg={t().warning} />
+                        if (p.phase === "done") return <R t={t()} l="状态" v={`✓ ${verb} 完成`} fg={t().accent} />
+                        if (p.phase === "skipped") return <R t={t()} l="状态" v={p.message ?? `${verb} 提前停止`} fg={t().textMuted} />
+                        return <R t={t()} l="状态" v={`✗ ${verb} 失败${p.message ? `: ${p.message}` : ""}`} fg={t().error} />
                     })()}
                 </box>
                 )
@@ -300,46 +300,44 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
             <box flexDirection="row" width="100%" marginTop={1} gap={4}>
                 {/* Left column */}
                 <box flexDirection="column" flexGrow={1} flexBasis={0}>
-                    <text fg={t().text}><b>Tags</b></text>
-                    <R t={t()} l="Active" v={`${s().activeTags} (~${fmtBytes(s().activeBytes)})`} />
-                    <R t={t()} l="Dropped" v={String(s().droppedTags)} />
-                    <R t={t()} l="Total" v={String(s().totalTags)} fg={t().textMuted} />
+                    <text fg={t().text}><b>标签</b></text>
+                    <R t={t()} l="活跃" v={`${s().activeTags} (~${fmtBytes(s().activeBytes)})`} />
+                    <R t={t()} l="已丢弃" v={String(s().droppedTags)} />
+                    <R t={t()} l="总计" v={String(s().totalTags)} fg={t().textMuted} />
                     <box marginTop={1}>
-                        <text fg={t().text}><b>Pending Queue</b></text>
+                        <text fg={t().text}><b>待处理队列</b></text>
                     </box>
-                    <R t={t()} l="Drops" v={String(s().pendingOpsCount)} fg={s().pendingOpsCount > 0 ? t().warning : t().textMuted} />
+                    <R t={t()} l="丢弃数" v={String(s().pendingOpsCount)} fg={s().pendingOpsCount > 0 ? t().warning : t().textMuted} />
                     <box marginTop={1}>
-                        <text fg={t().text}><b>Cache TTL</b></text>
+                        <text fg={t().text}><b>缓存 TTL</b></text>
                     </box>
-                    <R t={t()} l="Configured" v={s().cacheTtl} />
-                    <R t={t()} l="Last response" v={s().lastResponseTime > 0 ? `${Math.round(elapsed() / 1000)}s ago` : "never"} />
-                    <R t={t()} l="Remaining" v={s().cacheExpired ? "expired" : `${Math.round(s().cacheRemainingMs / 1000)}s`} fg={s().cacheExpired ? t().warning : t().textMuted} />
-                    <R t={t()} l="Auto-execute" v={s().cacheExpired ? "yes (expired)" : `at TTL or ≥${formatThresholdPercent(s().executeThreshold)}%`} fg={t().textMuted} />
+                    <R t={t()} l="已配置" v={s().cacheTtl} />
+                    <R t={t()} l="上次响应" v={s().lastResponseTime > 0 ? `${Math.round(elapsed() / 1000)}秒前` : "从未"} />
+                    <R t={t()} l="剩余" v={s().cacheExpired ? "已过期" : `${Math.round(s().cacheRemainingMs / 1000)}秒`} fg={s().cacheExpired ? t().warning : t().textMuted} />
+                    <R t={t()} l="自动执行" v={s().cacheExpired ? "是（已过期）" : `在 TTL 或 ≥${formatThresholdPercent(s().executeThreshold)}% 时`} fg={t().textMuted} />
                     <box marginTop={1}>
-                        <text fg={t().text}><b>Memory</b></text>
+                        <text fg={t().text}><b>记忆</b></text>
                     </box>
-                    <R t={t()} l="Active" v={String(s().memoryCount)} fg={t().accent} />
-                    <R t={t()} l="Injected" v={String(s().memoryBlockCount)} fg={t().textMuted} />
+                    <R t={t()} l="活跃" v={String(s().memoryCount)} fg={t().accent} />\n                    <R t={t()} l="已注入" v={String(s().memoryBlockCount)} fg={t().textMuted} />
                 </box>
                 {/* Right column */}
                 <box flexDirection="column" flexGrow={1} flexBasis={0}>
-                    <text fg={t().text}><b>Reductions</b></text>
-                    <R t={t()} l="Execute threshold" v={`${formatThresholdPercent(s().executeThreshold)}%`} />
-                    <R t={t()} l="Last reduce anchor" v={`${fmt(s().lastNudgeTokens)} tok`} />
+                    <text fg={t().text}><b>缩减</b></text>
+                    <R t={t()} l="执行阈值" v={`${formatThresholdPercent(s().executeThreshold)}%`} />
+                    <R t={t()} l="上次缩减锚点" v={`${fmt(s().lastNudgeTokens)} 令牌`} />
                     <box marginTop={1}>
-                        <text fg={t().text}><b>Context Details</b></text>
+                        <text fg={t().text}><b>上下文详情</b></text>
                     </box>
-                    <R t={t()} l="Protected tags" v={String(s().protectedTagCount)} fg={t().textMuted} />
-                    <R t={t()} l="Subagent" v={s().isSubagent ? "yes" : "no"} fg={t().textMuted} />
+                    <R t={t()} l="受保护标签" v={String(s().protectedTagCount)} fg={t().textMuted} />\n                    <R t={t()} l="子代理" v={s().isSubagent ? "是" : "否"} fg={t().textMuted} />
                     <box marginTop={1}>
-                        <text fg={t().text}><b>History Compression</b></text>
+                        <text fg={t().text}><b>历史压缩</b></text>
                     </box>
-                    <R t={t()} l="History block" v={`~${fmt(s().historyBlockTokens)} tok`} />
+                    <R t={t()} l="历史块" v={`~${fmt(s().historyBlockTokens)} 个令牌`} />
                     {s().compressionBudget != null && (
-                        <R t={t()} l="Budget" v={`~${fmt(s().compressionBudget!)} tok (${s().compressionUsage} used)`} />
+                        <R t={t()} l="预算" v={`~${fmt(s().compressionBudget!)} 令牌 (${s().compressionUsage} 已使用)`} />
                     )}
                     {s().lastDreamerRunAt && (
-                        <R t={t()} l="Dreamer" v={`last ${relTime(s().lastDreamerRunAt!)}`} fg={t().textMuted} />
+                        <R t={t()} l="梦想家" v={`上次 ${relTime(s().lastDreamerRunAt!)}`} fg={t().textMuted} />
                     )}
                 </box>
             </box>
@@ -353,7 +351,7 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
 
             {/* Footer */}
             <box marginTop={1} justifyContent="flex-end" width="100%">
-                <text fg={t().textMuted}>Esc to close</text>
+                <text fg={t().textMuted}>按 Esc 关闭</text>
             </box>
         </box>
     )
@@ -386,7 +384,7 @@ function getModelKeyFromMessages(api: TuiPluginApi, sessionId: string): string |
 async function showRecompDialog(api: TuiPluginApi, targetSessionId = getSessionId(api)): Promise<boolean> {
     const sessionId = targetSessionId
     if (!sessionId) {
-        showToast(api, { message: "No active session", variant: "warning" })
+        showToast(api, { message: "无活跃会话", variant: "warning" })
         return false
     }
 
@@ -397,24 +395,24 @@ async function showRecompDialog(api: TuiPluginApi, targetSessionId = getSessionI
 
     api.ui.dialog.replace(() => (
         <api.ui.DialogConfirm
-            title="⚠️ Recomp Confirmation"
+            title="⚠️ 重编译确认"
             message={[
                 count === 0
-                    ? "This session has no compartments yet — recomp will build them from raw history."
-                    : `You have ${count} compartments.`,
+                    ? "此会话尚无隔间 — 重编译将从原始历史构建。"
+                    : `您有 ${count} 个隔间。`,
                 "",
-                "Recomp will regenerate all compartments and facts from raw history.",
-                "This may take a long time and consume significant tokens.",
+                "重编译将从原始历史重新生成所有隔间和事实。",
+                "此操作可能耗时较长并消耗大量令牌。",
                 "",
-                "Proceed?",
+                "是否继续？",
             ].join("\n")}
             onConfirm={() => {
                 void requestRecomp(sessionId)
                 kickRecompProgressRefresh()
-                showToast(api, { message: "Recomp requested — historian will start shortly", variant: "info" })
+                showToast(api, { message: "已请求重编译 — 历史学家即将启动", variant: "info" })
             }}
             onCancel={() => {
-                showToast(api, { message: "Recomp cancelled", variant: "info", durationOverrideMs: 3000 })
+                showToast(api, { message: "重编译已取消", variant: "info", durationOverrideMs: 3000 })
             }}
         />
     ))
@@ -436,29 +434,29 @@ function showUpgradeDialog(
 
     if (getSessionId(api) !== sessionId) return false
 
-    const title = resume ? "🎆 Resume the interrupted upgrade?" : "🎆 Historian V2 is released!"
+    const title = resume ? "🎆 恢复中断的升级？" : "🎆 历史学家 V2 已发布！"
     const message = resume
         ? [
-              `An earlier upgrade to the new historian format was interrupted. ${resume.stagedCount} compartment${resume.stagedCount === 1 ? " was" : "s were"} already rebuilt (through message ${resume.stagedThrough}). Resuming continues from where it left off — nothing already rebuilt is reprocessed.`,
+              `之前对新历史学家格式的升级被中断。${resume.stagedCount} 个隔间已重建（到消息 ${resume.stagedThrough}）。恢复将从中断处继续 — 已重建的部分不会重复处理。`,
               "",
-              "Resuming will:",
-              "• Rebuild the remaining compartments into the new layered format",
-              "• Re-organize this project's memories into the new taxonomy (once per project)",
+              "恢复将会：",
+              "• 将剩余隔间重建为新的分层格式",
+              "• 将本项目的记忆重新组织为新的分类体系（每个项目一次）",
               "",
-              "The historian runs in the background and you can keep working. You can also resume via /ctx-session-upgrade later.",
+              "历史学家在后台运行，您可以继续工作。也可以稍后通过 /ctx-session-upgrade 恢复。",
               "",
-              "Resume the upgrade now?",
+              "现在恢复升级？",
           ].join("\n")
         : [
-              "This session's compartments are written by the old historian. The session is still usable with its old compartments, however it's strongly advised to upgrade them to the new format. This means every compartment needs to be reprocessed by the new historian, which might take a while depending on how big your session is.",
+              "此会话的隔间由旧版历史学家生成。会话仍可使用旧隔间，但强烈建议升级到新格式。这意味着每个隔间都需要由新历史学家重新处理，耗时取决于会话大小。",
               "",
-              "Running the upgrade will:",
-              "• Rebuild this session's compartments into the new layered format",
-              "• Re-organize this project's memories into the new taxonomy (once per project)",
+              "运行升级将会：",
+              "• 将本会话的隔间重建为新的分层格式",
+              "• 将本项目的记忆重新组织为新的分类体系（每个项目一次）",
               "",
-              "The historian runs in the background and you can keep working while older compartments are reprocessed. You can also upgrade via /ctx-session-upgrade later.",
+              "历史学家在后台运行，旧隔间处理期间您可以继续工作。也可以稍后通过 /ctx-session-upgrade 升级。",
               "",
-              "Run the upgrade now?",
+              "现在运行升级？",
           ].join("\n")
 
     api.ui.dialog.replace(
@@ -473,8 +471,8 @@ function showUpgradeDialog(
                     kickRecompProgressRefresh()
                     showToast(api, {
                         message: resume
-                            ? "Resuming session upgrade — running in the background"
-                            : "Session upgrade started — running in the background",
+                            ? "恢复会话升级 — 后台运行中"
+                            : "会话升级已启动 — 后台运行中",
                         variant: "info",
                     })
                     // Dismiss the durable reminder ONLY after the upgrade request
@@ -494,7 +492,7 @@ function showUpgradeDialog(
                     // being the only place the TUI path stamps.
                     void dismissUpgradeReminder(sessionId)
                     showToast(api, {
-                        message: "Upgrade skipped — run /ctx-session-upgrade anytime",
+                        message: "升级已跳过 — 可随时运行 /ctx-session-upgrade",
                         variant: "info",
                         durationOverrideMs: 4000,
                     })
@@ -508,7 +506,7 @@ function showUpgradeDialog(
 async function showStatusDialog(api: TuiPluginApi, targetSessionId = getSessionId(api)): Promise<boolean> {
     const sessionId = targetSessionId
     if (!sessionId) {
-        showToast(api, { message: "No active session", variant: "warning" })
+        showToast(api, { message: "无活跃会话", variant: "warning" })
         return false
     }
 
@@ -528,7 +526,7 @@ const EmbedDialog = (props: { api: TuiPluginApi; detail: EmbedDetail }) => {
     return (
         <box flexDirection="column" width="100%" paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
             <box justifyContent="center" width="100%" marginBottom={1}>
-                <text fg={t().accent}><b>Embedding</b></text>
+                <text fg={t().accent}><b>嵌入中</b></text>
             </box>
             {lines().map((line) => (
                 <text fg={t().text}>{line}</text>
@@ -540,7 +538,7 @@ const EmbedDialog = (props: { api: TuiPluginApi; detail: EmbedDetail }) => {
 async function showEmbedDialog(api: TuiPluginApi, targetSessionId = getSessionId(api)): Promise<boolean> {
     const sessionId = targetSessionId
     if (!sessionId) {
-        api.ui.toast({ message: "No active session", variant: "warning" })
+        api.ui.toast({ message: "无活跃会话", variant: "warning" })
         return false
     }
     const directory = api.state.path.directory ?? ""
@@ -609,7 +607,7 @@ function registerCommandPaletteEntries(api: TuiPluginApi): void {
                     {
                         namespace: "palette",
                         name: "magic-context.status",
-                        title: "Magic Context: Status",
+                        title: "Magic Context: 状态",
                         category: "Magic Context",
                         run() {
                             showStatusDialog(api)
@@ -618,7 +616,7 @@ function registerCommandPaletteEntries(api: TuiPluginApi): void {
                     {
                         namespace: "palette",
                         name: "magic-context.recomp",
-                        title: "Magic Context: Recomp",
+                        title: "Magic Context: 重编译",
                         category: "Magic Context",
                         run() {
                             showRecompDialog(api)
@@ -691,7 +689,7 @@ async function showStartupAnnouncement(api: TuiPluginApi): Promise<void> {
 
         const title = `Magic Context v${ann.version}`
         const lines: string[] = [
-            "What's new:",
+            "更新内容：",
             "",
             ...ann.features.map((line) => `  • ${line}`),
         ]
@@ -799,8 +797,8 @@ const tui: TuiPlugin = async (api, _options, meta) => {
             return stillActive() && (await showEmbedDialog(api, requestedSessionId))
         }
         if (action === "show-flush-dialog") {
-            const flushMsg = String(n.payload?.message ?? "Flushed.")
-            return stillActive() && showResultDialog(api, "Flush", flushMsg)
+            const flushMsg = String(n.payload?.message ?? "已刷新。")
+            return stillActive() && showResultDialog(api, "刷新", flushMsg)
         }
         if (action === "show-result-dialog") {
             const title = String(n.payload?.title ?? "Magic Context")
