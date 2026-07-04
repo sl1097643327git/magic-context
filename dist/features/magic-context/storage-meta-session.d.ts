@@ -1,0 +1,7 @@
+import type { Database } from "../../shared/sqlite";
+import type { SessionMeta } from "./types";
+export declare function getOrCreateSessionMeta(db: Database, sessionId: string): SessionMeta;
+export declare function updateSessionMeta(db: Database, sessionId: string, updates: Partial<SessionMeta>): void;
+export declare function advanceToolReclaimWatermark(db: Database, sessionId: string, maxTagNumber: number): void;
+export declare function clearSession(db: Database, sessionId: string): void;
+//# sourceMappingURL=storage-meta-session.d.ts.map
